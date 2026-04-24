@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Atelier</title>
+
+  <!-- Deploy-ready stack:
+         JSX is precompiled server-side via esbuild (host/build.js) and served
+         from /assets/client.js + /modules/<id>/frontend.js. CSS compiled via
+         Tailwind v4 + oxide, served from /assets/styles.css (fonts included).
+         React, ReactDOM, Lucide come from CDN (small, cacheable, stable). -->
+
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/assets/styles.css" />
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
+
+  <!-- Injected by host/server.js per request: window.__ATELIER__ = { mode, modules } -->
+  <script>/*__ATELIER_BOOTSTRAP__*/</script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Primitives, shell, and app bootstrap — an ES module served at /assets/client.js.
+       Attaches Button/Icon/TopBar/… to window so each module's dynamically-imported
+       frontend.js can reach them as bare identifiers via global scope fallthrough. -->
+  <script type="module" src="/assets/client.js"></script>
+</body>
+</html>

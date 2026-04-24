@@ -1,0 +1,488 @@
+/* =========================================================================
+ * Atelier — styles.css
+ *
+ * Compiled by build.js (Tailwind v4 @tailwindcss/node + oxide scanner) and
+ * served at /assets/styles.css. Ported from _design/project/ds/colors_and_type.css.
+ *
+ * Design tokens are declared once in @theme and then available as:
+ *   • CSS custom properties (for inline styles + dynamic values)
+ *   • Tailwind utility classes (bg-*, text-*, font-*, rounded-*, etc.)
+ *
+ * Namespace pattern:
+ *   --color-<name>  → utilities: bg-*, text-*, border-*
+ *   --font-<name>   → utility: font-*
+ *   --text-<size>   → utility: text-*
+ *   --leading-<n>   → utility: leading-*
+ *   --tracking-<n>  → utility: tracking-*
+ *   --radius-<n>    → utility: rounded-*
+ *   --shadow-<n>    → utility: shadow-*
+ *   --ease-<n>      → utility: ease-*
+ *   --duration-<n>  → utility: duration-*
+ *   --animate-<n>   → utility: animate-*
+ *
+ * Short-name @utility aliases are declared for bg-* and border-* so writing
+ * `bg-canvas` or `border-subtle` works without the `bg-bg-*` / `border-border-*`
+ * redundancy you'd otherwise get.
+ * ========================================================================= */
+
+/* Webfonts — Google Fonts. If Atelier licenses custom faces, drop TTFs/WOFF2s
+ * alongside this file and swap to @font-face blocks.
+ *   display : Newsreader (variable)  — humanist serif
+ *   body    : Inter (variable)       — neutral geo-humanist sans
+ *   mono    : JetBrains Mono         — dev-oriented mono
+ *
+ * @import statements must come before any other rules, so both imports live
+ * at the top of the file. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,400&display=swap');
+
+/* Tailwind utilities — REQUIRED. Without this the bg-*, text-*, flex, grid,
+ * etc. classes never get generated and the layout breaks. */
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+ * Keyframes — referenced by @theme animations below and inline style="animation"
+ * ------------------------------------------------------------------------- */
+@keyframes atelier-cursor-blink {
+  0%, 48%   { opacity: 1; }
+  50%, 98%  { opacity: 0; }
+  100%      { opacity: 1; }
+}
+
+@keyframes atelier-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(215, 153, 33, 0.55); }
+  70%  { box-shadow: 0 0 0 7px rgba(215, 153, 33, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(215, 153, 33, 0); }
+}
+
+@keyframes mod-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(14px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ---------------------------------------------------------------------------
+ * Tailwind v4 theme — tokens that generate utility classes
+ * ------------------------------------------------------------------------- */
+@theme {
+  /* ===== Raw Gruvbox palette ===== */
+
+  /* Dark backgrounds, deepest → lightest */
+  --color-gb-bg0-hard: #1d2021;
+  --color-gb-bg0:      #282828;
+  --color-gb-bg0-soft: #32302f;
+  --color-gb-bg1:      #3c3836;
+  --color-gb-bg2:      #504945;
+  --color-gb-bg3:      #665c54;
+  --color-gb-bg4:      #7c6f64;
+
+  /* Cream foregrounds, lightest → darkest */
+  --color-gb-fg0: #fbf1c7;
+  --color-gb-fg1: #ebdbb2;
+  --color-gb-fg2: #d5c4a1;
+  --color-gb-fg3: #bdae93;
+  --color-gb-fg4: #a89984;
+
+  --color-gb-gray: #928374;
+
+  /* Accents — normal (preferred in dark mode) */
+  --color-gb-red:    #cc241d;
+  --color-gb-green:  #98971a;
+  --color-gb-yellow: #d79921;
+  --color-gb-blue:   #458588;
+  --color-gb-purple: #b16286;
+  --color-gb-aqua:   #689d6a;
+  --color-gb-orange: #d65d0e;
+
+  /* Accents — bright (hover/focus, never idle) */
+  --color-gb-red-br:    #fb4934;
+  --color-gb-green-br:  #b8bb26;
+  --color-gb-yellow-br: #fabd2f;
+  --color-gb-blue-br:   #83a598;
+  --color-gb-purple-br: #d3869b;
+  --color-gb-aqua-br:   #8ec07c;
+  --color-gb-orange-br: #fe8019;
+
+  /* Accents — faded (inactive, tags) */
+  --color-gb-red-fd:    #9d0006;
+  --color-gb-green-fd:  #79740e;
+  --color-gb-yellow-fd: #b57614;
+  --color-gb-blue-fd:   #076678;
+  --color-gb-purple-fd: #8f3f71;
+  --color-gb-aqua-fd:   #427b58;
+  --color-gb-orange-fd: #af3a03;
+
+  /* ===== Semantic color tokens ===== */
+
+  /* Surfaces, deepest → highest elevation */
+  --color-bg-canvas:  #282828;             /* workspace canvas */
+  --color-bg-sunken:  #1d2021;             /* wells, terminal panes */
+  --color-bg-raised:  #32302f;             /* rail backgrounds */
+  --color-bg-card:    #3c3836;             /* cards, modules */
+  --color-bg-card-hi: #504945;             /* card hover, selected row */
+  --color-bg-well:    #1d2021;             /* inputs, text areas */
+  --color-bg-float:   rgba(60, 56, 54, 0.94);  /* menus, popovers */
+  --color-bg-scrim:   rgba(29, 32, 33, 0.60);  /* command-palette scrim */
+
+  /* Foreground text, display → meta */
+  --color-fg-display:   #fbf1c7;
+  --color-fg-primary:   #ebdbb2;
+  --color-fg-secondary: #d5c4a1;
+  --color-fg-muted:     #a89984;
+  --color-fg-subtle:    #928374;
+  --color-fg-on-accent: #1d2021;
+
+  /* Borders */
+  --color-border-subtle:  #3c3836;
+  --color-border-default: #504945;
+  --color-border-strong:  #665c54;
+  --color-border-focus:   #d79921;
+
+  /* Brand accent — amber primary, aqua secondary */
+  --color-accent-primary:      #d79921;
+  --color-accent-primary-hi:   #fabd2f;
+  --color-accent-primary-lo:   #b57614;
+  --color-accent-primary-wash: rgba(215, 153, 33, 0.12);
+
+  --color-accent-secondary:      #689d6a;
+  --color-accent-secondary-hi:   #8ec07c;
+  --color-accent-secondary-lo:   #427b58;
+  --color-accent-secondary-wash: rgba(104, 157, 106, 0.12);
+
+  /* Semantic signals */
+  --color-signal-success: #98971a;
+  --color-signal-warning: #d79921;
+  --color-signal-danger:  #cc241d;
+  --color-signal-info:    #458588;
+
+  --color-signal-success-wash: rgba(152, 151, 26, 0.12);
+  --color-signal-warning-wash: rgba(215, 153, 33, 0.12);
+  --color-signal-danger-wash:  rgba(204, 36, 29, 0.12);
+  --color-signal-info-wash:    rgba(69, 133, 136, 0.12);
+
+  /* ===== Type system ===== */
+
+  --font-display: 'Newsreader', 'Iowan Old Style', 'Palatino', Georgia, serif;
+  --font-sans:    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', 'Menlo', 'Consolas', monospace;
+
+  /* Type scale — named by px (anchored at 14). Use arbitrary text-[10.5px] for in-between. */
+  --text-9:  9px;
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-16: 16px;
+  --text-19: 19px;
+  --text-23: 23px;
+  --text-28: 28px;
+  --text-34: 34px;
+  --text-48: 48px;
+  --text-64: 64px;
+
+  /* Line heights */
+  --leading-tight: 1.15;
+  --leading-snug:  1.30;
+  --leading-body:  1.55;
+  --leading-loose: 1.70;
+
+  /* Letter spacing */
+  --tracking-display: -0.015em;
+  --tracking-body:    -0.005em;
+  --tracking-mono:     0em;
+  --tracking-caps:     0.08em;
+
+  /* ===== Radii (square-leaning) ===== */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* ===== Shadows ===== */
+  --shadow-dock:       0 8px 24px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.20);
+  --shadow-inset-well: inset 0 1px 0 rgba(0, 0, 0, 0.25);
+
+  /* ===== Motion ===== */
+  --ease-enter:  cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-exit:   cubic-bezier(0.4, 0.0, 0.6, 1);
+  --ease-linear: linear;
+
+  --duration-instant: 80ms;
+  --duration-fast:    120ms;
+  --duration-base:    180ms;
+  --duration-slow:    240ms;
+  --duration-enter:   320ms;
+
+  --animate-cursor-blink: atelier-cursor-blink 1.06s steps(1) infinite;
+  --animate-pulse-dot:    atelier-pulse        1.8s var(--ease-enter) infinite;
+}
+
+/* ---------------------------------------------------------------------------
+ * Short-name utility aliases
+ *
+ * By default, Tailwind v4 generates utility class names from the token's
+ * suffix after `--color-`: e.g. `--color-bg-canvas` → `bg-bg-canvas`.
+ * These aliases give us the cleaner `bg-canvas` / `border-subtle` names the
+ * design was authored against, without giving up the semantic var names.
+ * ------------------------------------------------------------------------- */
+@utility bg-canvas  { background-color: var(--color-bg-canvas); }
+@utility bg-sunken  { background-color: var(--color-bg-sunken); }
+@utility bg-raised  { background-color: var(--color-bg-raised); }
+@utility bg-card    { background-color: var(--color-bg-card); }
+@utility bg-card-hi { background-color: var(--color-bg-card-hi); }
+@utility bg-well    { background-color: var(--color-bg-well); }
+@utility bg-float   { background-color: var(--color-bg-float); }
+@utility bg-scrim   { background-color: var(--color-bg-scrim); }
+
+@utility border-subtle  { border-color: var(--color-border-subtle); }
+@utility border-default { border-color: var(--color-border-default); }
+@utility border-strong  { border-color: var(--color-border-strong); }
+@utility border-focus   { border-color: var(--color-border-focus); }
+
+/* ---------------------------------------------------------------------------
+ * Layout dimensions (non-token CSS custom properties)
+ *
+ * These aren't part of @theme because they don't need utility-class
+ * generation. Use them inline: width: var(--rail-w), etc.
+ * ------------------------------------------------------------------------- */
+:root {
+  --rail-w:          240px;
+  --rail-collapsed:  48px;
+  --inspector-w:     320px;
+  --header-h:        44px;
+  --module-header-h: 32px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Base elements — preserve design's authored base styling
+ * ------------------------------------------------------------------------- */
+html, body {
+  background: var(--color-bg-canvas);
+  color: var(--color-fg-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: var(--leading-body);
+  letter-spacing: var(--tracking-body);
+  font-feature-settings: 'ss01', 'cv11', 'calt';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  margin: 0;
+}
+
+/* Film grain — warms the dark, hides banding */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.025;
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  mix-blend-mode: overlay;
+}
+
+/* Headings — Newsreader serif used sparingly */
+h1, .h1 {
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 400;
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  color: var(--color-fg-display);
+  margin: 0;
+}
+h2, .h2 {
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 400;
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  color: var(--color-fg-display);
+  margin: 0;
+}
+h3, .h3 {
+  font-family: var(--font-sans);
+  font-size: 19px;
+  font-weight: 600;
+  line-height: var(--leading-snug);
+  color: var(--color-fg-display);
+  margin: 0;
+}
+h4, .h4 {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: var(--leading-snug);
+  color: var(--color-fg-display);
+  margin: 0;
+}
+h5, .h5 {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: var(--leading-snug);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--color-fg-muted);
+  margin: 0;
+}
+
+.display {
+  font-family: var(--font-display);
+  font-size: 48px;
+  font-weight: 400;
+  font-style: italic;
+  line-height: 1.05;
+  letter-spacing: var(--tracking-display);
+  color: var(--color-fg-display);
+}
+.hero {
+  font-family: var(--font-display);
+  font-size: 64px;
+  font-weight: 400;
+  line-height: 1.02;
+  letter-spacing: -0.025em;
+  color: var(--color-fg-display);
+}
+
+p, .body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: var(--leading-body);
+  color: var(--color-fg-primary);
+  margin: 0;
+}
+.body-lg { font-size: 16px; line-height: var(--leading-body); }
+.body-sm {
+  font-size: 12px;
+  line-height: var(--leading-snug);
+  color: var(--color-fg-secondary);
+}
+
+.meta {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  letter-spacing: 0;
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-caps);
+  text-transform: lowercase;
+  color: var(--color-fg-muted);
+}
+
+code, kbd, samp, .mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-fg-primary);
+  font-feature-settings: 'zero', 'ss02';
+}
+code {
+  background: var(--color-bg-well);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-xs);
+  padding: 1px 5px;
+  color: var(--color-accent-secondary-hi);
+}
+kbd {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-default);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  padding: 1px 5px;
+  font-size: 11px;
+  color: var(--color-fg-secondary);
+  box-shadow: var(--shadow-inset-well);
+}
+
+.numeral {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  color: var(--color-fg-display);
+}
+
+a {
+  color: var(--color-accent-secondary-hi);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color var(--duration-fast) var(--ease-enter),
+              color var(--duration-fast) var(--ease-enter);
+}
+a:hover {
+  color: var(--color-accent-secondary-hi);
+  border-bottom-color: var(--color-accent-secondary);
+}
+a:focus-visible {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+::selection {
+  background: var(--color-accent-primary-wash);
+  color: var(--color-fg-display);
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-gb-bg2);
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-gb-bg3);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* ---------------------------------------------------------------------------
+ * Small atoms (plain CSS — not worth generating utilities for)
+ * ------------------------------------------------------------------------- */
+.cursor {
+  display: inline-block;
+  width: 0.55ch;
+  height: 1em;
+  vertical-align: -0.12em;
+  background: var(--color-accent-primary);
+  margin-left: 1px;
+  animation: atelier-cursor-blink 1.06s steps(1) infinite;
+}
+
+.dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-fg-muted);
+  vertical-align: middle;
+}
+.dot--ok     { background: var(--color-signal-success); box-shadow: 0 0 0 3px var(--color-signal-success-wash); }
+.dot--warn   { background: var(--color-signal-warning); box-shadow: 0 0 0 3px var(--color-signal-warning-wash); }
+.dot--danger { background: var(--color-signal-danger);  box-shadow: 0 0 0 3px var(--color-signal-danger-wash); }
+.dot--info   { background: var(--color-signal-info);    box-shadow: 0 0 0 3px var(--color-signal-info-wash); }
+.dot--idle   { background: var(--color-fg-muted); }
+
+/* Dotted grid background — empty module slots */
+.grid-bg {
+  background-image: radial-gradient(circle, var(--color-gb-bg2) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: 0 0;
+}

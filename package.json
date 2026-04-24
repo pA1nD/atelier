@@ -1,0 +1,23 @@
+{
+  "name": "atelier",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "PORT=5173 node server.js",
+    "dev:module": "PORT=5173 node server.js",
+    "atelier": "node atelier.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@tailwindcss/cli": "^4.2.4",
+    "esbuild": "^0.28.0",
+    "tailwindcss": "^4.2.4"
+  },
+  "devDependencies": {
+    "dev-browser": "^0.2.7",
+    "playwriter": "^0.1.0"
+  }
+}
