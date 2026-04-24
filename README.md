@@ -94,12 +94,12 @@ export default {
 };
 ```
 
-**Optional skills** — `<module>/skills/<skill-name>/SKILL.md`. A skill is a markdown file with YAML frontmatter. Two scopes:
+**Optional skills** — `<module>/.claude/skills/<skill-name>/SKILL.md`. This is the same path Claude Code natively loads when the module directory is the workspace, so for dev just `cd <module> && claude` and the skill is live — no install step, no symlink. A skill is a markdown file with YAML frontmatter. Two scopes:
 
 | Frontmatter                | Behavior on `npm run atelier -- install <module>` |
 |---------------------------|-----|
-| `scope: global`           | Copied to `~/.claude/skills/<skill-name>/` so any Claude session on this machine can load it. Removed from there on `uninstall <module>`. |
-| *(missing or anything else)* | Stays bundled with the module at `~/.atelier/<module>/skills/`. Useful for module-local tooling that only the app (or a backend agent) needs. |
+| `scope: global`           | Also copied to `~/.claude/skills/<skill-name>/` so any Claude session on this machine can load it. Removed from there on `uninstall <module>`. |
+| *(missing or anything else)* | Stays bundled with the module at `~/.atelier/<module>/.claude/skills/`. Available when someone opens Claude Code inside that module directory; not visible to other sessions. |
 
 Example:
 
@@ -107,10 +107,20 @@ Example:
 kanban/
 ├── frontend.jsx
 ├── backend.js
-└── skills/
-    └── atelier-kanban/
-        └── SKILL.md         ← frontmatter includes `scope: global`
+├── README.md               ← documents the dev recipe below
+└── .claude/
+    └── skills/
+        └── atelier-kanban/
+            └── SKILL.md    ← frontmatter includes `scope: global`
 ```
+
+**Skills route via `$ATELIER_URL`.** The canonical pattern inside a `SKILL.md` is:
+
+```bash
+URL=${ATELIER_URL:-http://atelier:1844}
+```
+
+Prod is the default. During dev, the module's README should show how to opt into a dev server — usually `cd <module>; ATELIER_URL=http://localhost:5173 claude "…"`.
 
 ## Hot reload
 

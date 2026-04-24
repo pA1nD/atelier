@@ -183,12 +183,14 @@ function deployModule(name) {
   log(`  + ${name}${n ? ` (+${n} global skill${n > 1 ? 's' : ''})` : ''}`);
 }
 
-/* Modules can ship skills at <module>/skills/<name>/SKILL.md. A skill with
- * `scope: global` in its frontmatter is copied to ~/.claude/skills/<name>/
- * so any Claude session can load it. Skills without `scope: global` stay
- * bundled with the module and aren't exposed beyond it. */
+/* Modules can ship skills at <module>/.claude/skills/<name>/SKILL.md — the
+ * same path Claude Code auto-loads when the module directory is the workspace
+ * (for dev: `cd <module> && claude`). A skill with `scope: global` in its
+ * frontmatter is also copied to ~/.claude/skills/<name>/ at install time so
+ * any Claude session on the machine can load it. Skills without `scope:
+ * global` stay bundled with the module. */
 function listModuleSkills(name) {
-  const dir = path.join(INSTALL, name, 'skills');
+  const dir = path.join(INSTALL, name, '.claude', 'skills');
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir)
     .map((n) => ({ name: n, dir: path.join(dir, n) }))

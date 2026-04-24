@@ -24,7 +24,6 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getJsx, getCss } from './atelier.js';
@@ -351,44 +350,4 @@ server.on('error', (e) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`  http://localhost:${PORT}\n`);
-  writeDiscoveryFile();
 });
-
-/* Discovery: ~/.atelier/url advertises a running server's URL + workspace.
- *
- * Only the **dev** server writes it — the install has a fixed URL
- * (http://atelier:1844/) and skills hardcode that as a fallback, so the
- * installed server doesn't need discovery. Meanwhile dev can be on any
- * port (PORT=5173 default, any override) so agents can't guess.
- *
- * Precedence: dev wins when running. A skill's pattern is:
- *   URL=$(head -1 ~/.atelier/url 2>/dev/null || echo http://atelier:1844)
- */
-const DISCOVERY_PATH = path.join(os.homedir(), '.atelier', 'url');
-const IS_INSTALLED = HOST_DIR === path.join(os.homedir(), '.atelier', 'atelier');
-
-function writeDiscoveryFile() {
-  if (IS_INSTALLED) return;
-  try {
-    fs.mkdirSync(path.dirname(DISCOVERY_PATH), { recursive: true });
-    fs.writeFileSync(
-      DISCOVERY_PATH,
-      `http://localhost:${PORT}\nworkspace: ${ROOT}\n`,
-      { mode: 0o600 }
-    );
-  } catch (err) {
-    console.warn(`  ! couldn't write ${DISCOVERY_PATH}: ${err.message}`);
-  }
-}
-
-function removeDiscoveryFile() {
-  if (IS_INSTALLED) return;
-  try { fs.unlinkSync(DISCOVERY_PATH); } catch {}
-}
-
-for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => {
-    removeDiscoveryFile();
-    process.exit(0);
-  });
-}

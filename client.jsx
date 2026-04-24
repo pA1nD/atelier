@@ -166,7 +166,12 @@ function LeftRail({
 }) {
   if (collapsed) return null;
   return (
-    <aside className="flex-none flex flex-col overflow-hidden border-r border-subtle bg-raised w-[var(--rail-w)]">
+    <aside
+      className={[
+        'flex flex-col overflow-hidden border-r border-subtle bg-raised',
+        'flex-none w-[var(--rail-w)]',
+      ].join(' ')}
+    >
       <div className="flex-none flex items-center gap-2 px-3 h-10 border-b border-subtle">
         <span
           className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-xs font-mono text-[10px] font-semibold bg-accent-primary-wash text-accent-primary-hi"
