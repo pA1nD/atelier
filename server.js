@@ -25,7 +25,9 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
+import chokidar from 'chokidar';
 import { getJsx, getCss } from './atelier.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -34,6 +36,14 @@ const PORT = parseInt(process.env.PORT || '1844', 10);
 
 const [, , requestedId] = process.argv;
 const MODE = requestedId ? 'standalone' : 'host';
+
+// "dev" is any atelier NOT running from ~/.atelier/atelier (i.e. anywhere
+// other than the installed production copy). Used to badge the UI and
+// passed to module backends via ctx.env so each module can tune its own
+// behavior — e.g. the agents supervisor self-disables in dev by default.
+const INSTALL_ROOT = path.join(process.env.HOME || '', '.atelier', 'atelier');
+const IS_DEV = HOST_DIR !== INSTALL_ROOT;
+const ENV = IS_DEV ? 'dev' : 'prod';
 
 // ------------------------------------------------------------------------
 // Router — tiny path+method matcher with req.json / res.json helpers
@@ -59,7 +69,14 @@ function createRouter() {
 
   function add(method, pathPattern, handler) {
     const { re, paramNames } = compile(pathPattern);
-    routes.push({ method, re, paramNames, handler });
+    const entry = { method, re, paramNames, handler };
+    routes.push(entry);
+    return entry;
+  }
+
+  function remove(entry) {
+    const i = routes.indexOf(entry);
+    if (i >= 0) routes.splice(i, 1);
   }
 
   async function handle(req, res) {
@@ -92,9 +109,11 @@ function createRouter() {
   }
 
   return {
-    get:  (p, h) => add('GET',  p, h),
-    post: (p, h) => add('POST', p, h),
+    get:  (p, h) => { add('GET',  p, h); },
+    post: (p, h) => { add('POST', p, h); },
     handle,
+    _add: add,        // returns the entry — used by per-module scopes
+    _remove: remove,  // used on hot-swap to strip a module's routes
   };
 }
 
@@ -115,12 +134,13 @@ function readJsonBody(req) {
 // Module discovery — lazy, re-runs on each call
 // ------------------------------------------------------------------------
 
-const SKIP = new Set(['atelier', '_design']);
+const SKIP = new Set(['atelier']);
+const isSpecialDir = (name) => !/^[a-zA-Z0-9]/.test(name);
 
 function discoverModules() {
   const out = [];
   for (const name of fs.readdirSync(ROOT)) {
-    if (name.startsWith('.')) continue;
+    if (isSpecialDir(name)) continue;
     if (SKIP.has(name)) continue;
     const dir = path.join(ROOT, name);
     let stat;
@@ -145,6 +165,61 @@ function getModules() {
   return mods;
 }
 
+// ------------------------------------------------------------------------
+// Module meta extraction — read each module's `export const meta = {...}`
+// at discovery so the bootstrap can seed the rail with icons/names/groups
+// without waiting for the dynamic import on the client. Eliminates the
+// first-paint flicker where grouped modules briefly render ungrouped.
+//
+// How it works: transform the JSX with esbuild, wrap in a data: URL, and
+// dynamic-import it in Node. `meta` is a plain top-level object literal —
+// no React needed at module load — so a Proxy stub for `React` is enough
+// to let `const { useState } = React;` not throw. Cached by file mtime so
+// repeated requests pay the cost once per edit.
+// ------------------------------------------------------------------------
+
+const metaCache = new Map();   // moduleId → { meta, mtimeMs }
+let reactStubbed = false;
+
+function stubReactOnce() {
+  if (reactStubbed) return;
+  globalThis.React = new Proxy({}, { get: () => () => null });
+  reactStubbed = true;
+}
+
+async function readMeta(src) {
+  stubReactOnce();
+  const code = fs.readFileSync(src, 'utf8');
+  const out = await esbuildTransform(code, {
+    loader: 'jsx',
+    format: 'esm',
+    jsx: 'transform',
+    jsxFactory: 'React.createElement',
+    jsxFragment: 'React.Fragment',
+  });
+  const url = 'data:text/javascript;base64,' + Buffer.from(out.code).toString('base64');
+  const mod = await import(url);
+  return mod.meta || {};
+}
+
+async function getModuleMeta(m) {
+  if (!m.hasFrontend) return {};
+  const src = path.join(m.dir, 'frontend.jsx');
+  let mtimeMs;
+  try { mtimeMs = fs.statSync(src).mtimeMs; } catch { return {}; }
+  const cached = metaCache.get(m.id);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.meta;
+  try {
+    const meta = await readMeta(src);
+    metaCache.set(m.id, { meta, mtimeMs });
+    return meta;
+  } catch (err) {
+    console.warn(`  ! meta read failed for ${m.id}: ${err.message}`);
+    metaCache.set(m.id, { meta: {}, mtimeMs });
+    return {};
+  }
+}
+
 // Validate standalone target exists at boot (fail fast if typo).
 if (MODE === 'standalone') {
   const all = discoverModules();
@@ -163,36 +238,182 @@ for (const m of getModules()) {
 if (getModules().length === 0) console.log(`    (no modules yet)`);
 
 // ------------------------------------------------------------------------
-// Backend mounting — lazy, once per module
+// Backend mounting — lazy, per-module, hot-swappable in dev.
+//
+// Each module's `backend.js` is mounted via a scoped router that tracks
+// exactly the routes that module added. Editing the file triggers a
+// per-module reload: the new version is imported first (cache-busted),
+// and only if it imports cleanly does the old version get torn down.
+// A typo in a module keeps the old version running so other modules
+// are unaffected.
+//
+// Module API (existing contract, plus one addition):
+//   export default {
+//     mountRoutes(router, ctx) {
+//       // ... register routes, start timers, open watchers, etc.
+//       return () => { ... };  // optional — called before reload/teardown
+//     }
+//   }
+//
+// If `mountRoutes` returns a function, it's treated as the module's
+// teardown (close watchers, kill children, end SSE clients, remove
+// process.once listeners). Without it, routes still get stripped but
+// module-held state leaks across reloads.
+//
+// Hot-swap is dev-only (see IS_DEV) — prod runs untouched under launchd.
 // ------------------------------------------------------------------------
 
 const router = createRouter();
-const mountedBackends = new Set();
+const mountedBackends = new Map();   // id → { scope, teardown }
+const attemptedBackends = new Set(); // id → tried once via mountPendingBackends
+const backendWatchers = new Map();   // id → fs.FSWatcher
+const pendingReloads = new Map();    // id → debounce timer
+const lastReloadMtime = new Map();   // id → mtimeMs actually processed
+
+function makeCtx(m) {
+  return {
+    id: m.id,
+    name: m.id,
+    env: ENV,
+    dataDir: path.join(m.dir, 'data'),
+    log: (...args) => console.log(`[${m.id}]`, ...args),
+  };
+}
+
+function makeModuleScope() {
+  const mine = [];
+  return {
+    get:  (p, h) => { mine.push(router._add('GET',  p, h)); },
+    post: (p, h) => { mine.push(router._add('POST', p, h)); },
+    _dispose() {
+      for (const e of mine) router._remove(e);
+      mine.length = 0;
+    },
+  };
+}
+
+async function importBackend(m) {
+  // Bundle the module's backend + first-party transitive imports into a
+  // single data-URL ESM chunk and import that. Each bundle produces a new
+  // URL (unique byte content → unique data URL), so Node's import cache
+  // naturally drops old versions when a new version replaces them. This
+  // fixes the "edit parser.js, nothing happens" bug: all first-party
+  // imports are baked in, one import invalidates everything.
+  //
+  // `packages: 'external'` keeps node_modules resolved through Node's
+  // normal cache (we don't want to re-bundle express on every save).
+  // `define` rewrites `import.meta.url` to the original file URL so
+  // modules using `fileURLToPath(import.meta.url)` to locate themselves
+  // at module scope (posts, agents, kanban, extract, dev-tools) keep
+  // working without migration.
+  const entry = path.join(m.dir, 'backend.js');
+  const result = await esbuildBuild({
+    entryPoints: [entry],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    write: false,
+    packages: 'external',
+    sourcemap: 'inline',
+    target: 'node20',
+    logLevel: 'silent',
+    define: { 'import.meta.url': JSON.stringify(pathToFileURL(entry).href) },
+  });
+  const code = result.outputFiles[0].text;
+  const url = 'data:text/javascript;base64,' + Buffer.from(code).toString('base64');
+  const mod = await import(url);
+  const plug = mod.default;
+  if (!plug?.mountRoutes) throw new Error('no default.mountRoutes export');
+  return plug;
+}
+
+function mountPlug(m, plug) {
+  const scope = makeModuleScope();
+  try {
+    const teardown = plug.mountRoutes(scope, makeCtx(m));
+    mountedBackends.set(m.id, { scope, teardown: typeof teardown === 'function' ? teardown : null });
+    return true;
+  } catch (err) {
+    console.error(`  ! ${m.id}.mountRoutes threw: ${err.message}`);
+    scope._dispose();
+    return false;
+  }
+}
+
+async function mountBackend(m) {
+  watchBackend(m);  // always watch so a broken file can be fixed-and-reloaded
+  let plug;
+  try { plug = await importBackend(m); }
+  catch (err) {
+    console.error(`  ! Failed to mount ${m.id}: ${err.message}`);
+    return;
+  }
+  if (mountPlug(m, plug)) console.log(`  + mounted ${m.id} backend`);
+}
+
+async function reloadBackend(m) {
+  let plug;
+  try { plug = await importBackend(m); }
+  catch (err) {
+    console.error(`  ! ${m.id}: reload failed, keeping current version — ${err.message}`);
+    return;
+  }
+  const prev = mountedBackends.get(m.id);
+  if (prev) {
+    try { prev.teardown?.(); } catch (err) { console.warn(`  ! ${m.id}.teardown: ${err.message}`); }
+    prev.scope._dispose();
+  }
+  if (mountPlug(m, plug)) console.log(`  ↻ reloaded ${m.id} backend`);
+}
+
+function watchBackend(m) {
+  if (!IS_DEV) return;                // prod stays untouched
+  if (backendWatchers.has(m.id)) return;
+  // Watch the module dir (not just backend.js) so transitive file edits
+  // — parser.js, helpers.js, whatever backend.js imports — trigger a
+  // reload too. Dir-level watching via chokidar survives atomic saves
+  // (rename-over changes inode), which the previous `fs.watch(file)`
+  // did not — first edit worked, subsequent ones silently died.
+  //
+  // `awaitWriteFinish` waits for the file size to settle before firing,
+  // so a mid-write read can't hit a half-flushed bundle.
+  try {
+    const w = chokidar.watch(m.dir, {
+      ignored: [/node_modules/, /\/data\//, /(^|[\/\\])\./],
+      ignoreInitial: true,
+      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 40 },
+    });
+    const onFile = (p) => { if (p.endsWith('.js')) scheduleReload(m); };
+    w.on('change', onFile).on('add', onFile);
+    backendWatchers.set(m.id, w);
+  } catch (err) {
+    console.warn(`  ! could not watch ${m.id}/: ${err.message}`);
+  }
+}
+
+function scheduleReload(m) {
+  clearTimeout(pendingReloads.get(m.id));
+  pendingReloads.set(m.id, setTimeout(() => {
+    pendingReloads.delete(m.id);
+    // Dedupe by mtime. macOS `fs.watch` on a single file can deliver two
+    // events per save, spaced ~150–200ms apart — outside the debounce
+    // window, so they become two distinct reloads. Reading the mtime here
+    // and comparing to the last one we processed is cheap and robust: real
+    // saves always bump mtime, duplicate events don't.
+    let mtime = 0;
+    try { mtime = fs.statSync(path.join(m.dir, 'backend.js')).mtimeMs; } catch {}
+    if (mtime && mtime === lastReloadMtime.get(m.id)) return;
+    lastReloadMtime.set(m.id, mtime);
+    reloadBackend(m).catch((err) => console.error(`  ! reload ${m.id}: ${err.message}`));
+  }, 150));
+}
 
 async function mountPendingBackends() {
   for (const m of getModules()) {
-    if (!m.hasBackend || mountedBackends.has(m.id)) continue;
-    try {
-      const mod = await import(path.join(m.dir, 'backend.js'));
-      const plug = mod.default;
-      if (!plug?.mountRoutes) {
-        console.warn(`  ! ${m.id}/backend.js has no default.mountRoutes export — skipping`);
-        mountedBackends.add(m.id); // don't retry
-        continue;
-      }
-      const ctx = {
-        id: m.id,
-        name: m.id,
-        dataDir: path.join(m.dir, 'data'),
-        log: (...args) => console.log(`[${m.id}]`, ...args),
-      };
-      plug.mountRoutes(router, ctx);
-      mountedBackends.add(m.id);
-      console.log(`  + mounted ${m.id} backend`);
-    } catch (err) {
-      console.error(`  ! Failed to mount ${m.id}: ${err.message}`);
-      mountedBackends.add(m.id); // don't retry on broken backend
-    }
+    if (!m.hasBackend) continue;
+    if (attemptedBackends.has(m.id)) continue;
+    attemptedBackends.add(m.id);
+    await mountBackend(m);
   }
 }
 
@@ -237,14 +458,18 @@ function cssScanSources() {
 // Index.html — rendered per request with injected bootstrap
 // ------------------------------------------------------------------------
 
-function serveIndex(res) {
+async function serveIndex(res) {
   const template = fs.readFileSync(path.join(HOST_DIR, 'index.html'), 'utf8');
+  const mods = getModules().filter((m) => m.hasFrontend);
+  const metas = await Promise.all(mods.map((m) => getModuleMeta(m)));
   const bootstrap = {
     mode: MODE,
-    modules: getModules().map((m) => ({
+    env: ENV,
+    modules: mods.map((m, i) => ({
       id: m.id,
       name: m.id,
       hasFrontend: m.hasFrontend,
+      meta: metas[i],
     })),
   };
   const html = template.replace(
@@ -272,10 +497,16 @@ function broadcastReload() {
   }, 150);
 }
 
+// Module `data/` dirs hold runtime state (persisted schedules, run archives,
+// incremental crawl output). They change often while the app is running and
+// must NOT trigger HMR — otherwise a long-running extract reloads the browser
+// every few seconds and wipes session state. Same logic for `node_modules`.
+const WATCH_SKIP_SEG = new Set(['data', 'node_modules']);
+
 fs.watch(ROOT, { recursive: true }, (event, filename) => {
   if (!filename) return;
   const segs = filename.split(path.sep);
-  if (segs.some((s) => SKIP.has(s) || s.startsWith('.'))) return;
+  if (segs.some((s) => SKIP.has(s) || WATCH_SKIP_SEG.has(s) || isSpecialDir(s))) return;
   broadcastReload();
 });
 
@@ -299,7 +530,7 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/' || url.pathname === '/index.html') {
     await mountPendingBackends();
-    serveIndex(res);
+    await serveIndex(res);
     return;
   }
 
@@ -332,7 +563,7 @@ const server = http.createServer(async (req, res) => {
   // SPA fallback: a single-segment GET (e.g. /hello, /activity) serves index.
   // The client reads window.location.pathname and picks the matching module.
   if (req.method === 'GET' && /^\/[a-z0-9-]+\/?$/.test(url.pathname)) {
-    serveIndex(res);
+    await serveIndex(res);
     return;
   }
 

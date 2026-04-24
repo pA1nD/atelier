@@ -126,6 +126,53 @@ const URL          = 'http://atelier:1844/';
 
 const RSYNC_EXCLUDES = ['--exclude=.git', '--exclude=node_modules', '--exclude=.DS_Store', '--exclude=*.log'];
 
+/* Extra filters for deploying a module or agent dir. Protects prod runtime
+ * state across install / update — rsync's --delete respects excludes, so
+ * excluded paths at the destination are preserved.
+ *
+ *   /data/              module runtime dir at transfer root (backends write
+ *                       here via ctx.dataDir)
+ *   .claude/            include-first — at ANY depth, ship only definitional
+ *                       files (agent/skill/command/hook defs, CLAUDE.md,
+ *                       settings.json) and drop everything else so runtime
+ *                       state stays resident on prod: agent-memory/,
+ *                       projects/, todos/, plans/, shell-snapshots/,
+ *                       settings.local.json, …
+ *
+ * rsync's `**` doesn't match an empty prefix, so we list each .claude/ rule
+ * twice — once anchored at the transfer root, once with a `**` prefix for
+ * nested .claude/ dirs (e.g. module/skills/my-skill/.claude/). Excluded
+ * dirs like node_modules short-circuit descent, so nested .claude/ inside
+ * them is never considered.
+ *
+ * First-match-wins means include rules must precede the catch-all exclude. */
+const DEPLOY_FILTERS = [
+  '--exclude=/data/',
+
+  // transfer-root .claude/
+  '--include=.claude/agents/',   '--include=.claude/agents/**',
+  '--include=.claude/skills/',   '--include=.claude/skills/**',
+  '--include=.claude/commands/', '--include=.claude/commands/**',
+  '--include=.claude/hooks/',    '--include=.claude/hooks/**',
+  '--include=.claude/CLAUDE.md',
+  '--include=.claude/settings.json',
+  '--exclude=.claude/*',
+
+  // nested .claude/ anywhere deeper in the tree
+  '--include=**/.claude/agents/',   '--include=**/.claude/agents/**',
+  '--include=**/.claude/skills/',   '--include=**/.claude/skills/**',
+  '--include=**/.claude/commands/', '--include=**/.claude/commands/**',
+  '--include=**/.claude/hooks/',    '--include=**/.claude/hooks/**',
+  '--include=**/.claude/CLAUDE.md',
+  '--include=**/.claude/settings.json',
+  '--exclude=**/.claude/*',
+];
+
+/* Non-module dirs that still ship alongside modules. Carved out from the
+ * "special dirs are local-only" rule — agents need to exist in the install
+ * so prod Claude sessions can cd into them. */
+const INSTALL_RESOURCES = ['_agents'];
+
 function log(msg)  { process.stdout.write(msg + '\n'); }
 function step(msg) { log('→ ' + msg); }
 function ok(msg)   { log('✓ ' + msg); }
@@ -145,10 +192,12 @@ function isModuleDir(abs) {
   return fs.existsSync(path.join(abs, 'frontend.jsx')) || fs.existsSync(path.join(abs, 'backend.js'));
 }
 
+const isSpecialDir = (name) => !/^[a-zA-Z0-9]/.test(name);
+
 function discoverSiblings() {
   return fs.readdirSync(WORKSPACE)
     .filter((name) => {
-      if (name.startsWith('.') || name.startsWith('_')) return false;
+      if (isSpecialDir(name)) return false;
       if (name === 'atelier') return false;
       const abs = path.join(WORKSPACE, name);
       try { if (!fs.statSync(abs).isDirectory()) return false; } catch { return false; }
@@ -160,6 +209,7 @@ function installedModules() {
   if (!fs.existsSync(INSTALL)) return [];
   return fs.readdirSync(INSTALL)
     .filter((name) => {
+      if (isSpecialDir(name)) return false;
       if (name === 'atelier') return false;
       const abs = path.join(INSTALL, name);
       try { return fs.statSync(abs).isDirectory(); } catch { return false; }
@@ -178,7 +228,7 @@ function deployModule(name) {
   const src = path.join(WORKSPACE, name);
   if (!fs.existsSync(src)) { warn(`no such module: ${name}`); return; }
   if (!isModuleDir(src))    { warn(`${name} has no frontend.jsx/backend.js — skipping`); return; }
-  sh('rsync', ['-a', '--delete', ...RSYNC_EXCLUDES, src + '/', path.join(INSTALL, name) + '/']);
+  sh('rsync', ['-a', '--delete', ...RSYNC_EXCLUDES, ...DEPLOY_FILTERS, src + '/', path.join(INSTALL, name) + '/']);
   const n = syncGlobalSkills(name);
   log(`  + ${name}${n ? ` (+${n} global skill${n > 1 ? 's' : ''})` : ''}`);
 }
@@ -231,6 +281,32 @@ function deployModules(names) {
   if (names.length === 0) { log('  (no modules)'); return; }
   step('deploying modules: ' + names.join(', '));
   for (const n of names) deployModule(n);
+}
+
+function deployResources() {
+  const present = INSTALL_RESOURCES.filter((n) => fs.existsSync(path.join(WORKSPACE, n)));
+  if (present.length === 0) return;
+  step('deploying resources: ' + present.join(', '));
+  for (const n of present) {
+    sh('rsync', ['-a', '--delete', ...RSYNC_EXCLUDES, ...DEPLOY_FILTERS, path.join(WORKSPACE, n) + '/', path.join(INSTALL, n) + '/']);
+    log('  + ' + n);
+  }
+}
+
+/* The repo's root `.env` holds secrets modules need at runtime — most
+ * notably `TELEGRAM_BOT_TOKEN_<name>` for each agent. Without it shipped to
+ * the install root, the agents supervisor can't find any tokens and
+ * reports "no agents". Keep destination mode 0600 so the tokens aren't
+ * world-readable even on a shared machine. */
+function deployRootEnv() {
+  const src = path.join(WORKSPACE, '.env');
+  if (!fs.existsSync(src)) { warn('no root .env in ' + WORKSPACE + ' — skipping env deploy'); return; }
+  const dst = path.join(INSTALL, '.env');
+  step('deploying root .env → ' + dst);
+  fs.mkdirSync(INSTALL, { recursive: true });
+  fs.copyFileSync(src, dst);
+  fs.chmodSync(dst, 0o600);
+  log('  + .env');
 }
 
 /** Run a shell command as root via macOS's GUI password prompt. No TTY required. */
@@ -286,7 +362,7 @@ function fullNuke() {
   sh('launchctl', ['bootout', `gui/${UID}`, PLIST], { ignore: true });
   if (fs.existsSync(PLIST)) { step('removing plist'); fs.rmSync(PLIST, { force: true }); }
   step('removing /etc/hosts entry (macOS will prompt for your password)');
-  sudoViaOsascript(`sed -i '' '/^127\\.0\\.0\\.1[[:space:]]\\+atelier$/d' /etc/hosts`, 'remove atelier host entry');
+  sudoViaOsascript(`sed -i '' -E '/^127\\.0\\.0\\.1[[:space:]]+atelier$/d' /etc/hosts`, 'remove atelier host entry');
   // Read + remove global skills before the install dir goes away.
   for (const name of installedModules()) removeGlobalSkillsFor(name);
   if (fs.existsSync(INSTALL)) { step('removing ~/.atelier/'); fs.rmSync(INSTALL, { recursive: true, force: true }); }
@@ -309,6 +385,10 @@ async function cmdInstall(mods) {
   bootstrapAgent();
   const targets = mods.length ? mods : discoverSiblings();
   deployModules(targets);
+  if (mods.length === 0) {
+    deployResources();
+    deployRootEnv();
+  }
   ok(URL);
 }
 
@@ -316,8 +396,16 @@ async function cmdUpdate(mods) {
   step('git pull in ' + HERE);
   sh('git', ['-C', HERE, 'pull', '--ff-only']);
   buildAtelier();
-  const targets = mods.length ? mods : installedModules();
+  // "update" defaults to "sync install with the workspace" — every module in
+  // the repo gets deployed, so newly added modules pick up without a separate
+  // install step. Previously this used installedModules() which missed new
+  // modules.
+  const targets = mods.length ? mods : discoverSiblings();
   deployModules(targets);
+  if (mods.length === 0) {
+    deployResources();
+    deployRootEnv();
+  }
   step('kickstarting agent');
   sh('launchctl', ['kickstart', '-k', `gui/${UID}/${AGENT}`]);
   ok(URL);
@@ -336,6 +424,8 @@ async function cmdStatus() {
   if (fs.existsSync(INSTALL_AT)) log('runtime:      ' + INSTALL_AT);
   const mods = installedModules();
   log('modules:      ' + (mods.length ? mods.join(', ') : '(none)'));
+  const res = INSTALL_RESOURCES.filter((n) => fs.existsSync(path.join(INSTALL, n)));
+  if (res.length) log('resources:    ' + res.join(', '));
   log('agent:');
   sh('launchctl', ['print', `gui/${UID}/${AGENT}`], { ignore: true });
 }

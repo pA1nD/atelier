@@ -41,7 +41,27 @@ npm run atelier -- uninstall <name>    # remove it from ~/.atelier/
 npm run atelier -- uninstall
 ```
 
-Boots the agent out, removes the plist, strips the `/etc/hosts` entry, deletes `~/.atelier/`.
+Boots the agent out, removes the plist, strips the `/etc/hosts` entry, deletes `~/.atelier/`. **Destructive** — everything under `~/.atelier/` goes, runtime data included. Copy anything you care about aside first.
+
+## Runtime data stays on prod
+
+`install` and `update` are rsync-based and carve out runtime state so deploys never clobber it. Two rules, both enforced by `DEPLOY_FILTERS` in [atelier.js](./atelier.js):
+
+- **`<module>/data/`** — never shipped, never deleted. Backends write here via `ctx.dataDir` (passed into `mountRoutes`). The dev copy of `data/` isn't deployed; prod files survive every `install` / `update`.
+- **`.claude/` at any depth** — include-first. Only definitional paths ship: `agents/`, `skills/`, `commands/`, `hooks/`, `CLAUDE.md`, `settings.json`. Everything else — `agent-memory/`, `projects/`, `todos/`, `plans/`, `shell-snapshots/`, `settings.local.json`, and any future Claude Code runtime dir — stays resident on prod. The include-first design means anything Claude adds in the future is protected by default.
+
+"At any depth" is literal: the rule fires the same for `<module>/.claude/` at the module root and for `<module>/lib/foo/bar/.claude/` nested deep. `node_modules/` is excluded before descent, so a `.claude/` inside `node_modules/` is never considered.
+
+Deletion semantics track the two rules:
+
+- **Shipped paths → dev wins.** `--delete` removes prod-only files under `.claude/agents/`, `.claude/skills/`, etc. to match the dev tree.
+- **Excluded paths → prod wins.** `data/`, `.claude/agent-memory/`, `.claude/projects/`, and friends are untouched even when dev has no counterpart.
+
+`.env` files are treated as source and ship as-is (e.g. `_agents/<name>/.env` for telegram-paired agents).
+
+The same rules apply to `_agents/<name>/` dirs — they're shaped like modules and filtered identically.
+
+**Contract for module authors:** write runtime state only via `ctx.dataDir`. Put hand-authored Claude Code skills / agents / commands / hooks under `<module>/.claude/...` (any depth) — they'll ship. Don't commit anything from `.claude/agent-memory/` or other runtime dirs; they're treated as prod state and filtered out of deploys anyway.
 
 ## Status
 
@@ -56,11 +76,11 @@ Shows the install paths, the module list, and the LaunchAgent state.
 Iterate against the repo directly — no install needed.
 
 ```
-npm run dev                   # port 5173, hot reload, discovers workspace siblings
+npm run dev                   # port 5172, hot reload, discovers workspace siblings
 npm run dev:module -- <name>  # standalone — only <name>
 ```
 
-Dev (5173) and the installed agent (1844) can run side-by-side.
+Dev (5172) and the installed agent (1844) can run side-by-side.
 
 ## Module convention
 
@@ -120,13 +140,52 @@ kanban/
 URL=${ATELIER_URL:-http://atelier:1844}
 ```
 
-Prod is the default. During dev, the module's README should show how to opt into a dev server — usually `cd <module>; ATELIER_URL=http://localhost:5173 claude "…"`.
+Prod is the default. During dev, the module's README should show how to opt into a dev server — usually `cd <module>; ATELIER_URL=http://localhost:5172 claude "…"`.
 
 ## Hot reload
 
 In dev, the server watches the workspace with `fs.watch` and pushes to the client via SSE (`/_atelier/hot`). Any change — new module folder, edited `.jsx`/`.css` — triggers a full page reload. Editing `server.js` or `atelier.js` still needs a manual restart.
 
 The installed agent does the same over `~/.atelier/`, so `npm run atelier -- update` reloads the browser automatically.
+
+### Per-module backend hot-swap (dev only)
+
+Editing any `<module>/backend.js` re-imports *just that module's* backend — the atelier process keeps running, other modules are untouched. Used when several agents iterate on different modules in parallel; one agent's typo can't crash the others.
+
+The shell:
+- Runs a per-module `fs.watch` on `backend.js` (dev only — prod under launchd stays untouched).
+- On edit, imports the new version with a cache-bust query (`?v=<ts>`).
+- If the import throws, keeps the old version running and logs `reload failed, keeping current version`.
+- If it imports cleanly, strips the old module's routes, calls its teardown (if any), and mounts the new version. Log line: `↻ reloaded <module> backend`.
+
+**Routes are stripped automatically.** The shell tracks exactly which routes each module added (via a scoped router) and removes them on swap.
+
+**Closure state resets automatically.** A cache-busted re-import is a fresh module graph node with its own closure, so module-level variables (e.g. kanban's in-memory board, agents' `children` Map, a subscribers Set) re-initialize. No module code needed.
+
+**Side effects need a teardown.** Anything a module registers *outside* its own closure — `fs.watch` handles, `setInterval` / `setTimeout`, `process.on` listeners, `child_process.spawn`ed children, SSE response objects held by subscribers — survives a re-import. The module must opt into cleaning them up by returning a function from `mountRoutes`:
+
+```js
+export default {
+  mountRoutes(router, ctx) {
+    const watcher = fs.watch(...);
+    const timer  = setInterval(...);
+    process.on('SIGTERM', handle);
+
+    router.get('/api/mine', ...);
+
+    // Optional. Called by the shell before this module is swapped out.
+    return () => {
+      watcher.close();
+      clearInterval(timer);
+      process.removeListener('SIGTERM', handle);
+    };
+  },
+};
+```
+
+Rule of thumb: if your module spawns processes, opens files/sockets, or holds long-lived connections, return a teardown. If it's pure request handlers on closure state, no teardown is needed.
+
+For a worked example see [../agents/backend.js](../agents/backend.js) — it kills supervised children, closes the `_agents/` watcher, ends SSE subscribers, and removes its SIGTERM listeners on teardown.
 
 ## What lives here
 

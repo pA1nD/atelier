@@ -4,13 +4,14 @@
  * ReactDOM, and Lucide (all UMD from CDN — see index.html).
  *
  * Shape:
- *   • Small private helpers (Icon, StatusDot, Spinner) — used by the chrome,
+ *   • Small private helpers (Icon, Spinner) — used by the chrome,
+ *     (StatusDot is commented out below — bring back when modules report status),
  *     never exposed to modules.
  *   • Shell components (AtelierMark, TopBar, LeftRail, RailItem, AppShell).
  *   • App boot — reads window.__ATELIER__, discovers modules, renders.
  *
  * Modules are plain React components: default-export a function, optionally
- * `export const meta = { icon, name, color }`. They get React + Tailwind +
+ * `export const meta = { icon, name, color, group }`. They get React + Tailwind +
  * the browser — that's the whole contract. A boot-time MutationObserver
  * (see wireLucideObserver below) auto-stamps any `<i data-lucide="…">`
  * tag the module renders, so modules don't need to touch lucide either.
@@ -68,31 +69,35 @@ function Icon({ name, size = 16, color, className = '', style }) {
   );
 }
 
-/* StatusDot — halo'd dot used by RailItem for module status. */
-function StatusDot({ kind = 'idle', size = 6, pulse = false, className = '', style }) {
-  const tone = {
-    ok:     { bg: 'var(--color-signal-success)', ring: 'var(--color-signal-success-wash)' },
-    warn:   { bg: 'var(--color-signal-warning)', ring: 'var(--color-signal-warning-wash)' },
-    danger: { bg: 'var(--color-signal-danger)',  ring: 'var(--color-signal-danger-wash)' },
-    info:   { bg: 'var(--color-signal-info)',    ring: 'var(--color-signal-info-wash)' },
-    idle:   { bg: 'var(--color-fg-muted)',       ring: 'transparent' },
-  }[kind] || { bg: 'var(--color-fg-muted)', ring: 'transparent' };
-  return (
-    <span
-      className={[
-        'inline-block rounded-full flex-none align-middle',
-        pulse ? 'animate-pulse-dot' : '',
-        className,
-      ].join(' ')}
-      style={{
-        width: size, height: size,
-        background: tone.bg,
-        boxShadow: tone.ring === 'transparent' ? 'none' : `0 0 0 3px ${tone.ring}`,
-        ...style,
-      }}
-    />
-  );
-}
+/* StatusDot — halo'd dot used by RailItem for module status.
+ * Commented out until modules actually report status; every rail item was
+ * hardcoded to 'idle' so the dots just added visual noise. Restore the
+ * StatusDot usage in RailItem + the `status` field in App()'s rail-item
+ * builder when reviving. */
+// function StatusDot({ kind = 'idle', size = 6, pulse = false, className = '', style }) {
+//   const tone = {
+//     ok:     { bg: 'var(--color-signal-success)', ring: 'var(--color-signal-success-wash)' },
+//     warn:   { bg: 'var(--color-signal-warning)', ring: 'var(--color-signal-warning-wash)' },
+//     danger: { bg: 'var(--color-signal-danger)',  ring: 'var(--color-signal-danger-wash)' },
+//     info:   { bg: 'var(--color-signal-info)',    ring: 'var(--color-signal-info-wash)' },
+//     idle:   { bg: 'var(--color-fg-muted)',       ring: 'transparent' },
+//   }[kind] || { bg: 'var(--color-fg-muted)', ring: 'transparent' };
+//   return (
+//     <span
+//       className={[
+//         'inline-block rounded-full flex-none align-middle',
+//         pulse ? 'animate-pulse-dot' : '',
+//         className,
+//       ].join(' ')}
+//       style={{
+//         width: size, height: size,
+//         background: tone.bg,
+//         boxShadow: tone.ring === 'transparent' ? 'none' : `0 0 0 3px ${tone.ring}`,
+//         ...style,
+//       }}
+//     />
+//   );
+// }
 
 /* Spinner — braille dots, used by LoadingScreen. */
 function Spinner({ color = 'var(--color-accent-primary)', size = 14 }) {
@@ -130,7 +135,7 @@ function AtelierMark({ size = 18 }) {
 }
 
 /* TopBar — 44px chrome with brand + workspace + optional subtitle + right slot. */
-function TopBar({ workspace = 'personal', right, subtitle }) {
+function TopBar({ workspace = 'personal', right, subtitle, env }) {
   return (
     <div className="flex-none flex items-center gap-2.5 px-3 h-[var(--header-h)] border-b border-subtle bg-raised">
       <div className="flex items-center gap-2">
@@ -138,6 +143,18 @@ function TopBar({ workspace = 'personal', right, subtitle }) {
         <span className="font-display italic text-16 text-fg-display tracking-[-0.015em]">
           atelier
         </span>
+        {env === 'dev' && (
+          <span
+            className="font-mono text-[9px] tracking-[0.12em] uppercase px-1.5 py-[2px] rounded-xs border leading-none"
+            style={{
+              color: 'var(--color-signal-warning)',
+              borderColor: 'var(--color-signal-warning)',
+              background: 'var(--color-signal-warning-wash)',
+            }}
+          >
+            dev
+          </span>
+        )}
         <span className="font-mono text-11 text-fg-muted">·</span>
         <span className="font-mono text-11 text-fg-secondary">{workspace}</span>
         {subtitle && (
@@ -153,9 +170,15 @@ function TopBar({ workspace = 'personal', right, subtitle }) {
   );
 }
 
-/* LeftRail — workspace switcher + header label + scrollable module list. */
+/* LeftRail — workspace switcher + header label + scrollable module list.
+ *
+ * Modules split into `ungrouped` (rendered under the default "modules" header,
+ * matching pre-grouping layout) and `groups` (each rendered as its own headered
+ * section). A module joins a group by exporting `meta.group = '<name>'` — the
+ * group header is just that name, lowercased. Groups are optional. */
 function LeftRail({
-  modules,
+  ungrouped,
+  groups,
   activeId,
   onSelect,
   workspace = 'personal',
@@ -165,6 +188,15 @@ function LeftRail({
   collapsed = false,
 }) {
   if (collapsed) return null;
+  const empty = ungrouped.length === 0 && groups.length === 0;
+  const renderItem = (m) => (
+    <RailItem
+      key={m.id}
+      mod={m}
+      active={m.id === activeId}
+      onClick={() => onSelect && onSelect(m.id)}
+    />
+  );
   return (
     <aside
       className={[
@@ -198,20 +230,22 @@ function LeftRail({
       </div>
 
       <div className="flex-1 overflow-auto px-1.5">
-        {modules.length === 0 ? (
+        {empty && (
           <div className="font-mono text-11 text-fg-subtle leading-[1.6] px-1.5 py-1">
             <span className="text-fg-muted">no modules yet.</span>
           </div>
-        ) : (
-          modules.map((m) => (
-            <RailItem
-              key={m.id}
-              mod={m}
-              active={m.id === activeId}
-              onClick={() => onSelect && onSelect(m.id)}
-            />
-          ))
         )}
+        {ungrouped.map(renderItem)}
+        {groups.map((g) => (
+          <div key={g.name}>
+            <div className="flex items-center gap-1.5 pt-3 pb-1 px-1.5">
+              <span className="flex-1 font-mono text-[10px] tracking-caps text-fg-muted lowercase">
+                {g.name}
+              </span>
+            </div>
+            {g.items.map(renderItem)}
+          </div>
+        ))}
       </div>
 
       {footer}
@@ -246,7 +280,7 @@ function RailItem({ mod, active, onClick }) {
       {mod.count != null && (
         <span className="font-mono text-[10px] text-fg-muted">{mod.count}</span>
       )}
-      <StatusDot kind={mod.status} />
+      {/* <StatusDot kind={mod.status} /> */}
     </div>
   );
 }
@@ -289,13 +323,56 @@ if (!window.__atelierHotWired) {
 
 // Load a module's compiled frontend via dynamic ESM import. The module should
 // `export default Module` and may `export const meta = { icon, color, name }`.
+// Returns { status: 'ok'|'error', Module?, meta?, err? } — never null, so
+// consumers can distinguish "still loading" (undefined) from "failed" (error).
 async function loadModule(id) {
   try {
     const mod = await import(`/modules/${id}/frontend.js`);
-    return { Module: mod.default, meta: mod.meta || {} };
+    if (typeof mod.default !== 'function') {
+      throw new Error(`module ${id} has no default export`);
+    }
+    return { status: 'ok', Module: mod.default, meta: mod.meta || {} };
   } catch (err) {
     console.error(`[atelier] failed to load module '${id}':`, err);
-    return null;
+    return { status: 'error', err };
+  }
+}
+
+// Catches runtime errors thrown inside a module so one broken module doesn't
+// blank the whole shell. Keeps the rail visible; shows the error in-place.
+class ModuleErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { err: null };
+  }
+  static getDerivedStateFromError(err) {
+    return { err };
+  }
+  componentDidCatch(err, info) {
+    console.error('[atelier] module render crashed:', err, info);
+  }
+  componentDidUpdate(prev) {
+    // Reset when the user switches to a different module.
+    if (prev.moduleId !== this.props.moduleId && this.state.err) {
+      this.setState({ err: null });
+    }
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div className="flex-1 min-h-0 flex items-center justify-center p-10 grid-bg">
+          <div className="max-w-[520px] bg-card border border-[rgba(251,73,52,0.4)] rounded-sm px-4 py-3.5 font-mono text-12 text-fg-primary">
+            <div className="text-[#fb4934] text-11 tracking-caps lowercase mb-1.5">
+              {this.props.moduleId} · render error
+            </div>
+            <div className="whitespace-pre-wrap break-words text-fg-secondary">
+              {String(this.state.err?.stack || this.state.err?.message || this.state.err)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
   }
 }
 
@@ -345,26 +422,44 @@ function App() {
   }
 
   const entry = active ? loaded[active.id] : null;
-  const ActiveModule = entry?.Module;
-  const activeName = (entry?.meta?.name) || active?.id;
+  const ActiveModule = entry?.status === 'ok' ? entry.Module : null;
+  const activeName = entry?.meta?.name || active?.meta?.name || active?.id;
 
-  const railModules = boot.modules.map((m) => {
-    const meta = loaded[m.id]?.meta || {};
-    return {
+  // Server seeds meta in the bootstrap so grouping is correct on first paint.
+  // Once the module's frontend finishes importing, its runtime meta wins —
+  // that way live edits take effect on hot-reload without a server restart.
+  const ungrouped = [];
+  const groups = [];
+  const groupIndex = new Map();
+  for (const m of boot.modules) {
+    const meta = { ...(m.meta || {}), ...(loaded[m.id]?.meta || {}) };
+    const item = {
       id: m.id,
       name: meta.name || m.id,
       icon: meta.icon,
-      status: 'idle',
+      // status: 'idle',  // revive when StatusDot returns (see RailItem)
     };
-  });
+    if (meta.group) {
+      let g = groupIndex.get(meta.group);
+      if (!g) {
+        g = { name: meta.group, items: [] };
+        groups.push(g);
+        groupIndex.set(meta.group, g);
+      }
+      g.items.push(item);
+    } else {
+      ungrouped.push(item);
+    }
+  }
 
   return (
     <AppShell
       full
-      topBar={<TopBar workspace="personal" subtitle={activeName} />}
+      topBar={<TopBar workspace="personal" subtitle={activeName} env={boot.env} />}
       left={
         <LeftRail
-          modules={railModules}
+          ungrouped={ungrouped}
+          groups={groups}
           activeId={active?.id || null}
           onSelect={navigate}
           onAddModule={() => navigate(null)}
@@ -376,7 +471,7 @@ function App() {
       {!active
         ? <EmptyWorkspace />
         : ActiveModule
-          ? <ActiveModule />
+          ? <ModuleErrorBoundary moduleId={active.id}><ActiveModule /></ModuleErrorBoundary>
           : <LoadingScreen modules={boot.modules} loaded={loaded} activeId={active.id} />}
     </AppShell>
   );
@@ -420,13 +515,25 @@ function EmptyWorkspace() {
 function LoadingScreen({ modules, loaded, activeId }) {
   const mod = modules.find((m) => m.id === activeId);
   const state = mod ? loaded[mod.id] : undefined;
+  if (state?.status === 'error') {
+    return (
+      <div className="flex-1 min-h-0 flex items-center justify-center p-10 grid-bg">
+        <div className="max-w-[520px] bg-card border border-[rgba(251,73,52,0.4)] rounded-sm px-4 py-3.5 font-mono text-12 text-fg-primary">
+          <div className="text-[#fb4934] text-11 tracking-caps lowercase mb-1.5">
+            {mod?.id} · failed to load
+          </div>
+          <div className="whitespace-pre-wrap break-words text-fg-secondary">
+            {String(state.err?.message || state.err)}
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex-1 flex items-center justify-center grid-bg">
       <div className="flex flex-col items-center gap-2">
         <Spinner size={16} />
-        <span className="label">
-          {state === false ? `failed to load ${mod?.id}` : `loading ${mod?.id ?? ''}…`}
-        </span>
+        <span className="label">loading {mod?.id ?? ''}…</span>
       </div>
     </div>
   );

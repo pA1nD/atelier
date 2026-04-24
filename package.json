@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "PORT=5173 node server.js",
-    "dev:module": "PORT=5173 node server.js",
+    "dev": "PORT=5172 node server.js",
+    "dev:module": "PORT=5172 node server.js",
     "atelier": "node atelier.js"
   },
   "engines": {
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@tailwindcss/cli": "^4.2.4",
+    "chokidar": "^5.0.0",
     "esbuild": "^0.28.0",
     "tailwindcss": "^4.2.4"
   },
