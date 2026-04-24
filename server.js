@@ -354,16 +354,21 @@ server.listen(PORT, '127.0.0.1', () => {
   writeDiscoveryFile();
 });
 
-/* Discovery: agents find atelier by reading ~/.atelier/url. Written on boot,
- * removed on graceful shutdown so a stale file never points at a dead port.
+/* Discovery: ~/.atelier/url advertises a running server's URL + workspace.
  *
- * Only the installed server (running from ~/.atelier/atelier) advertises.
- * Dev instances via `npm run dev` don't — they'd fight the install's file. */
+ * Only the **dev** server writes it — the install has a fixed URL
+ * (http://atelier:1844/) and skills hardcode that as a fallback, so the
+ * installed server doesn't need discovery. Meanwhile dev can be on any
+ * port (PORT=5173 default, any override) so agents can't guess.
+ *
+ * Precedence: dev wins when running. A skill's pattern is:
+ *   URL=$(head -1 ~/.atelier/url 2>/dev/null || echo http://atelier:1844)
+ */
 const DISCOVERY_PATH = path.join(os.homedir(), '.atelier', 'url');
 const IS_INSTALLED = HOST_DIR === path.join(os.homedir(), '.atelier', 'atelier');
 
 function writeDiscoveryFile() {
-  if (!IS_INSTALLED) return;
+  if (IS_INSTALLED) return;
   try {
     fs.mkdirSync(path.dirname(DISCOVERY_PATH), { recursive: true });
     fs.writeFileSync(
@@ -377,7 +382,7 @@ function writeDiscoveryFile() {
 }
 
 function removeDiscoveryFile() {
-  if (!IS_INSTALLED) return;
+  if (IS_INSTALLED) return;
   try { fs.unlinkSync(DISCOVERY_PATH); } catch {}
 }
 
