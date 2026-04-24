@@ -95,14 +95,16 @@ export default function Module() {
 }
 ```
 
-**Optional metadata** — custom icon / name:
+**Optional metadata** — custom icon / name / group:
 
 ```jsx
-export const meta = { icon: 'activity', name: 'Activity' };
+export const meta = { icon: 'activity', name: 'Activity', group: 'marketing' };
 export default function Module() { ... }
 ```
 
-Icons are lucide names ([lucide.dev](https://lucide.dev/icons)). `meta` is optional; the rail falls back to `icon: 'square'` and `name: <dir>`.
+Supported keys: `icon` (lucide name — see [lucide.dev](https://lucide.dev/icons)), `name` (display name), `group` (rail section — modules with the same `group` render under a shared header; untagged modules live under the default "modules" section), `color` (reserved for future use). `meta` is optional; the rail falls back to `icon: 'square'` and `name: <dir>`.
+
+Meta is parsed server-side at discovery time (esbuild-transform `frontend.jsx` → import via `data:` URL) and shipped in the HTML bootstrap, so grouping renders correctly on first paint — no flicker.
 
 **Optional backend** — `backend.js`:
 
@@ -150,17 +152,18 @@ The installed agent does the same over `~/.atelier/`, so `npm run atelier -- upd
 
 ### Per-module backend hot-swap (dev only)
 
-Editing any `<module>/backend.js` re-imports *just that module's* backend — the atelier process keeps running, other modules are untouched. Used when several agents iterate on different modules in parallel; one agent's typo can't crash the others.
+Editing any file under `<module>/` (not just `backend.js`) re-imports *just that module's* backend — the atelier process keeps running, other modules are untouched. Used when several agents iterate on different modules in parallel; one agent's typo can't crash the others.
 
 The shell:
-- Runs a per-module `fs.watch` on `backend.js` (dev only — prod under launchd stays untouched).
-- On edit, imports the new version with a cache-bust query (`?v=<ts>`).
-- If the import throws, keeps the old version running and logs `reload failed, keeping current version`.
+- Runs a **chokidar** watcher on the whole module directory (dev only — prod under launchd stays untouched). Watching the dir (not the file) survives atomic saves that change inode, and catches edits to transitive imports (`parser.js`, `lib/*.js`, etc.) — not just `backend.js`. Ignores `node_modules/`, `data/`, and dotfiles; uses `awaitWriteFinish` so a mid-write read can't hit a half-flushed file.
+- On change, **bundles** the module with esbuild (`packages: 'external'`, first-party transitive imports baked in, `import.meta.url` preserved for each module's own `fileURLToPath(import.meta.url)`) and imports the bundle via a base64 `data:` URL. Each bundle has unique bytes → a unique URL → Node's import cache naturally serves the new version; old versions drop out when nothing references them.
+- If the import throws, keeps the old version running and logs `reload failed, keeping current version — <message>`.
 - If it imports cleanly, strips the old module's routes, calls its teardown (if any), and mounts the new version. Log line: `↻ reloaded <module> backend`.
+- macOS `fs.watch` can fire ~2 events per save; the debounced callback dedupes by `mtimeMs` so a duplicate OS event is dropped while two genuine edits still trigger two reloads.
 
 **Routes are stripped automatically.** The shell tracks exactly which routes each module added (via a scoped router) and removes them on swap.
 
-**Closure state resets automatically.** A cache-busted re-import is a fresh module graph node with its own closure, so module-level variables (e.g. kanban's in-memory board, agents' `children` Map, a subscribers Set) re-initialize. No module code needed.
+**Closure state resets automatically.** A re-bundled import is a fresh module graph with its own closure, so module-level variables (e.g. kanban's in-memory cache, agents' `children` Map, a subscribers Set) re-initialize. No module code needed.
 
 **Side effects need a teardown.** Anything a module registers *outside* its own closure — `fs.watch` handles, `setInterval` / `setTimeout`, `process.on` listeners, `child_process.spawn`ed children, SSE response objects held by subscribers — survives a re-import. The module must opt into cleaning them up by returning a function from `mountRoutes`:
 
