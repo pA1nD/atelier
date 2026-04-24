@@ -94,6 +94,24 @@ export default {
 };
 ```
 
+**Optional skills** — `<module>/skills/<skill-name>/SKILL.md`. A skill is a markdown file with YAML frontmatter. Two scopes:
+
+| Frontmatter                | Behavior on `npm run atelier -- install <module>` |
+|---------------------------|-----|
+| `scope: global`           | Copied to `~/.claude/skills/<skill-name>/` so any Claude session on this machine can load it. Removed from there on `uninstall <module>`. |
+| *(missing or anything else)* | Stays bundled with the module at `~/.atelier/<module>/skills/`. Useful for module-local tooling that only the app (or a backend agent) needs. |
+
+Example:
+
+```
+kanban/
+├── frontend.jsx
+├── backend.js
+└── skills/
+    └── atelier-kanban/
+        └── SKILL.md         ← frontmatter includes `scope: global`
+```
+
 ## Hot reload
 
 In dev, the server watches the workspace with `fs.watch` and pushes to the client via SSE (`/_atelier/hot`). Any change — new module folder, edited `.jsx`/`.css` — triggers a full page reload. Editing `server.js` or `atelier.js` still needs a manual restart.

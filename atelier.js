@@ -111,17 +111,18 @@ export async function getCss(srcPath, scanSources, scanBase) {
  *   INSTALL/<name>/              (siblings — deployed modules)
  * ============================================================================ */
 
-const HERE       = path.dirname(fileURLToPath(import.meta.url));
-const WORKSPACE  = path.resolve(HERE, '..');
-const HOME       = process.env.HOME;
-const INSTALL    = path.join(HOME, '.atelier');
-const INSTALL_AT = path.join(INSTALL, 'atelier');
-const PLIST      = path.join(HOME, 'Library', 'LaunchAgents', 'dev.atelier.plist');
-const AGENT      = 'dev.atelier';
-const UID        = String(process.getuid());
-const NODE_BIN   = '/Users/pa1nd/.local/share/fnm/aliases/default/bin/node';
-const HOSTS_LINE = '127.0.0.1\tatelier';
-const URL        = 'http://atelier:1844/';
+const HERE         = path.dirname(fileURLToPath(import.meta.url));
+const WORKSPACE    = path.resolve(HERE, '..');
+const HOME         = process.env.HOME;
+const INSTALL      = path.join(HOME, '.atelier');
+const INSTALL_AT   = path.join(INSTALL, 'atelier');
+const CLAUDE_SKILLS = path.join(HOME, '.claude', 'skills');
+const PLIST        = path.join(HOME, 'Library', 'LaunchAgents', 'dev.atelier.plist');
+const AGENT        = 'dev.atelier';
+const UID          = String(process.getuid());
+const NODE_BIN     = '/Users/pa1nd/.local/share/fnm/aliases/default/bin/node';
+const HOSTS_LINE   = '127.0.0.1\tatelier';
+const URL          = 'http://atelier:1844/';
 
 const RSYNC_EXCLUDES = ['--exclude=.git', '--exclude=node_modules', '--exclude=.DS_Store', '--exclude=*.log'];
 
@@ -178,7 +179,50 @@ function deployModule(name) {
   if (!fs.existsSync(src)) { warn(`no such module: ${name}`); return; }
   if (!isModuleDir(src))    { warn(`${name} has no frontend.jsx/backend.js — skipping`); return; }
   sh('rsync', ['-a', '--delete', ...RSYNC_EXCLUDES, src + '/', path.join(INSTALL, name) + '/']);
-  log('  + ' + name);
+  const n = syncGlobalSkills(name);
+  log(`  + ${name}${n ? ` (+${n} global skill${n > 1 ? 's' : ''})` : ''}`);
+}
+
+/* Modules can ship skills at <module>/skills/<name>/SKILL.md. A skill with
+ * `scope: global` in its frontmatter is copied to ~/.claude/skills/<name>/
+ * so any Claude session can load it. Skills without `scope: global` stay
+ * bundled with the module and aren't exposed beyond it. */
+function listModuleSkills(name) {
+  const dir = path.join(INSTALL, name, 'skills');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .map((n) => ({ name: n, dir: path.join(dir, n) }))
+    .filter((s) => { try { return fs.statSync(s.dir).isDirectory(); } catch { return false; } });
+}
+
+function readSkillScope(skillDir) {
+  const md = path.join(skillDir, 'SKILL.md');
+  if (!fs.existsSync(md)) return null;
+  const body = fs.readFileSync(md, 'utf8');
+  const m = /^---\n([\s\S]*?)\n---/m.exec(body);
+  if (!m) return null;
+  const line = m[1].split('\n').find((l) => /^\s*scope\s*:/.test(l));
+  if (!line) return null;
+  return line.split(':')[1].trim();
+}
+
+function syncGlobalSkills(moduleName) {
+  let n = 0;
+  for (const skill of listModuleSkills(moduleName)) {
+    if (readSkillScope(skill.dir) !== 'global') continue;
+    fs.mkdirSync(CLAUDE_SKILLS, { recursive: true });
+    sh('rsync', ['-a', '--delete', skill.dir + '/', path.join(CLAUDE_SKILLS, skill.name) + '/']);
+    n++;
+  }
+  return n;
+}
+
+function removeGlobalSkillsFor(moduleName) {
+  // Read the skills dir in the install BEFORE the module is deleted.
+  for (const skill of listModuleSkills(moduleName)) {
+    if (readSkillScope(skill.dir) !== 'global') continue;
+    fs.rmSync(path.join(CLAUDE_SKILLS, skill.name), { recursive: true, force: true });
+  }
 }
 
 function deployModules(names) {
@@ -241,12 +285,15 @@ function fullNuke() {
   if (fs.existsSync(PLIST)) { step('removing plist'); fs.rmSync(PLIST, { force: true }); }
   step('removing /etc/hosts entry (macOS will prompt for your password)');
   sudoViaOsascript(`sed -i '' '/^127\\.0\\.0\\.1[[:space:]]\\+atelier$/d' /etc/hosts`, 'remove atelier host entry');
+  // Read + remove global skills before the install dir goes away.
+  for (const name of installedModules()) removeGlobalSkillsFor(name);
   if (fs.existsSync(INSTALL)) { step('removing ~/.atelier/'); fs.rmSync(INSTALL, { recursive: true, force: true }); }
 }
 
 function rmModule(name) {
   const abs = path.join(INSTALL, name);
   if (!fs.existsSync(abs)) { warn(`not installed: ${name}`); return; }
+  removeGlobalSkillsFor(name);            // must run before the rmSync below
   fs.rmSync(abs, { recursive: true, force: true });
   log('  - ' + name);
 }

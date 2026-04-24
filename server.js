@@ -355,10 +355,15 @@ server.listen(PORT, '127.0.0.1', () => {
 });
 
 /* Discovery: agents find atelier by reading ~/.atelier/url. Written on boot,
- * removed on graceful shutdown so a stale file never points at a dead port. */
+ * removed on graceful shutdown so a stale file never points at a dead port.
+ *
+ * Only the installed server (running from ~/.atelier/atelier) advertises.
+ * Dev instances via `npm run dev` don't — they'd fight the install's file. */
 const DISCOVERY_PATH = path.join(os.homedir(), '.atelier', 'url');
+const IS_INSTALLED = HOST_DIR === path.join(os.homedir(), '.atelier', 'atelier');
 
 function writeDiscoveryFile() {
+  if (!IS_INSTALLED) return;
   try {
     fs.mkdirSync(path.dirname(DISCOVERY_PATH), { recursive: true });
     fs.writeFileSync(
@@ -372,6 +377,7 @@ function writeDiscoveryFile() {
 }
 
 function removeDiscoveryFile() {
+  if (!IS_INSTALLED) return;
   try { fs.unlinkSync(DISCOVERY_PATH); } catch {}
 }
 
