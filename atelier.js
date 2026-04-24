@@ -187,14 +187,21 @@ function deployModules(names) {
   for (const n of names) deployModule(n);
 }
 
+/** Run a shell command as root via macOS's GUI password prompt. No TTY required. */
+function sudoViaOsascript(shellCmd, label) {
+  const escaped = shellCmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const script = `do shell script "${escaped}" with prompt "Atelier: ${label}" with administrator privileges`;
+  sh('osascript', ['-e', script]);
+}
+
 function wireHosts() {
   const hosts = fs.readFileSync('/etc/hosts', 'utf8');
   if (hosts.split('\n').some((line) => line.trim() === HOSTS_LINE.replace('\t', ' ') || line.trim() === HOSTS_LINE)) {
     step('/etc/hosts already maps atelier → 127.0.0.1');
     return;
   }
-  step('/etc/hosts: map atelier → 127.0.0.1 (sudo)');
-  sh('sudo', ['sh', '-c', `printf '${HOSTS_LINE}\\n' >> /etc/hosts`]);
+  step('/etc/hosts: map atelier → 127.0.0.1 (macOS will prompt for your password)');
+  sudoViaOsascript(`printf '${HOSTS_LINE}\\n' >> /etc/hosts`, 'add atelier host entry');
 }
 
 function renderPlist() {
@@ -232,8 +239,8 @@ function fullNuke() {
   step('booting out agent');
   sh('launchctl', ['bootout', `gui/${UID}`, PLIST], { ignore: true });
   if (fs.existsSync(PLIST)) { step('removing plist'); fs.rmSync(PLIST, { force: true }); }
-  step('removing /etc/hosts entry (sudo)');
-  sh('sudo', ['sed', '-i', '', '/^127\\.0\\.0\\.1[[:space:]]\\+atelier$/d', '/etc/hosts']);
+  step('removing /etc/hosts entry (macOS will prompt for your password)');
+  sudoViaOsascript(`sed -i '' '/^127\\.0\\.0\\.1[[:space:]]\\+atelier$/d' /etc/hosts`, 'remove atelier host entry');
   if (fs.existsSync(INSTALL)) { step('removing ~/.atelier/'); fs.rmSync(INSTALL, { recursive: true, force: true }); }
 }
 
