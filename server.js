@@ -43,7 +43,7 @@ import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
 import chokidar from 'chokidar';
 import { WebSocketServer } from 'ws';
 import {
-  getJsx, getCss,
+  getJsx, getJsxBundle, getCss,
   loadModuleConfig, shouldIncludeModule, collectConfigPaths, resolvePathEntry,
   CONFIG_FILENAME,
   RESERVED_NAMES, GLOBAL_WORKSPACE, isSpecialDir, isWorkspaceDir, workspaceName,
@@ -431,19 +431,58 @@ function stubReactOnce() {
   reactStubbed = true;
 }
 
+// Static fallback for meta extraction — used when dynamic-import fails
+// (chrome modules with bare-specifier imports like `@headlessui/react` that
+// Node can't resolve from a data URL). Atelier's convention is that `meta`
+// is a top-level object literal, so a brace-balanced scan + Function-eval
+// suffices. Handles inline (`meta = {...}` on one line) and multi-line.
+function extractMetaStatically(src) {
+  const re = /export\s+const\s+meta\s*=\s*\{/.exec(src);
+  if (!re) return {};
+  const start = src.indexOf('{', re.index);
+  if (start < 0) return {};
+  let depth = 0;
+  let str = null;          // current string delimiter (', ", or `)
+  for (let i = start; i < src.length; i++) {
+    const c = src[i];
+    if (str) {
+      if (c === '\\') { i++; continue; }
+      if (c === str) str = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { str = c; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) {
+        try { return new Function('return (' + src.slice(start, i + 1) + ')')() || {}; }
+        catch { return {}; }
+      }
+    }
+  }
+  return {};
+}
+
 async function readMeta(src) {
   stubReactOnce();
   const code = fs.readFileSync(src, 'utf8');
-  const out = await esbuildTransform(code, {
-    loader: 'jsx',
-    format: 'esm',
-    jsx: 'transform',
-    jsxFactory: 'React.createElement',
-    jsxFragment: 'React.Fragment',
-  });
-  const url = 'data:text/javascript;base64,' + Buffer.from(out.code).toString('base64');
-  const mod = await import(url);
-  return mod.meta || {};
+  try {
+    const out = await esbuildTransform(code, {
+      loader: 'jsx',
+      format: 'esm',
+      jsx: 'transform',
+      jsxFactory: 'React.createElement',
+      jsxFragment: 'React.Fragment',
+    });
+    const url = 'data:text/javascript;base64,' + Buffer.from(out.code).toString('base64');
+    const mod = await import(url);
+    return mod.meta || {};
+  } catch {
+    // Bundled chromes import bare specifiers (e.g. `@headlessui/react`)
+    // that Node can't resolve from a data URL. Fall back to static
+    // extraction of the literal — works for any flat object meta.
+    return extractMetaStatically(code);
+  }
 }
 
 async function getModuleMeta(m) {
@@ -1208,12 +1247,46 @@ function resolveAssetSource(pathname) {
   return null;
 }
 
-// Every JSX source feeds class names into the CSS scan.
+// Recursively walk a directory and collect every .jsx/.js file path.
+// Skips node_modules / data / dotfiles. Used for chrome modules whose
+// Tailwind classes live across many sibling component files (catalyst-
+// style kits), not just frontend.jsx.
+function walkJsxFiles(dir) {
+  const out = [];
+  const skip = new Set(['node_modules', 'data']);
+  const walk = (d) => {
+    let names;
+    try { names = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const ent of names) {
+      if (ent.name.startsWith('.') || skip.has(ent.name)) continue;
+      const p = path.join(d, ent.name);
+      if (ent.isDirectory()) walk(p);
+      else if (/\.(jsx|js)$/.test(ent.name)) out.push(p);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+// Every JSX source feeds class names into the CSS scan. For chrome modules
+// (detected by sync meta extraction over cached metas), recursively scan
+// every .jsx in the chrome dir — kits like catalyst put each component in
+// its own file and the scanner needs to see all of them.
 function cssScanSources() {
-  return [
-    path.join(HOST_DIR, 'client.jsx'),
-    ...getModules().filter((m) => m.hasFrontend).map((m) => path.join(m.dir, 'frontend.jsx')),
-  ];
+  const out = [path.join(HOST_DIR, 'client.jsx')];
+  for (const m of getModules()) {
+    if (!m.hasFrontend) continue;
+    // Use cached meta (sync) — getMetaByQId fills it on every serveIndex,
+    // and metaCache survives across requests.
+    const cached = metaCache.get(m.qualifiedId);
+    const meta = cached?.meta || {};
+    if (meta.chrome === true) {
+      out.push(...walkJsxFiles(m.dir));
+    } else {
+      out.push(path.join(m.dir, 'frontend.jsx'));
+    }
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------------
@@ -1488,6 +1561,34 @@ if (fs.existsSync(BUILTIN_CHROME_DIR)) {
   }
 }
 
+// Path-mounted modules (atelier.config.json `{ "path": ... }` entries) can
+// live anywhere on disk — outside ROOT, so the ROOT watcher misses them.
+// Walk current discovery once at boot and add a watcher per off-ROOT
+// module dir. Skips node_modules/dotfiles to avoid getting drowned by
+// npm-install events.
+const offRootWatched = new Set();
+function watchOffRootModules() {
+  for (const m of getModules()) {
+    if (offRootWatched.has(m.qualifiedId)) continue;
+    if (m.dir === BUILTIN_CHROME_DIR) continue;       // already covered
+    const isUnderRoot = m.dir.startsWith(ROOT + path.sep) || m.dir === ROOT;
+    if (isUnderRoot) continue;
+    if (!fs.existsSync(m.dir)) continue;
+    try {
+      fs.watch(m.dir, { recursive: true }, (event, filename) => {
+        if (!filename) return;
+        const segs = filename.split(path.sep);
+        if (segs.some((s) => s === 'node_modules' || s === 'data' || s.startsWith('.'))) return;
+        broadcastReload(m.qualifiedId);
+      });
+      offRootWatched.add(m.qualifiedId);
+    } catch (err) {
+      console.warn(`  ! could not watch ${m.qualifiedId} at ${m.dir}: ${err.message}`);
+    }
+  }
+}
+watchOffRootModules();
+
 fs.watch(ROOT, { recursive: true }, (event, filename) => {
   if (!filename) return;
   const segs = filename.split(path.sep);
@@ -1524,6 +1625,22 @@ fs.watch(ROOT, { recursive: true }, (event, filename) => {
   broadcastReload(qualifiedId);
 });
 
+// If `srcPath` is the entry frontend.jsx of a chrome module, return that
+// module's dir (used as absWorkingDir for the bundled build). Else null.
+// Chrome modules need esbuildBuild (bundling with node_modules resolution
+// + react alias) instead of the per-file transform; this detection picks
+// the right path lazily so non-chrome modules keep their cheap pipeline.
+async function chromeBundleRootFor(srcPath) {
+  const metaByQId = await getMetaByQId();
+  for (const m of getModules()) {
+    if (!m.hasFrontend) continue;
+    const meta = metaByQId.get(m.qualifiedId) || {};
+    if (meta.chrome !== true) continue;
+    if (srcPath === path.join(m.dir, 'frontend.jsx')) return m.dir;
+  }
+  return null;
+}
+
 // Shared asset response — used by both shell-asset (public) and module-asset
 // (auth-gated) paths. Resolves source via resolveAssetSource and writes the
 // appropriate compiled or raw response.
@@ -1538,7 +1655,10 @@ async function serveAsset(req, res, url) {
     const headers = {};
     let body;
     if (asset.kind === 'jsx') {
-      const built = await getJsx(asset.src);
+      const bundleRoot = await chromeBundleRootFor(asset.src);
+      const built = bundleRoot
+        ? await getJsxBundle(asset.src, bundleRoot)
+        : await getJsx(asset.src);
       headers['Content-Type'] = built.contentType;
       body = built.content;
     } else if (asset.kind === 'css') {

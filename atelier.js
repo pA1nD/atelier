@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { transform as esbuildTransform } from 'esbuild';
+import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
 import { compile as twCompile } from '@tailwindcss/node';
 import { Scanner } from '@tailwindcss/oxide';
 
@@ -77,6 +77,84 @@ export async function getJsx(srcPath) {
     contentType: 'application/javascript; charset=utf-8',
   };
   cache.set(srcPath, entry);
+  return entry;
+}
+
+// Recursive max-mtime over a directory tree. Skips node_modules / dotfiles
+// / data/ so npm-install timestamps don't dominate the result. Used for
+// cache-busting bundled chromes whose source spans many files.
+function maxMtimeRecursive(rootDir) {
+  let m = 0;
+  const skip = new Set(['node_modules', 'data']);
+  const walk = (dir) => {
+    let names;
+    try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const ent of names) {
+      if (ent.name.startsWith('.') || skip.has(ent.name)) continue;
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(p);
+      else {
+        try { m = Math.max(m, fs.statSync(p).mtimeMs); } catch {}
+      }
+    }
+  };
+  walk(rootDir);
+  return m;
+}
+
+// Bundle a JSX entry plus its full first-party dep graph via esbuild
+// (instead of esbuildTransform's per-file pass). Used for chrome modules
+// that bring real npm dependencies (Headless UI, motion, heroicons, etc.).
+// React + ReactDOM are externalized: aliased to /assets/shims/react.js +
+// react-dom.js, which re-export `window.React` / `window.ReactDOM` so the
+// chrome shares the same React instance as the shell.
+//
+// Returns the same { mtimeMs, content, contentType } shape as getJsx so
+// the asset response path is unified.
+export async function getJsxBundle(srcPath, absWorkingDir) {
+  // Bundle invalidates when ANY file inside absWorkingDir changes (modulo
+  // node_modules/dotfiles). Catalyst components live in side-by-side .jsx
+  // files; editing one must rebuild the bundle.
+  const mtime = maxMtimeRecursive(absWorkingDir);
+  const cacheKey = srcPath + '::bundle';
+  const cached = cache.get(cacheKey);
+  if (cached && cached.mtimeMs === mtime) return cached;
+  const result = await esbuildBuild({
+    entryPoints: [srcPath],
+    absWorkingDir,
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    write: false,
+    sourcemap: 'inline',
+    target: ['es2020'],
+    loader: { '.jsx': 'jsx', '.js': 'jsx', '.css': 'empty', '.svg': 'dataurl', '.png': 'dataurl' },
+    // Automatic JSX runtime — some catalyst files use JSX without importing
+    // React directly. The runtime import resolves via the alias below.
+    jsx: 'automatic',
+    // Most catalyst libs check `process.env.NODE_ENV`; define it so they
+    // tree-shake correctly and don't crash on `process` undefined.
+    define: {
+      'process.env.NODE_ENV': JSON.stringify('production'),
+      'process.env': '{}',
+    },
+    // Route bare `react` / `react-dom` imports (including transitive ones
+    // from Headless UI / motion / heroicons) to atelier's shim files.
+    // alias works for both direct and transitive imports.
+    alias: {
+      'react': path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'shims/react.js'),
+      'react-dom': path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'shims/react-dom.js'),
+      'react/jsx-runtime': path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'shims/jsx-runtime.js'),
+      'react/jsx-dev-runtime': path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'shims/jsx-runtime.js'),
+    },
+    logLevel: 'silent',
+  });
+  const entry = {
+    mtimeMs: mtime,
+    content: result.outputFiles[0].text,
+    contentType: 'application/javascript; charset=utf-8',
+  };
+  cache.set(cacheKey, entry);
   return entry;
 }
 
