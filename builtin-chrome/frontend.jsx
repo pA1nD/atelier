@@ -59,6 +59,25 @@ const { useState, useEffect, useRef, useLayoutEffect } = React;
   document.head.appendChild(link);
 })();
 
+/* Favicon — chrome owns visual identity, favicon included. The shell's
+ * `index.html` ships a default for the boot-paint flash (so the tab gets
+ * an icon before the chrome bundle parses); chromes then replace it with
+ * their own. Builtin's mark: the four-quadrant outline that matches the
+ * top-bar logo + gruvbox accents (amber + aqua). */
+(function ensureChromeFavicon() {
+  if (typeof document === 'undefined') return;
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='8' height='8' rx='1' fill='%23d79921'/><rect x='13' y='3' width='8' height='8' rx='1' fill='%23689d6a'/><rect x='3' y='13' width='8' height='8' rx='1' fill='%23689d6a'/><rect x='13' y='13' width='8' height='8' rx='1' fill='%23d79921'/></svg>`;
+  const href = 'data:image/svg+xml;utf8,' + svg;
+  for (const existing of document.querySelectorAll('link[rel~="icon"]')) {
+    existing.remove();
+  }
+  const link = document.createElement('link');
+  link.rel = 'icon';
+  link.type = 'image/svg+xml';
+  link.href = href;
+  document.head.appendChild(link);
+})();
+
 /* =========================================================================
  * Lucide auto-stamper
  *
