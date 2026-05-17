@@ -1544,6 +1544,13 @@ let reloadTimer = null;
 // 'shell' is the catch-all for top-level files.
 function broadcastReload(moduleId) {
   dirtyIds.add(moduleId);
+  // Shell-level events (config edits, new workspace dirs) can introduce
+  // new path-mounted modules whose dirs live outside ROOT. The boot-time
+  // watchOffRootModules pass missed those; re-run it here so the next
+  // edit inside the newly mounted module triggers a hot reload too.
+  if (moduleId === 'shell') {
+    try { watchOffRootModules(); } catch {}
+  }
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
     for (const id of dirtyIds) wsBroadcastShell({ type: 'reload', moduleId: id });

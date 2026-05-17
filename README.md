@@ -392,7 +392,7 @@ return () => { shuttingDown = true; proc.kill('SIGTERM'); };
 
 ## Chrome slot
 
-The shell ships zero visual bytes. Everything you see — rail, topbar, fonts, colors, picker, banner — lives in a `chrome`-slot module. The first global-workspace module whose `meta.chrome === true` wins; otherwise the builtin (`global/atelier-chrome`) takes the slot.
+The shell ships zero visual bytes. Everything you see — rail, topbar, fonts, colors, picker, banner, favicon, theme-color — lives in a `chrome`-slot module. The first global-workspace module whose `meta.chrome === true` wins; otherwise the builtin (`global/atelier-chrome`) takes the slot.
 
 To swap the skin: copy `atelier/builtin-chrome/` somewhere, edit, register via `atelier.config.json`:
 
@@ -401,6 +401,57 @@ To swap the skin: copy `atelier/builtin-chrome/` somewhere, edit, register via `
 ```
 
 Your chrome's `frontend.jsx` must export a `chrome` function and `meta = { chrome: true, hidden: true }`. The shell calls `chrome(props)` and renders the result as the root. See [`builtin-chrome/frontend.jsx`](builtin-chrome/frontend.jsx) for the full props contract.
+
+### Writing a custom chrome with real dependencies
+
+The shell detects chrome modules at request time and routes their `frontend.jsx` through `esbuildBuild` (full bundling, `react`/`react-dom`/`react/jsx-runtime` aliased to `atelier/shims/*` so the chrome shares the shell's React instance). That means a chrome can ship its own `node_modules/` and use bare specifiers freely:
+
+```jsx
+// my-chrome/frontend.jsx
+import * as Headless from '@headlessui/react'
+import { motion } from 'motion/react'
+import { ChevronDownIcon } from '@heroicons/react/16/solid'
+import clsx from 'clsx'
+
+export const meta = { chrome: true, hidden: true }
+
+export function chrome({ modules, active, navigate, ... }) {
+  return <div className="...">{/* whatever */}</div>
+}
+```
+
+Drop a `package.json` in the chrome folder, `npm install` your deps, and the shell takes care of bundling. Module size is uncapped (catalyst-chrome's bundle is ~3 MB with Headless UI + motion + heroicons; cached after first build).
+
+### Publishing primitives to companion modules — `@atelier/kit`
+
+A chrome can also ship a `kit.js` (or `kit.jsx`) alongside its `frontend.jsx`. When the shell sees this file, it injects an import map per request:
+
+```html
+<script type="importmap">
+  {"imports": {"@atelier/kit": "/modules/<chromeQid>/kit.js"}}
+</script>
+```
+
+Companion modules then write vanilla ESM imports:
+
+```jsx
+// some-module/frontend.jsx
+import { Button, Dialog, Input, Field, Label } from '@atelier/kit'
+
+export default function MyModule() {
+  return (
+    <Field>
+      <Label>Email</Label>
+      <Input type="email" />
+      <Button>Send</Button>
+    </Field>
+  )
+}
+```
+
+The browser resolves `@atelier/kit` to the active chrome's bundled kit. No bundling on the module side (per-file transform stays fast), no runtime registry, no `window.__atelier.kit` global — the kit's shape is a real ES module file you can Cmd-click into.
+
+A chrome's `kit.js` is just a barrel re-export — what to publish is **chrome-defined**. There's no enforced contract: a module that imports `Foo` from `@atelier/kit` is implicitly paired with whichever chrome exports a compatible `Foo`. If you swap to a different chrome, those modules either get re-themed (the new chrome ships the same names with compatible props) or break — that's on the chrome author and the module author to coordinate. Themes are not drop-in by design; co-design chrome + its companion modules. The canonical example: [`catalyst-chrome/kit.js`](https://github.com/pA1nD/atelier) barrels Catalyst's `Button`, `Dialog`, `Sidebar*`, `Navbar*`, `Field*`, `Table*`, etc., and the paired `$modulesV2/*` modules import from there.
 
 ## What modules get
 
