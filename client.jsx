@@ -57,6 +57,28 @@ const { useState, useEffect, useRef } = React;
  * Symmetrical: `register(id, api)` from the module's mount, `unregister(id)`
  * on teardown if needed.
  * ========================================================================= */
+// Expose the active workspace as a read-only constant on the public
+// shell API. Workspace is a page-load snapshot — picker changes do a
+// full reload, so this never goes stale within a tab's lifetime. Modules
+// that want to namespace localStorage, build a workspace-aware label,
+// or tag persisted records can read this; modules that don't care
+// continue to ignore it.
+(function wireWorkspaceConstant() {
+  if (typeof window === 'undefined') return;
+  window.__atelier = window.__atelier || {};
+  const ws = window.__ATELIER__?.workspace || null;
+  try {
+    Object.defineProperty(window.__atelier, 'workspace', {
+      value: ws,
+      writable: false,
+      configurable: false,
+      enumerable: true,
+    });
+  } catch {
+    window.__atelier.workspace = ws;
+  }
+})();
+
 (function wireModuleRegistry() {
   if (typeof window === 'undefined') return;
   window.__atelier = window.__atelier || {};
@@ -117,6 +139,62 @@ const { useState, useEffect, useRef } = React;
   let backoff = 250;
   let reconnectTimer = null;
 
+  // Connection signal — three states emitted via `atelier:connection`:
+  //   • 'online'   — WS open, server reachable.
+  //   • 'offline'  — WS down past the jitter grace AND HTTP probe failed too.
+  //                  Standard "server is gone" banner.
+  //   • 'unauthed' — WS down because session expired. HTTP probe returns 401.
+  //                  Distinct banner with a "sign in" affordance — auto-
+  //                  reconnect won't help; the user has to re-authenticate.
+  // Brief WS reconnects (dev-server restart) absorb in the grace window
+  // and never reach 'offline' / 'unauthed'.
+  const OFFLINE_GRACE_MS = 2500;
+  let connState = 'online';
+  let offlineTimer = null;
+  function setConnState(next) {
+    if (connState === next) return;
+    connState = next;
+    try {
+      window.dispatchEvent(new CustomEvent('atelier:connection', { detail: { state: next } }));
+    } catch {}
+  }
+
+  // Probe the shell's `/_atelier/whoami`. Server-alive AND authed → 200;
+  // server-alive BUT unauthed → 401; server-gone or network error → throw.
+  // The probe is what disambiguates 'offline' from 'unauthed' for the
+  // banner — WebSocket close codes don't carry HTTP semantics cleanly.
+  async function probeAuth() {
+    const r = await fetch('/_atelier/whoami', { cache: 'no-store', credentials: 'same-origin' });
+    return r.status;
+  }
+
+  function armOfflineTimer() {
+    if (offlineTimer) return;
+    offlineTimer = setTimeout(async () => {
+      offlineTimer = null;
+      if (ws && ws.readyState === 1) return;          // race: reconnected during grace
+      try {
+        const status = await probeAuth();
+        if (status === 200) {
+          // Server alive, session valid — the WS will reconnect itself.
+          return;
+        }
+        if (status === 401) {
+          setConnState('unauthed');
+          return;
+        }
+        setConnState('offline');
+      } catch {
+        setConnState('offline');
+      }
+    }, OFFLINE_GRACE_MS);
+  }
+  function clearOfflineTimer() {
+    if (!offlineTimer) return;
+    clearTimeout(offlineTimer);
+    offlineTimer = null;
+  }
+
   function dispatch(frame) {
     const topic = frame?.topic;
     if (!topic) return;
@@ -132,9 +210,19 @@ const { useState, useEffect, useRef } = React;
   function connect() {
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // Pass the page's workspace through on the WS URL so the server can
+    // tag this connection and fan out per-workspace events correctly.
+    // The tab's location is the source of truth — re-read on each
+    // connect so a fresh WS after navigation picks up workspace switches.
+    let wsParam = '';
     try {
-      ws = new WebSocket(`${proto}//${window.location.host}/_atelier/ws`);
+      const cur = new URL(window.location.href).searchParams.get('ws');
+      if (cur) wsParam = `?ws=${encodeURIComponent(cur)}`;
+    } catch {}
+    try {
+      ws = new WebSocket(`${proto}//${window.location.host}/_atelier/ws${wsParam}`);
     } catch (err) {
+      armOfflineTimer();
       scheduleReconnect();
       return;
     }
@@ -143,8 +231,16 @@ const { useState, useEffect, useRef } = React;
       try { frame = JSON.parse(m.data); } catch { return; }
       dispatch(frame);
     };
-    ws.onopen = () => { backoff = 250; };
-    ws.onclose = () => { ws = null; scheduleReconnect(); };
+    ws.onopen = () => {
+      backoff = 250;
+      clearOfflineTimer();
+      setConnState('online');
+    };
+    ws.onclose = () => {
+      ws = null;
+      armOfflineTimer();
+      scheduleReconnect();
+    };
     ws.onerror = () => { /* close fires next */ };
   }
   function scheduleReconnect() {
@@ -295,7 +391,7 @@ function SidebarToggle({ collapsed, onClick }) {
  * control). Rendered between the brand chunk and the right slot, true-centered
  * when present (a hidden mirror of the left chunk reserves equal space on the
  * right so the center node sits at the actual middle of the bar). */
-function TopBar({ workspace = 'personal', right, center, subtitle, env, sidebarCollapsed, onToggleSidebar }) {
+function TopBar({ workspace, showWorkspace = false, right, center, subtitle, env, sidebarCollapsed, onToggleSidebar }) {
   return (
     <div className="flex-none flex items-center px-3 h-[var(--header-h)] bg-raised border-b border-subtle">
       <div className="group flex items-center h-full pr-25">
@@ -334,8 +430,12 @@ function TopBar({ workspace = 'personal', right, center, subtitle, env, sidebarC
               </span>
             )}
           </span>
-          <span className="font-mono text-11 text-fg-muted">·</span>
-          <span className="font-mono text-11 text-fg-secondary">{workspace}</span>
+          {showWorkspace && (
+            <>
+              <span className="font-mono text-11 text-fg-muted">·</span>
+              <span className="font-mono text-11 text-fg-secondary">{workspace}</span>
+            </>
+          )}
           {subtitle && (
             <>
               <span className="font-mono text-11 text-fg-muted">/</span>
@@ -350,6 +450,112 @@ function TopBar({ workspace = 'personal', right, center, subtitle, env, sidebarC
   );
 }
 
+/* WorkspacePicker — clickable badge that opens a dropdown of workspaces.
+ *
+ * Active state = the current `workspace` prop. The picker is only mounted
+ * when there are 2+ workspaces (see App.showPicker), so it never has to
+ * represent a "global" state to the user — once workspaces exist, the
+ * user lives inside one of them. Root modules still surface in the rail
+ * via fallthrough, but as "always available", not a separate world.
+ * Closes on outside click, ESC, or selection. */
+function WorkspacePicker({ workspaces, active, onPick }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const label = active || (workspaces[0]?.id ?? '');
+  const chip = (active || workspaces[0]?.id || '·')[0];
+
+  return (
+    <div ref={ref} className="relative flex-none">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={[
+          'w-full flex items-center gap-2 px-3 h-10 border-b border-subtle cursor-pointer text-left',
+          'bg-transparent transition-colors duration-fast ease-enter',
+          open ? 'bg-card' : 'hover:bg-card',
+        ].join(' ')}
+      >
+        <span
+          className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-xs font-mono text-[10px] font-semibold bg-accent-primary-wash text-accent-primary-hi"
+          style={{ border: '1px solid rgba(215,153,33,0.35)' }}
+        >
+          {chip}
+        </span>
+        <span className={[
+          'font-sans text-13 font-medium flex-1 overflow-hidden text-ellipsis whitespace-nowrap',
+          active ? 'text-fg-primary' : 'text-fg-muted',
+        ].join(' ')}>
+          {label}
+        </span>
+        <Icon name="chevrons-up-down" size={12} color="var(--color-fg-muted)" />
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          className="absolute left-2 right-2 top-[calc(100%-2px)] z-20 bg-raised border border-subtle rounded-sm shadow-lg py-1"
+        >
+          {workspaces.map((w) => (
+            <WorkspaceOption
+              key={w.id}
+              label={w.name || w.id}
+              chip={(w.id || '?')[0]}
+              selected={active === w.id}
+              onClick={() => { setOpen(false); onPick(w.id); }}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorkspaceOption({ label, chip, selected, onClick }) {
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      onClick={onClick}
+      className={[
+        'w-full flex items-center gap-2 px-2.5 py-1.5 text-left cursor-pointer bg-transparent',
+        'transition-colors duration-fast ease-enter',
+        selected ? 'bg-card-hi' : 'hover:bg-card',
+      ].join(' ')}
+    >
+      <span
+        className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-xs font-mono text-[10px] font-semibold bg-accent-primary-wash text-accent-primary-hi"
+        style={{ border: '1px solid rgba(215,153,33,0.35)' }}
+      >
+        {chip}
+      </span>
+      <span className={[
+        'flex-1 font-sans text-13 overflow-hidden text-ellipsis whitespace-nowrap',
+        selected ? 'text-fg-display' : 'text-fg-primary',
+      ].join(' ')}>
+        {label}
+      </span>
+      {selected && <Icon name="check" size={12} color="var(--color-fg-display)" />}
+    </button>
+  );
+}
+
 /* LeftRail — workspace switcher + header label + scrollable module list.
  *
  * Modules split into `ungrouped` (rendered under the default "modules" header,
@@ -361,20 +567,30 @@ function LeftRail({
   groups,
   activeId,
   onSelect,
-  workspace = 'personal',
+  workspace,
+  workspaces = [],
+  onPickWorkspace,
+  showWorkspace = false,
+  pinnedSection = null,         // { name, items } — a workspace's own modules
   onAddModule,
   headerLabel = 'modules',
   footer,
   collapsed = false,
+  forceWsParam = false,
 }) {
   const empty = ungrouped.length === 0 && groups.length === 0;
+  const itemHref = (m) => {
+    const path = `/${encodeURIComponent(m.id)}`;
+    if (forceWsParam && workspace) return `${path}?ws=${encodeURIComponent(workspace)}`;
+    return path;
+  };
   const renderItem = (m) => (
     <RailItem
-      key={m.id}
+      key={m.qid || m.id}
       mod={m}
-      active={m.id === activeId}
-      href={`/${m.id}`}
-      onActivate={() => onSelect && onSelect(m.id)}
+      active={(m.qid || m.id) === activeId}
+      href={itemHref(m)}
+      onActivate={() => onSelect && onSelect(m)}
     />
   );
   // Width-animated shell with a fixed-width inner so content doesn't reflow
@@ -396,33 +612,42 @@ function LeftRail({
       ].join(' ')}
       inert={collapsed ? '' : undefined}
     >
-      <div className="flex-none flex items-center gap-2 px-3 h-10 border-b border-subtle">
-        <span
-          className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-xs font-mono text-[10px] font-semibold bg-accent-primary-wash text-accent-primary-hi"
-          style={{ border: '1px solid rgba(215,153,33,0.35)' }}
-        >
-          {workspace[0]}
-        </span>
-        <span className="font-sans text-13 text-fg-primary font-medium flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-          {workspace}
-        </span>
-        <Icon name="chevrons-up-down" size={12} color="var(--color-fg-muted)" />
-      </div>
-
-      <div className="flex items-center gap-1.5 pt-2.5 pb-1 px-3">
-        <span className="flex-1 font-mono text-[10px] tracking-caps text-fg-muted lowercase">
-          {headerLabel}
-        </span>
-        <button
-          onClick={onAddModule}
-          className="w-[18px] h-[18px] inline-flex items-center justify-center bg-transparent border border-transparent text-fg-secondary rounded-sm cursor-pointer hover:bg-card hover:text-fg-primary transition-colors duration-fast ease-enter"
-        >
-          <Icon name="plus" size={12} />
-        </button>
-      </div>
+      {showWorkspace && (
+        <WorkspacePicker
+          workspaces={workspaces}
+          active={workspace || null}
+          onPick={onPickWorkspace}
+        />
+      )}
 
       <div className="flex-1 overflow-auto px-1.5">
-        {empty && (
+        {pinnedSection && pinnedSection.items.length > 0 && (
+          <div>
+            <div className="flex items-center pt-2.5 pb-1 px-1.5">
+              <span className="flex-1 font-mono text-[10px] tracking-caps text-fg-muted lowercase">
+                {pinnedSection.name}
+              </span>
+            </div>
+            {pinnedSection.items.map(renderItem)}
+          </div>
+        )}
+
+        <div className={[
+          'flex items-center gap-1.5 pb-1 px-1.5',
+          pinnedSection && pinnedSection.items.length > 0 ? 'pt-3' : 'pt-2.5',
+        ].join(' ')}>
+          <span className="flex-1 font-mono text-[10px] tracking-caps text-fg-muted lowercase">
+            {headerLabel}
+          </span>
+          <button
+            onClick={onAddModule}
+            className="w-[18px] h-[18px] inline-flex items-center justify-center bg-transparent border border-transparent text-fg-secondary rounded-sm cursor-pointer hover:bg-card hover:text-fg-primary transition-colors duration-fast ease-enter"
+          >
+            <Icon name="plus" size={12} />
+          </button>
+        </div>
+
+        {empty && (!pinnedSection || pinnedSection.items.length === 0) && (
           <div className="font-mono text-11 text-fg-subtle leading-[1.6] px-1.5 py-1">
             <span className="text-fg-muted">no modules yet.</span>
           </div>
@@ -488,8 +713,96 @@ function RailItem({ mod, active, href, onActivate }) {
   );
 }
 
-/* AppShell — outer frame: TopBar on top, LeftRail + main as horizontal split. */
-function AppShell({ topBar, left, children, width, height, full = false }) {
+/* ConnectionBanner — full-width notice rendered below the TopBar.
+ *
+ * Two distinct failure modes, two distinct banners:
+ *   • 'offline'  — server unreachable. Red. Auto-reconnect is in flight.
+ *   • 'unauthed' — session expired. Amber. Reconnect won't help; we offer
+ *                  a sign-in button that reloads through the auth takeover.
+ *
+ * Driven by the `atelier:connection` window event from wireWsBridge. */
+function ConnectionBanner() {
+  const [state, setState] = useState('online');
+  useEffect(() => {
+    const onConn = (e) => setState(e.detail?.state ?? 'online');
+    window.addEventListener('atelier:connection', onConn);
+    return () => window.removeEventListener('atelier:connection', onConn);
+  }, []);
+  if (state === 'online') return null;
+
+  if (state === 'unauthed') {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex-none flex items-center justify-center gap-2.5 px-3 h-7 border-b overflow-hidden"
+        style={{
+          background: 'var(--color-signal-warning-wash)',
+          borderBottomColor: 'rgba(215, 153, 33, 0.4)',
+          animation: 'banner-in var(--duration-base) var(--ease-enter)',
+        }}
+      >
+        <span
+          className="inline-block rounded-full flex-none"
+          style={{
+            width: 6, height: 6,
+            background: 'var(--color-signal-warning)',
+            boxShadow: '0 0 0 3px var(--color-signal-warning-wash)',
+          }}
+        />
+        <span className="font-mono text-11 tracking-caps lowercase text-fg-secondary">
+          session expired
+        </span>
+        <span className="font-mono text-11 text-fg-muted lowercase">
+          — sign in again to continue
+        </span>
+        <button
+          onClick={() => window.location.reload()}
+          className="font-mono text-11 px-2 py-0.5 rounded-xs bg-card border border-default hover:bg-card-hi cursor-pointer text-fg-primary"
+        >
+          sign in
+        </button>
+      </div>
+    );
+  }
+
+  // offline
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex-none flex items-center justify-center gap-2.5 px-3 h-7 border-b overflow-hidden"
+      style={{
+        background: 'var(--color-signal-danger-wash)',
+        borderBottomColor: 'rgba(204, 36, 29, 0.35)',
+        animation: 'banner-in var(--duration-base) var(--ease-enter)',
+      }}
+    >
+      <span
+        className="inline-block rounded-full flex-none"
+        style={{
+          width: 6, height: 6,
+          background: 'var(--color-signal-danger)',
+          boxShadow: '0 0 0 3px var(--color-signal-danger-wash)',
+          animation: 'atelier-pulse 1.8s var(--ease-enter) infinite',
+        }}
+      />
+      <span className="font-mono text-11 tracking-caps lowercase text-fg-secondary">
+        server unreachable
+      </span>
+      <span className="font-mono text-11 text-fg-muted lowercase">
+        — data shown may be stale · reconnecting
+      </span>
+      <Spinner size={11} color="var(--color-fg-muted)" />
+    </div>
+  );
+}
+
+/* AppShell — outer frame: TopBar on top, LeftRail + main as horizontal split.
+ *
+ * `notice` is an optional full-width slot rendered between the topBar and the
+ * body split — used today for the connection banner. */
+function AppShell({ topBar, notice, left, children, width, height, full = false }) {
   const sizeClasses = full ? 'w-screen h-screen' : '';
   const sizeStyle = full ? undefined : { width: width ?? 1400, height: height ?? 880 };
   return (
@@ -502,6 +815,7 @@ function AppShell({ topBar, left, children, width, height, full = false }) {
       style={sizeStyle}
     >
       {topBar}
+      {notice}
       <div className="flex-1 flex overflow-hidden">
         {left}
         <main className="flex-1 overflow-hidden flex flex-col bg-canvas">
@@ -516,25 +830,28 @@ function AppShell({ topBar, left, children, width, height, full = false }) {
  * App boot
  * ========================================================================= */
 
-// Load a module's compiled frontend via dynamic ESM import. A module
-// usually exports `default Module` (rendered in the main surface). It can
-// also export named slot components — currently `TopBarCenter` — to occupy
-// shell slots regardless of which module is "active". A module exporting
-// only a slot component (no default) is "ambient": always mounted, never
-// shown in the rail.
-//
-// Returns { status: 'ok'|'error', Module?, TopBarCenter?, meta?, err? }.
-async function loadModule(id) {
+// Load a module's compiled frontend via dynamic ESM import. The URL is
+// flat — `/modules/<id>/frontend.js` — and the server picks workspace vs
+// root mount based on the `?ws=` query param (or the implicit single-
+// workspace default). Two workspaces serving different bytes for the
+// same module id is handled by the server with Cache-Control: no-store
+// AND a ?ws= disambiguator on the URL so the browser cache keys them
+// separately too.
+async function loadModule(entry, ws) {
+  const params = new URLSearchParams();
+  if (ws) params.set('ws', ws);
+  const qs = params.toString();
+  const url = `/modules/${encodeURIComponent(entry.id)}/frontend.js${qs ? '?' + qs : ''}`;
   try {
-    const mod = await import(`/modules/${id}/frontend.js`);
+    const mod = await import(url);
     const Module = typeof mod.default === 'function' ? mod.default : null;
     const TopBarCenter = typeof mod.TopBarCenter === 'function' ? mod.TopBarCenter : null;
     if (!Module && !TopBarCenter) {
-      throw new Error(`module ${id} has no default export and no slot exports`);
+      throw new Error(`module ${entry.qid} has no default export and no slot exports`);
     }
     return { status: 'ok', Module, TopBarCenter, meta: mod.meta || {} };
   } catch (err) {
-    console.error(`[atelier] failed to load module '${id}':`, err);
+    console.error(`[atelier] failed to load module '${entry.qid}':`, err);
     return { status: 'error', err };
   }
 }
@@ -577,18 +894,138 @@ class ModuleErrorBoundary extends React.Component {
   }
 }
 
-// URL convention: '/' = empty state, '/<module-id>' = that module.
+// URL convention.
+//
+//   /                     empty state, no module
+//   /<id>                 module page
+//   ?ws=<name>            workspace context (query, not path)
+//
+// Workspace is an ambient session attribute. Resolution policy lives on
+// the server (see resolveWorkspaceFromRequest); the client reads what
+// the server resolved out of the bootstrap. The shell's URL stamping rule:
+//
+//   • 0 workspaces       → ?ws= never appears. URLs are bare /<id>.
+//   • 1 workspace        → ?ws= never appears. Server applies single-
+//                          workspace default.
+//   • 2+ workspaces      → ?ws= is always present on shell-emitted URLs.
+//                          The server 302-canonicalizes any cold-load
+//                          that arrives without one (cookie preferred,
+//                          else first workspace), so no client-side race.
+//
+// parseUrl returns { id, ws }. `ws` is the value of the `?ws=` query param
+// (string) or null. The path is just the module id.
 function parseUrl() {
-  const m = window.location.pathname.match(/^\/([^/]+)\/?$/);
-  return m ? decodeURIComponent(m[1]) : null;
+  const p = window.location.pathname;
+  let id = null;
+  const m = p.match(/^\/([a-zA-Z0-9][a-zA-Z0-9_-]*)\/?$/);
+  if (m) id = decodeURIComponent(m[1]);
+  let ws = null;
+  try { ws = new URL(window.location.href).searchParams.get('ws') || null; } catch {}
+  return { id, ws };
+}
+
+// Build a URL for the SPA: path + optional `?ws=` query.
+function buildUrl(id, ws, { forceWs = false } = {}) {
+  const path = id ? `/${encodeURIComponent(id)}` : '/';
+  if (!ws) return path;
+  if (!forceWs) return path;
+  return `${path}?ws=${encodeURIComponent(ws)}`;
+}
+
+// Flatten the user object (modules + workspaces.modules) into a single
+// list of entries. Each entry carries enough to load its bundle and build
+// a URL: { id, qid, workspace, hasFrontend, meta }. qid is the qualified
+// id ('kanban' for global, 'bigcorp/kanban' for workspace-scoped) and is
+// the key for `loaded`, dirty tracking, hot-reload moduleId, etc.
+function flattenUserModules(user) {
+  if (!user) return [];
+  const out = [];
+  for (const m of user.modules || []) {
+    out.push({
+      id: m.id,
+      qid: m.id,
+      workspace: null,
+      hasFrontend: m.hasFrontend !== false,
+      meta: m.meta || {},
+    });
+  }
+  for (const ws of user.workspaces || []) {
+    for (const m of ws.modules || []) {
+      out.push({
+        id: m.id,
+        qid: `${ws.id}/${m.id}`,
+        workspace: ws.id,
+        hasFrontend: m.hasFrontend !== false,
+        meta: m.meta || {},
+      });
+    }
+  }
+  return out;
+}
+
+// When the auth module's handleUnauth has injected `boot.takeover`, the
+// shell hands the entire surface to its bundle — no chrome, no other
+// modules. The takeover component reads `window.__ATELIER__.takeover`
+// itself for state (unauth/denied/reason/attemptedUrl/etc.) and decides
+// what to render.
+function Takeover() {
+  const [state, setState] = useState({ kind: 'loading' });
+  useEffect(() => {
+    const bundle = window.__ATELIER__?.moduleBundle;
+    if (!bundle) {
+      setState({ kind: 'error', message: 'auth bundle missing in takeover bootstrap' });
+      return;
+    }
+    import(bundle)
+      .then((m) => {
+        const C = typeof m.default === 'function' ? m.default : null;
+        if (!C) setState({ kind: 'error', message: 'auth module has no default export' });
+        else setState({ kind: 'ok', Component: C });
+      })
+      .catch((err) => setState({ kind: 'error', message: String(err?.message || err) }));
+  }, []);
+  if (state.kind === 'loading') return null;
+  if (state.kind === 'error') {
+    return (
+      <div className="flex-1 min-h-0 flex items-center justify-center p-10 grid-bg">
+        <div className="max-w-[520px] bg-card border border-[rgba(251,73,52,0.4)] rounded-sm px-4 py-3.5 font-mono text-12 text-fg-primary">
+          <div className="text-[#fb4934] text-11 tracking-caps lowercase mb-1.5">auth · takeover failed</div>
+          <div className="whitespace-pre-wrap break-words text-fg-secondary">{state.message}</div>
+        </div>
+      </div>
+    );
+  }
+  const { Component } = state;
+  return <Component />;
 }
 
 function App() {
-  const boot = window.__ATELIER__ || { mode: 'host', modules: [] };
-  const [path, setPath] = useState(parseUrl);
-  const [loaded, setLoaded] = useState({});
+  // Auth module's handleUnauth took over → render only its bundle, no chrome.
+  if (window.__ATELIER__?.takeover) return <Takeover />;
+
+  const boot = window.__ATELIER__ || { mode: 'host', user: { id: 'local', modules: [], workspaces: [] } };
+  const user = boot.user || { id: 'local', modules: [], workspaces: [] };
+  const allModules = flattenUserModules(user);
+
+  // Workspace policy based on count:
+  //   0 → null always. URLs bare. Picker hidden.
+  //   1 → that workspace, implicit. URLs bare. Picker hidden.
+  //   2+ → from URL ?ws= (with last-visited fallback). Picker visible.
+  const workspaceList = (user.workspaces || []).map((w) => w.id);
+  const wsCount = workspaceList.length;
+
+  const [urlState, setUrlState] = useState(parseUrl);      // { id, ws }
+  const [loaded, setLoaded] = useState({});                // qid → load entry
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const toggleSidebar = () => setSidebarCollapsed((c) => !c);
+
+  // Effective workspace: server already resolved this and put it in the
+  // bootstrap. Trust the server (single source of truth, see
+  // resolveWorkspaceFromRequest). URL ?ws= is the primary input the
+  // server consults, so urlState.ws will normally match boot.workspace —
+  // but on cold loads with 2+ workspaces the server has already 302-
+  // canonicalized to add ?ws= before this code ever runs.
+  const effectiveWorkspace = boot.workspace || urlState.ws || (wsCount === 1 ? workspaceList[0] : null);
 
   // ⌘\ toggles the rail. Bound at the app level so any frame can see it.
   useEffect(() => {
@@ -604,37 +1041,43 @@ function App() {
 
   useEffect(() => {
     (async () => {
-      for (const m of boot.modules.filter((m) => m.hasFrontend)) {
-        const res = await loadModule(m.id);
-        setLoaded((l) => ({ ...l, [m.id]: res }));
+      for (const m of allModules) {
+        if (!m.hasFrontend) continue;
+        const res = await loadModule(m, effectiveWorkspace);
+        setLoaded((l) => ({ ...l, [m.qid]: res }));
       }
     })();
-  }, []);
+  }, [effectiveWorkspace]);
 
   useEffect(() => {
-    const onPop = () => setPath(parseUrl());
+    const onPop = () => setUrlState(parseUrl());
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  const active = path ? boot.modules.find((m) => m.id === path) : null;
+  // Resolve the active module. Workspace-scoped instance wins if the current
+  // context has it; otherwise the root mount handles. Same fallthrough rule
+  // as the server's buildAllowedQids.
+  const activeMod = urlState.id ? (
+    (effectiveWorkspace && allModules.find((m) => m.workspace === effectiveWorkspace && m.id === urlState.id))
+    || allModules.find((m) => !m.workspace && m.id === urlState.id)
+  ) : null;
+  const activeQid = activeMod?.qid || null;
 
-  // URL points at a module that no longer exists (e.g. folder deleted) —
-  // tidy URL back to '/' and show empty state.
+  // URL points at an id that doesn't exist anywhere — tidy back to root.
   useEffect(() => {
-    if (path !== null && !active) {
-      window.history.replaceState(null, '', '/');
-      setPath(null);
+    if (urlState.id !== null && !activeMod) {
+      const target = buildUrl(null, effectiveWorkspace, { forceWs: wsCount >= 2 });
+      window.history.replaceState(null, '', target);
+      setUrlState(parseUrl());
     }
-  }, [path, active]);
+  }, [activeQid, activeMod, effectiveWorkspace, urlState.id, wsCount]);
 
-  // Hot reload — module-aware. The shell broadcasts `{ topic: 'shell',
-  // type: 'reload', moduleId }` per changed module via the shared WS.
-  // Active module / shell / ambient module / unknown id → full reload now.
-  // Other modules → mark dirty; navigating to a dirty module does a full
-  // page load so the user lands on the fresh version.
-  const activeIdRef = useRef(null);
-  activeIdRef.current = active?.id || null;
+  // Hot reload — module-aware, qid-keyed. Active module / shell / ambient
+  // module / unknown id → full reload. Other modules → mark dirty; the next
+  // navigation to that module does a full page load.
+  const activeQidRef = useRef(null);
+  activeQidRef.current = activeQid;
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
   const dirtyRef = useRef(new Set());
@@ -643,19 +1086,16 @@ function App() {
     const unsub = window.__atelier?.subscribe?.('shell', (frame) => {
       if (frame.type !== 'reload') return;
       const id = frame.moduleId;
-      if (id === 'shell' || id === activeIdRef.current) {
+      if (id === 'shell' || id === activeQidRef.current) {
         window.location.reload();
         return;
       }
-      // Ambient modules (e.g. mission-control's topbar widget) are always
-      // mounted regardless of which path is active, so they need a force
-      // reload too — there's no "navigate to it" moment to drain dirty on.
       const entry = loadedRef.current[id];
       if (entry?.TopBarCenter) {
         window.location.reload();
         return;
       }
-      const known = boot.modules.some((m) => m.id === id);
+      const known = allModules.some((m) => m.qid === id);
       if (!known) {
         window.location.reload();
         return;
@@ -665,69 +1105,125 @@ function App() {
     return () => { try { unsub?.(); } catch {} };
   }, []);
 
-  function navigate(id) {
-    if (id && dirtyRef.current.has(id)) {
-      window.location.assign(`/${id}`);
-      return;
-    }
-    const target = id ? `/${id}` : '/';
-    if (window.location.pathname !== target) {
+  // Navigate to a target URL via the SPA. Full-page navigations come from
+  // navigateToItem when a module is dirty.
+  function navigateTo(target) {
+    const here = window.location.pathname + window.location.search;
+    if (here !== target) {
       window.history.pushState(null, '', target);
-      // pushState doesn't fire popstate, so ambient modules can't observe SPA
-      // navs by listening to popstate alone. Broadcast a custom event so they
-      // can react (e.g. mission-control's page-scoped moduleId).
-      window.dispatchEvent(new CustomEvent('atelier:navigate', { detail: { moduleId: id } }));
+      window.dispatchEvent(new CustomEvent('atelier:navigate', { detail: { url: target } }));
     }
-    setPath(id);
+    setUrlState(parseUrl());
   }
 
-  const entry = active ? loaded[active.id] : null;
+  // Click a rail item. The active workspace stays the same — this is just
+  // a module switch. URL form depends on workspace count (?ws= only when 2+).
+  function navigateToItem(item) {
+    const qid = item.qid;
+    const target = buildUrl(item.id, effectiveWorkspace, { forceWs: wsCount >= 2 });
+    if (qid && dirtyRef.current.has(qid)) { window.location.assign(target); return; }
+    navigateTo(target);
+  }
+
+  // Pick a workspace from the picker. Full reload — workspace is treated
+  // like a login session (cache busts, bundles re-fetch, WS reconnects).
+  // The server will update the atelier_ws cookie when it serves the next
+  // index; no need for client-side persistence.
+  function pickWorkspace(ws) {
+    const id = urlState.id;
+    // Preserve the current module id if the destination workspace (or root
+    // fallthrough) has a module of the same name; else go to landing.
+    let preserve = null;
+    if (id) {
+      const hasInWs = ws && allModules.some((m) => m.workspace === ws && m.id === id);
+      const hasRoot = allModules.some((m) => !m.workspace && m.id === id);
+      if (hasInWs || (!ws && hasRoot) || (ws && hasRoot && !allModules.some((m) => m.workspace === ws && m.id === id))) {
+        preserve = id;
+      }
+    }
+    const target = buildUrl(preserve, ws, { forceWs: wsCount >= 2 });
+    window.location.assign(target);
+  }
+
+  const entry = activeMod ? loaded[activeMod.qid] : null;
   const ActiveModule = entry?.status === 'ok' ? entry.Module : null;
-  const activeName = entry?.meta?.name || active?.meta?.name || active?.id;
+  const activeName = entry?.meta?.name || activeMod?.meta?.name || activeMod?.id;
 
   useEffect(() => {
     document.title = activeName ? `Atelier · ${activeName}` : 'Atelier';
   }, [activeName]);
 
-  // Find a TopBarCenter slot component from any loaded module. First module
-  // that exports one wins; if multiple modules try to claim the slot we warn
-  // and keep the first. A module that exports ONLY TopBarCenter (no default)
-  // is "ambient" — always mounted, never shown in the rail.
+  // TopBarCenter slot — first module that exports one wins; subsequent
+  // claimants are warned about and ignored. Ambient-only modules (no
+  // default export) live exclusively in slots like this.
   let TopBarCenterSlot = null;
   let topBarCenterClaimedBy = null;
-  for (const m of boot.modules) {
-    const e = loaded[m.id];
+  for (const m of allModules) {
+    const e = loaded[m.qid];
     if (e?.status !== 'ok' || !e.TopBarCenter) continue;
     if (TopBarCenterSlot) {
       console.warn(
-        `[atelier] both "${topBarCenterClaimedBy}" and "${m.id}" export TopBarCenter; ` +
-        `keeping the first.`
+        `[atelier] both "${topBarCenterClaimedBy}" and "${m.qid}" export TopBarCenter; keeping the first.`
       );
       continue;
     }
     TopBarCenterSlot = e.TopBarCenter;
-    topBarCenterClaimedBy = m.id;
+    topBarCenterClaimedBy = m.qid;
   }
 
-  // Server seeds meta in the bootstrap so grouping is correct on first paint.
-  // Once the module's frontend finishes importing, its runtime meta wins —
-  // that way live edits take effect on hot-reload without a server restart.
-  // Ambient-only modules (no default export) are filtered out of the rail.
+  // Rail composition: one merged list, ordered stably by module id so
+  // switching workspace context doesn't reshuffle row positions. The
+  // rail shows every module reachable from this context:
+  //
+  //   • Outside a workspace: only root modules.
+  //   • Inside workspace W:  for each id, prefer W's mount if it exists,
+  //     else fall through to root. Workspace-only modules (no root sibling)
+  //     are interleaved alphabetically by id with the rest. Shadows occupy
+  //     the same row position as the root module they replace — switching
+  //     workspaces doesn't move other rows around.
+  //
+  // Each entry keeps its own `workspace` field so the link href and the
+  // active-state check stay correct after merging. Click → preserve the
+  // current workspace context, just change the active module.
+  const byId = new Map();   // id → { root, ws: Map<wsName, mod> }
+  for (const m of allModules) {
+    if (!byId.has(m.id)) byId.set(m.id, { root: null, ws: new Map() });
+    const entry = byId.get(m.id);
+    if (m.workspace) entry.ws.set(m.workspace, m);
+    else entry.root = m;
+  }
+  const merged = [];
+  for (const id of [...byId.keys()].sort()) {
+    const entry = byId.get(id);
+    // Workspace shadow wins if the current workspace has this id.
+    if (effectiveWorkspace && entry.ws.has(effectiveWorkspace)) {
+      merged.push(entry.ws.get(effectiveWorkspace));
+      continue;
+    }
+    // Root fallthrough — always available when the workspace doesn't shadow.
+    if (entry.root) {
+      merged.push(entry.root);
+      continue;
+    }
+    // Workspace-only module whose workspace isn't current: hide.
+  }
+
+  // Group/ungrouped split. Bootstrap meta seeds first paint; runtime meta
+  // (from the loaded bundle) wins once available so live edits take effect.
+  // Ambient-only modules (loaded ok but no default export) are filtered out.
   const ungrouped = [];
   const groups = [];
   const groupIndex = new Map();
-  for (const m of boot.modules) {
-    const e = loaded[m.id];
-    // Hide ambient-only (slot-only) modules from the rail. We treat any
-    // module that loaded successfully but exposes no default Module as
-    // ambient — its UI lives elsewhere (a slot), not in the main surface.
+  for (const m of merged) {
+    const e = loaded[m.qid];
     if (e?.status === 'ok' && !e.Module) continue;
-    const meta = { ...(m.meta || {}), ...(loaded[m.id]?.meta || {}) };
+    const meta = { ...(m.meta || {}), ...(loaded[m.qid]?.meta || {}) };
     const item = {
       id: m.id,
+      qid: m.qid,
+      workspace: m.workspace,
       name: meta.name || m.id,
       icon: meta.icon,
-      // status: 'idle',  // revive when StatusDot returns (see RailItem)
     };
     if (meta.group) {
       let g = groupIndex.get(meta.group);
@@ -742,12 +1238,19 @@ function App() {
     }
   }
 
+  // Workspace UI rules driven by count:
+  //   0 or 1 workspaces → no picker, no breadcrumb. "Workspace" is invisible.
+  //   2+ workspaces     → picker visible, breadcrumb shows the active one.
+  const showPicker = wsCount >= 2;
+  const forceWsParam = wsCount >= 2;
+
   return (
     <AppShell
       full
       topBar={
         <TopBar
-          workspace="personal"
+          workspace={showPicker ? (effectiveWorkspace || '') : ''}
+          showWorkspace={showPicker && !!effectiveWorkspace}
           subtitle={activeName}
           env={boot.env}
           sidebarCollapsed={sidebarCollapsed}
@@ -755,37 +1258,43 @@ function App() {
           center={TopBarCenterSlot ? <TopBarCenterSlot /> : null}
         />
       }
+      notice={<ConnectionBanner />}
       left={
         <LeftRail
           ungrouped={ungrouped}
           groups={groups}
-          activeId={active?.id || null}
-          onSelect={navigate}
-          onAddModule={() => navigate(null)}
-          workspace="personal"
+          activeId={activeMod?.qid || null}
+          onSelect={navigateToItem}
+          onAddModule={() => navigateTo(buildUrl(null, effectiveWorkspace, { forceWs: forceWsParam }))}
+          workspace={effectiveWorkspace || null}
+          workspaces={user.workspaces || []}
+          onPickWorkspace={pickWorkspace}
+          showWorkspace={showPicker}
+          forceWsParam={forceWsParam}
           headerLabel={boot.mode === 'standalone' ? 'module' : 'modules'}
           collapsed={sidebarCollapsed}
         />
       }
     >
-      {!active
-        ? <EmptyWorkspace />
+      {!activeMod
+        ? <EmptyWorkspace workspace={showPicker ? (effectiveWorkspace || '') : ''} showWorkspace={showPicker && !!effectiveWorkspace} />
         : ActiveModule
-          ? <ModuleErrorBoundary moduleId={active.id}><ActiveModule /></ModuleErrorBoundary>
-          : <LoadingScreen modules={boot.modules} loaded={loaded} activeId={active.id} />}
+          ? <ModuleErrorBoundary moduleId={activeMod.qid}><ActiveModule /></ModuleErrorBoundary>
+          : <LoadingScreen modules={allModules} loaded={loaded} activeQid={activeMod.qid} />}
     </AppShell>
   );
 }
 
-function EmptyWorkspace() {
+function EmptyWorkspace({ workspace, showWorkspace = false }) {
   const snippet = `export default function Module() {
   return <div className="p-8">hello</div>;
 }`;
+  const breadcrumb = showWorkspace ? `atelier · ${workspace}` : 'atelier';
   return (
     <div className="flex-1 min-h-0 grid-bg flex items-center justify-center relative overflow-auto">
       <div className="max-w-[560px] px-12 py-10">
         <div className="font-mono text-11 tracking-caps text-fg-muted lowercase mb-3.5">
-          atelier · personal
+          {breadcrumb}
         </div>
         <div
           className="font-display italic text-fg-display leading-[1.05] mb-5 [text-wrap:balance]"
@@ -812,15 +1321,15 @@ function EmptyWorkspace() {
   );
 }
 
-function LoadingScreen({ modules, loaded, activeId }) {
-  const mod = modules.find((m) => m.id === activeId);
-  const state = mod ? loaded[mod.id] : undefined;
+function LoadingScreen({ modules, loaded, activeQid }) {
+  const mod = modules.find((m) => m.qid === activeQid);
+  const state = mod ? loaded[mod.qid] : undefined;
   if (state?.status === 'error') {
     return (
       <div className="flex-1 min-h-0 flex items-center justify-center p-10 grid-bg">
         <div className="max-w-[520px] bg-card border border-[rgba(251,73,52,0.4)] rounded-sm px-4 py-3.5 font-mono text-12 text-fg-primary">
           <div className="text-[#fb4934] text-11 tracking-caps lowercase mb-1.5">
-            {mod?.id} · failed to load
+            {mod?.qid} · failed to load
           </div>
           <div className="whitespace-pre-wrap break-words text-fg-secondary">
             {String(state.err?.message || state.err)}
@@ -833,7 +1342,7 @@ function LoadingScreen({ modules, loaded, activeId }) {
     <div className="flex-1 flex items-center justify-center grid-bg">
       <div className="flex flex-col items-center gap-2">
         <Spinner size={16} />
-        <span className="label">loading {mod?.id ?? ''}…</span>
+        <span className="label">loading {mod?.qid ?? ''}…</span>
       </div>
     </div>
   );

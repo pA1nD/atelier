@@ -96,21 +96,41 @@ export async function getCss(srcPath, scanSources, scanBase) {
 }
 
 /* ============================================================================
- * MODULE CONFIG — optional whitelist at <workspace>/atelier.config.json.
+ * MODULE CONFIG — optional filter at <workspace>/atelier.config.json.
  *
  * Shape:
  *   { "modules": ["a","b"] }                        // both envs filtered
  *   { "modules": { "dev": [...], "prod": [...] } }  // either key optional
  *
- * Missing file, missing/non-array key, or invalid JSON ⇒ no filter (all
- * modules enabled — current behavior). Items in the list that don't match
- * a real module dir get a non-fatal warning.
+ * Each list is either an allowlist (bare ids — only these run) or a
+ * denylist (every id prefixed with `!` — everything except these runs).
+ * Mixing bare and bang in one list is rejected (treated as missing, with
+ * a warning), since "only these, but also drop that" is ambiguous.
+ *
+ *   ["kanban","kit"]      → allowlist (only these)
+ *   ["!scratch","!wip"]   → denylist  (all except these)
+ *   ["kanban","!scratch"] → mixed → warning, no filter applied
+ *
+ * Missing file, missing/non-array key, mixed list, or invalid JSON ⇒ no
+ * filter (all modules enabled). Items that don't match a real module dir
+ * get a non-fatal warning.
  *
  * Used by the runner (filter discovered modules per ENV at request time)
  * and the deploy CLI (filter siblings before installing/updating in prod).
  * ============================================================================ */
 
 export const CONFIG_FILENAME = 'atelier.config.json';
+
+function validateList(list, envLabel) {
+  if (!Array.isArray(list)) return null;
+  const bang = list.filter((s) => typeof s === 'string' && s.startsWith('!'));
+  const bare = list.filter((s) => typeof s === 'string' && !s.startsWith('!'));
+  if (bang.length && bare.length) {
+    process.stderr.write(`! ${CONFIG_FILENAME}: ${envLabel} list mixes allow ('${bare[0]}') and deny ('${bang[0]}') entries — pick one (treating as missing)\n`);
+    return null;
+  }
+  return list;
+}
 
 export function loadModuleConfig(workspaceRoot) {
   const file = path.join(workspaceRoot, CONFIG_FILENAME);
@@ -124,24 +144,31 @@ export function loadModuleConfig(workspaceRoot) {
     return { dev: null, prod: null };
   }
   const m = parsed.modules;
-  if (Array.isArray(m)) return { dev: m, prod: m };
+  if (Array.isArray(m)) {
+    const v = validateList(m, 'modules');
+    return { dev: v, prod: v };
+  }
   if (m && typeof m === 'object') {
     return {
-      dev:  Array.isArray(m.dev)  ? m.dev  : null,
-      prod: Array.isArray(m.prod) ? m.prod : null,
+      dev:  validateList(m.dev,  'modules.dev'),
+      prod: validateList(m.prod, 'modules.prod'),
     };
   }
   return { dev: null, prod: null };
 }
 
-export function applyModuleFilter(modules, allowList, { getId = (x) => x, warn = () => {} } = {}) {
-  if (!allowList) return modules;
+export function applyModuleFilter(modules, list, { getId = (x) => x, warn = () => {} } = {}) {
+  if (!list) return modules;
+  const isDeny = list.length > 0 && list[0].startsWith('!');
   const ids = new Set(modules.map(getId));
-  for (const a of allowList) {
+  const stripped = list.map((s) => isDeny ? s.slice(1) : s);
+  for (const a of stripped) {
     if (!ids.has(a)) warn(a);
   }
-  const allow = new Set(allowList);
-  return modules.filter((m) => allow.has(getId(m)));
+  const set = new Set(stripped);
+  return isDeny
+    ? modules.filter((m) => !set.has(getId(m)))
+    : modules.filter((m) =>  set.has(getId(m)));
 }
 
 /* ============================================================================
@@ -161,9 +188,19 @@ export function applyModuleFilter(modules, allowList, { getId = (x) => x, warn =
  *     a folder with `_` or `.` to opt out of discovery.
  * ============================================================================ */
 
-export const RESERVED_NAMES = new Set(['atelier', 'api', 'assets', 'modules']);
+export const RESERVED_NAMES = new Set(['atelier', 'api', 'assets', 'modules', 'w']);
 
 export const isSpecialDir = (name) => !/^[a-zA-Z0-9]/.test(name);
+
+/* `$<name>/` directory at the workspace root is a workspace — discovery
+ * recurses one level into it for modules. The leading `$` is the on-disk
+ * marker; URLs use `/w/<name>/...` instead. Restrict the rest to the same
+ * shape we accept for module names so URLs stay stable. */
+export const WORKSPACE_PREFIX = '$';
+export const isWorkspaceDir = (name) =>
+  name.length > 1 && name[0] === WORKSPACE_PREFIX && /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name.slice(1));
+export const workspaceName = (dirName) =>
+  isWorkspaceDir(dirName) ? dirName.slice(1) : null;
 
 /* ============================================================================
  * INSTALL CLI — subcommands for installing, updating, uninstalling Atelier.
@@ -182,11 +219,14 @@ export const isSpecialDir = (name) => !/^[a-zA-Z0-9]/.test(name);
  * ============================================================================ */
 
 const HERE         = path.dirname(fileURLToPath(import.meta.url));
-const WORKSPACE    = path.resolve(HERE, '..');
+// PWD is the logical (symlinked) cwd bash cd'd into — needed when atelier/
+// is a shared symlink across projects, since import.meta.url resolves to
+// the host project, not the caller. HERE is the prod fallback (launchd
+// doesn't set PWD; atelier/ is a real dir there so HERE/.. is correct).
+const WORKSPACE    = path.resolve(process.env.PWD || HERE, '..');
 const HOME         = process.env.HOME;
 const INSTALL      = path.join(HOME, '.atelier');
 const INSTALL_AT   = path.join(INSTALL, 'atelier');
-const CLAUDE_SKILLS = path.join(HOME, '.claude', 'skills');
 const PLIST        = path.join(HOME, 'Library', 'LaunchAgents', 'dev.atelier.plist');
 const AGENT        = 'dev.atelier';
 const UID          = String(process.getuid());
@@ -302,8 +342,7 @@ function deployModule(name) {
   const dest = path.join(INSTALL, name);
   sh('rsync', ['-a', '--delete', ...RSYNC_EXCLUDES, ...DEPLOY_FILTERS, src + '/', dest + '/']);
   installModuleDeps(name, dest);
-  const n = syncGlobalSkills(name);
-  log(`  + ${name}${n ? ` (+${n} global skill${n > 1 ? 's' : ''})` : ''}`);
+  log(`  + ${name}`);
 }
 
 /* Modules with their own package.json (e.g. abstract → pngjs) need their
@@ -324,49 +363,11 @@ function installModuleDeps(name, dest) {
   sh('npm', args, { cwd: dest });
 }
 
-/* Modules can ship skills at <module>/.claude/skills/<name>/SKILL.md — the
- * same path Claude Code auto-loads when the module directory is the workspace
- * (for dev: `cd <module> && claude`). A skill with `scope: global` in its
- * frontmatter is also copied to ~/.claude/skills/<name>/ at install time so
- * any Claude session on the machine can load it. Skills without `scope:
- * global` stay bundled with the module. */
-function listModuleSkills(name) {
-  const dir = path.join(INSTALL, name, '.claude', 'skills');
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir)
-    .map((n) => ({ name: n, dir: path.join(dir, n) }))
-    .filter((s) => { try { return fs.statSync(s.dir).isDirectory(); } catch { return false; } });
-}
-
-function readSkillScope(skillDir) {
-  const md = path.join(skillDir, 'SKILL.md');
-  if (!fs.existsSync(md)) return null;
-  const body = fs.readFileSync(md, 'utf8');
-  const m = /^---\n([\s\S]*?)\n---/m.exec(body);
-  if (!m) return null;
-  const line = m[1].split('\n').find((l) => /^\s*scope\s*:/.test(l));
-  if (!line) return null;
-  return line.split(':')[1].trim();
-}
-
-function syncGlobalSkills(moduleName) {
-  let n = 0;
-  for (const skill of listModuleSkills(moduleName)) {
-    if (readSkillScope(skill.dir) !== 'global') continue;
-    fs.mkdirSync(CLAUDE_SKILLS, { recursive: true });
-    sh('rsync', ['-a', '--delete', skill.dir + '/', path.join(CLAUDE_SKILLS, skill.name) + '/']);
-    n++;
-  }
-  return n;
-}
-
-function removeGlobalSkillsFor(moduleName) {
-  // Read the skills dir in the install BEFORE the module is deleted.
-  for (const skill of listModuleSkills(moduleName)) {
-    if (readSkillScope(skill.dir) !== 'global') continue;
-    fs.rmSync(path.join(CLAUDE_SKILLS, skill.name), { recursive: true, force: true });
-  }
-}
+/* Skills are no longer the install CLI's concern. Modules carry skills
+ * at <module>/.claude/skills/<name>/SKILL.md; those files ship to prod
+ * via DEPLOY_FILTERS like any other definitional content. Discovery,
+ * scope, host install, and session aggregation all live in module
+ * space — see the `skills` and `mission-control` modules. */
 
 function deployModules(names) {
   if (names.length === 0) { log('  (no modules)'); return; }
@@ -464,6 +465,8 @@ function renderPlist() {
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>NODE_ENV</key>
+    <string>production</string>
   </dict>
   <key>RunAtLoad</key>        <true/>
   <key>KeepAlive</key>        <true/>
@@ -502,23 +505,20 @@ function fullNuke() {
   if (fs.existsSync(PLIST)) { step('removing plist'); fs.rmSync(PLIST, { force: true }); }
   step('removing /etc/hosts entry (macOS will prompt for your password)');
   sudoViaOsascript(`sed -i '' -E '/^127\\.0\\.0\\.1[[:space:]]+atelier$/d' /etc/hosts`, 'remove atelier host entry');
-  // Read + remove global skills before the install dir goes away.
-  for (const name of installedModules()) removeGlobalSkillsFor(name);
   if (fs.existsSync(INSTALL)) { step('removing ~/.atelier/'); fs.rmSync(INSTALL, { recursive: true, force: true }); }
 }
 
 function rmModule(name) {
   const abs = path.join(INSTALL, name);
   if (!fs.existsSync(abs)) { warn(`not installed: ${name}`); return; }
-  removeGlobalSkillsFor(name);            // must run before the rmSync below
   fs.rmSync(abs, { recursive: true, force: true });
   log('  - ' + name);
 }
 
 /* Remove installed modules that aren't in the target set. Mirrors
- * `npm run atelier -- uninstall <name>` semantics: the install dir goes
- * and any global skills the module shipped get stripped from
- * ~/.claude/skills/.
+ * `npm run atelier -- uninstall <name>` semantics: the install dir goes.
+ * Host-installed skills (under ~/.claude/skills/) are managed by the
+ * `skills` module — removing a module here doesn't clean those up.
  *
  * Only runs on the no-args path of `install` / `update`. Explicit-arg
  * invocations like `update kanban` are scoped to those modules — leaving

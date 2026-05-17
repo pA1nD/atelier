@@ -122,33 +122,50 @@ export default {
 };
 ```
 
-**Optional skills** — `<module>/.claude/skills/<skill-name>/SKILL.md`. This is the same path Claude Code natively loads when the module directory is the workspace, so for dev just `cd <module> && claude` and the skill is live — no install step, no symlink. A skill is a markdown file with YAML frontmatter. Two scopes:
+**Optional skills** — `<module>/.claude/skills/<skill-name>/SKILL.md`. This is the same path Claude Code natively loads when the module directory is the workspace, so for dev just `cd <module> && claude` and the skill is live — no install step, no symlink. A skill is a markdown file with YAML frontmatter.
 
-| Frontmatter                | Behavior on `npm run atelier -- install <module>` |
-|---------------------------|-----|
-| `scope: global`           | Also copied to `~/.claude/skills/<skill-name>/` so any Claude session on this machine can load it. Removed from there on `uninstall <module>`. |
-| *(missing or anything else)* | Stays bundled with the module at `~/.atelier/<module>/.claude/skills/`. Available when someone opens Claude Code inside that module directory; not visible to other sessions. |
+The shell doesn't read or interpret any of this — it just rsyncs `<module>/.claude/skills/` to `~/.atelier/<module>/.claude/skills/` alongside the rest of the module's definitional content on `install` / `update`. Skill discovery, scope (`scope: global`), Mission Control session aggregation, and the optional host install into `~/.claude/skills/` are all module-space concerns:
 
-Example:
+- **Mission Control** merges every module's `scope: global` skills into every MC-spawned session. See `mission-control/`.
+- **`skills/`** module — manage host install: copies into `~/.claude/skills/<name>/` and rewrites `$ATELIER_URL` to this atelier's literal base URL so the host copy is self-contained.
+
+Inside `SKILL.md`, the canonical pattern for reaching atelier is `$ATELIER_URL` (set by MC inside containers; rewritten to a literal URL on host install). Modules that still use the legacy `${ATELIER_URL:-http://atelier:1844}` fallback work too — the host-install rewriter recognizes both forms.
+
+## Workspaces
+
+A **workspace** is a folder at the workspace root prefixed with `$` containing its own modules. The same module convention applies one level deeper:
 
 ```
-kanban/
-├── frontend.jsx
-├── backend.js
-├── README.md               ← documents the dev recipe below
-└── .claude/
-    └── skills/
-        └── atelier-kanban/
-            └── SKILL.md    ← frontmatter includes `scope: global`
+atelier/
+auth/                       ← global module
+kanban/                     ← global module
+$bigcorp/                   ← workspace
+  kanban/                   ←   workspace-scoped kanban
+    frontend.jsx
+    backend.js
+  posts/                    ←   workspace-scoped posts
+$othercorp/
+  kanban/
 ```
 
-**Skills route via `$ATELIER_URL`.** The canonical pattern inside a `SKILL.md` is:
+Workspaces let you run multiple isolated tenants in one atelier without forking the codebase. Each workspace's module gets its own `data/` directory and its own URL prefix.
 
-```bash
-URL=${ATELIER_URL:-http://atelier:1844}
-```
+| Surface | Global | Workspace |
+|---|---|---|
+| URL (page) | `/<id>` | `/w/<ws>/<id>` |
+| URL (API) | `/api/<id>/...` | `/api/w/<ws>/<id>/...` |
+| URL (bundle) | `/modules/<id>/frontend.js` | `/modules/w/<ws>/<id>/frontend.js` |
+| WebSocket topic | `<id>` | `<ws>/<id>` |
+| Slot key (`ctx.module`) | `<id>` | `<ws>/<id>` |
+| Data dir | `<id>/data/` | `$<ws>/<id>/data/` |
 
-Prod is the default. During dev, the module's README should show how to opt into a dev server — usually `cd <module>; ATELIER_URL=http://localhost:5172 claude "…"`.
+The shell auto-prefixes API routes and WS topics for workspace modules, so module backend source is the same in either context. On the frontend, the bundle derives its API base from `import.meta.url` — see [AUTH.md](./AUTH.md) for the full contract.
+
+The current workspace is a **sticky context** held in `localStorage`. URLs stay clean for global modules (`/activity` while inside `bigcorp` is fine — the picker still shows `bigcorp`). Switching workspace is the picker's only job; navigating between modules never silently changes which workspace you're in.
+
+Workspace name in `$<name>/` must match `[a-zA-Z0-9][a-zA-Z0-9_-]*`. Reserved names (`atelier`, `api`, `assets`, `modules`, `w`) are rejected as both module names and workspace names.
+
+For the auth and access-control story (auth module slot, `req.user`, takeover, `defaultUser`), see [AUTH.md](./AUTH.md).
 
 ## Hot reload
 
@@ -158,7 +175,7 @@ The installed agent does the same over `~/.atelier/`, so `npm run atelier -- upd
 
 ## Real-time transport — `/_atelier/ws`
 
-Atelier exposes one shared WebSocket per browser tab at `/_atelier/ws`. Every real-time event in the workspace flows through it, multiplexed by **topic**. The shell uses topic `'shell'` for its own events (hot reload, etc.); each module gets a topic equal to its id.
+Atelier exposes one shared WebSocket per browser tab at `/_atelier/ws`. Every real-time event in the workspace flows through it, multiplexed by **topic**. The shell uses topic `'shell'` for its own events (hot reload, etc.); each module gets a topic equal to its qualified id — `'<id>'` for global modules and `'<workspace>/<id>'` for workspace-scoped ones.
 
 **Why one WebSocket and not per-module SSE.** Browsers cap HTTP/1.1 to 6 concurrent connections per origin. Each SSE eats one slot, so once you had hot-reload + N module SSEs + multiple tabs, page navigations stalled intermittently. WebSocket per-origin limits are an order of magnitude higher (Chrome ~255 globally), so a single multiplexed WS per tab is effectively unbounded for localhost dev. The same pattern is used by Vite, Next.js, and Webpack dev-server.
 
@@ -348,7 +365,7 @@ Accepted shapes:
 **Where the filter applies:**
 
 - **Dev runtime** (`npm run dev`) — the runner reads the config on every request and filters discovered modules by the `dev` list. Editing the file triggers the existing workspace fs.watch and the browser reloads with the new set; backends not in the list are unmounted, new ones mount on the next request.
-- **Deploy CLI** (`npm run atelier -- install` / `update`) — when no module args are passed, `discoverSiblings` is filtered by the `prod` list before rsync, so only those modules land in `~/.atelier/`. The config itself ships alongside `.env`, so the installed prod runtime applies the same filter at request time. **Modules previously installed but no longer in the `prod` list are removed in the same step** — their `~/.atelier/<name>/` directory is deleted and any global skills they shipped are stripped from `~/.claude/skills/`. Net effect: the install becomes exactly what the config asks for, in one command.
+- **Deploy CLI** (`npm run atelier -- install` / `update`) — when no module args are passed, `discoverSiblings` is filtered by the `prod` list before rsync, so only those modules land in `~/.atelier/`. The config itself ships alongside `.env`, so the installed prod runtime applies the same filter at request time. **Modules previously installed but no longer in the `prod` list are removed in the same step** — their `~/.atelier/<name>/` directory is deleted. (Host-installed skills under `~/.claude/skills/` are managed by the `skills` module and are not touched by the deploy CLI.) Net effect: the install becomes exactly what the config asks for, in one command.
 
 **Bypasses — explicit user intent always wins:**
 
@@ -361,10 +378,11 @@ Unknown ids in the config (typos, deleted modules) trigger a one-time warning in
 
 `discoverModules` in [server.js](./server.js) walks the workspace root and treats any sibling directory with a `frontend.jsx` or `backend.js` as a module — except for the cases below.
 
-- **First character is not `[a-zA-Z0-9]`.** Folders starting with `_`, `.`, `-`, space, etc. are skipped (`_agents/`, `_archive/`, `.git/`, etc.). Prefix a folder with `_` or `.` to keep it out of discovery without renaming.
-- **Reserved names** (the `SKIP` set):
+- **First character is not `[a-zA-Z0-9]` or `$`.** Folders starting with `_`, `.`, `-`, space, etc. are skipped (`_agents/`, `_archive/`, `.git/`, etc.). Prefix a folder with `_` or `.` to keep it out of discovery without renaming. The `$` prefix is reserved — it marks workspaces (see [Workspaces](#workspaces)); discovery recurses one level into a `$<name>/` folder rather than treating it as a module.
+- **Reserved names** (the `SKIP` set) — apply both to global module dirs and to workspace names (`$<reserved>` is rejected the same way):
   - `atelier` — the shell itself.
   - `api` — every module registers under `/api/<module-id>/…`; a module by this name would make endpoint URLs ambiguous.
   - `assets` — `/assets/<name>.(js|css)` serves host static files; a module here would be silently shadowed.
   - `modules` — `/modules/<id>/frontend.js` serves module bundles; same shadowing risk.
+  - `w` — `/w/<workspace>/...` is the workspace URL prefix; a global module at `/w` would collide.
 - **No `frontend.jsx` and no `backend.js`.** Plain content directories (e.g. `research pack/`) aren't modules.

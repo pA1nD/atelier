@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "PORT=5172 node server.js",
-    "dev:module": "PORT=5172 node server.js",
+    "dev": "node server.js",
+    "dev:module": "node server.js",
     "atelier": "node atelier.js"
   },
   "engines": {
