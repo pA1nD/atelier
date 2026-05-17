@@ -57,27 +57,16 @@ const { useState, useEffect, useRef } = React;
  * Symmetrical: `register(id, api)` from the module's mount, `unregister(id)`
  * on teardown if needed.
  * ========================================================================= */
-// Expose the active workspace as a read-only constant on the public
-// shell API. Workspace is a page-load snapshot — picker changes do a
-// full reload, so this never goes stale within a tab's lifetime. Modules
-// that want to namespace localStorage, build a workspace-aware label,
-// or tag persisted records can read this; modules that don't care
-// continue to ignore it.
-(function wireWorkspaceConstant() {
-  if (typeof window === 'undefined') return;
-  window.__atelier = window.__atelier || {};
-  const ws = window.__ATELIER__?.workspace || null;
-  try {
-    Object.defineProperty(window.__atelier, 'workspace', {
-      value: ws,
-      writable: false,
-      configurable: false,
-      enumerable: true,
-    });
-  } catch {
-    window.__atelier.workspace = ws;
-  }
-})();
+// Workspace is not exposed as a shell-API constant. The canonical way for
+// a module to know its workspace is to derive it from its own bundle URL
+// (see the ROUTE/API/TOPIC snippet every frontend.jsx starts with):
+//
+//   const ROUTE = new URL('.', import.meta.url).pathname
+//                   .replace(/^\/modules\//, '').replace(/\/$/, '');
+//   const WS    = ROUTE.split('/')[0];   // 'global' or '<workspace>'
+//
+// One source of truth (the bundle URL), one less shell global to keep in
+// sync with reality.
 
 (function wireModuleRegistry() {
   if (typeof window === 'undefined') return;
@@ -210,17 +199,11 @@ const { useState, useEffect, useRef } = React;
   function connect() {
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Pass the page's workspace through on the WS URL so the server can
-    // tag this connection and fan out per-workspace events correctly.
-    // The tab's location is the source of truth — re-read on each
-    // connect so a fresh WS after navigation picks up workspace switches.
-    let wsParam = '';
+    // Topics are qualified (`<ws>/<id>`); the server doesn't tag the
+    // connection, and the client subscribes to whichever qids it cares
+    // about. No `?ws=` needed on the upgrade URL.
     try {
-      const cur = new URL(window.location.href).searchParams.get('ws');
-      if (cur) wsParam = `?ws=${encodeURIComponent(cur)}`;
-    } catch {}
-    try {
-      ws = new WebSocket(`${proto}//${window.location.host}/_atelier/ws${wsParam}`);
+      ws = new WebSocket(`${proto}//${window.location.host}/_atelier/ws`);
     } catch (err) {
       armOfflineTimer();
       scheduleReconnect();
@@ -452,12 +435,11 @@ function TopBar({ workspace, showWorkspace = false, right, center, subtitle, env
 
 /* WorkspacePicker — clickable badge that opens a dropdown of workspaces.
  *
- * Active state = the current `workspace` prop. The picker is only mounted
- * when there are 2+ workspaces (see App.showPicker), so it never has to
- * represent a "global" state to the user — once workspaces exist, the
- * user lives inside one of them. Root modules still surface in the rail
- * via fallthrough, but as "always available", not a separate world.
- * Closes on outside click, ESC, or selection. */
+ * Active state = the current `workspace` prop. Mounted only when the user
+ * has at least one non-`global` workspace; the synthetic `global` is the
+ * fallback context whose modules are merged into every workspace's rail
+ * (so they're always-available, not a separate destination). Closes on
+ * outside click, ESC, or selection. */
 function WorkspacePicker({ workspaces, active, onPick }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -571,19 +553,14 @@ function LeftRail({
   workspaces = [],
   onPickWorkspace,
   showWorkspace = false,
-  pinnedSection = null,         // { name, items } — a workspace's own modules
   onAddModule,
   headerLabel = 'modules',
   footer,
   collapsed = false,
-  forceWsParam = false,
 }) {
   const empty = ungrouped.length === 0 && groups.length === 0;
-  const itemHref = (m) => {
-    const path = `/${encodeURIComponent(m.id)}`;
-    if (forceWsParam && workspace) return `${path}?ws=${encodeURIComponent(workspace)}`;
-    return path;
-  };
+  // qid is `<ws>/<id>`; the page URL has the same shape.
+  const itemHref = (m) => `/${m.qid}`;
   const renderItem = (m) => (
     <RailItem
       key={m.qid || m.id}
@@ -621,21 +598,7 @@ function LeftRail({
       )}
 
       <div className="flex-1 overflow-auto px-1.5">
-        {pinnedSection && pinnedSection.items.length > 0 && (
-          <div>
-            <div className="flex items-center pt-2.5 pb-1 px-1.5">
-              <span className="flex-1 font-mono text-[10px] tracking-caps text-fg-muted lowercase">
-                {pinnedSection.name}
-              </span>
-            </div>
-            {pinnedSection.items.map(renderItem)}
-          </div>
-        )}
-
-        <div className={[
-          'flex items-center gap-1.5 pb-1 px-1.5',
-          pinnedSection && pinnedSection.items.length > 0 ? 'pt-3' : 'pt-2.5',
-        ].join(' ')}>
+        <div className="flex items-center gap-1.5 pb-1 px-1.5 pt-2.5">
           <span className="flex-1 font-mono text-[10px] tracking-caps text-fg-muted lowercase">
             {headerLabel}
           </span>
@@ -647,7 +610,7 @@ function LeftRail({
           </button>
         </div>
 
-        {empty && (!pinnedSection || pinnedSection.items.length === 0) && (
+        {empty && (
           <div className="font-mono text-11 text-fg-subtle leading-[1.6] px-1.5 py-1">
             <span className="text-fg-muted">no modules yet.</span>
           </div>
@@ -831,17 +794,11 @@ function AppShell({ topBar, notice, left, children, width, height, full = false 
  * ========================================================================= */
 
 // Load a module's compiled frontend via dynamic ESM import. The URL is
-// flat — `/modules/<id>/frontend.js` — and the server picks workspace vs
-// root mount based on the `?ws=` query param (or the implicit single-
-// workspace default). Two workspaces serving different bytes for the
-// same module id is handled by the server with Cache-Control: no-store
-// AND a ?ws= disambiguator on the URL so the browser cache keys them
-// separately too.
-async function loadModule(entry, ws) {
-  const params = new URLSearchParams();
-  if (ws) params.set('ws', ws);
-  const qs = params.toString();
-  const url = `/modules/${encodeURIComponent(entry.id)}/frontend.js${qs ? '?' + qs : ''}`;
+// fully qualified — `/modules/<ws>/<id>/frontend.js`. Same-named modules
+// in different workspaces get distinct URLs, so the browser cache keys
+// them naturally.
+async function loadModule(entry) {
+  const url = `/modules/${entry.qid}/frontend.js`;
   try {
     const mod = await import(url);
     const Module = typeof mod.default === 'function' ? mod.default : null;
@@ -894,61 +851,40 @@ class ModuleErrorBoundary extends React.Component {
   }
 }
 
-// URL convention.
+// URL convention. Every URL is workspace-qualified.
 //
-//   /                     empty state, no module
-//   /<id>                 module page
-//   ?ws=<name>            workspace context (query, not path)
+//   /                       cold landing — App immediately redirects to
+//                            the first available workspace's home.
+//   /<ws>/                  workspace home — no module selected.
+//   /<ws>/<id>              module page.
 //
-// Workspace is an ambient session attribute. Resolution policy lives on
-// the server (see resolveWorkspaceFromRequest); the client reads what
-// the server resolved out of the bootstrap. The shell's URL stamping rule:
-//
-//   • 0 workspaces       → ?ws= never appears. URLs are bare /<id>.
-//   • 1 workspace        → ?ws= never appears. Server applies single-
-//                          workspace default.
-//   • 2+ workspaces      → ?ws= is always present on shell-emitted URLs.
-//                          The server 302-canonicalizes any cold-load
-//                          that arrives without one (cookie preferred,
-//                          else first workspace), so no client-side race.
-//
-// parseUrl returns { id, ws }. `ws` is the value of the `?ws=` query param
-// (string) or null. The path is just the module id.
+// parseUrl returns { ws, id }. Both may be null when the URL hasn't been
+// canonicalized yet (typically only the very first render at `/`).
 function parseUrl() {
   const p = window.location.pathname;
-  let id = null;
-  const m = p.match(/^\/([a-zA-Z0-9][a-zA-Z0-9_-]*)\/?$/);
-  if (m) id = decodeURIComponent(m[1]);
-  let ws = null;
-  try { ws = new URL(window.location.href).searchParams.get('ws') || null; } catch {}
-  return { id, ws };
+  const m = p.match(
+    /^\/([a-zA-Z0-9][a-zA-Z0-9_-]*)(?:\/([a-zA-Z0-9][a-zA-Z0-9_-]*))?\/?$/
+  );
+  if (!m) return { ws: null, id: null };
+  return {
+    ws: decodeURIComponent(m[1]),
+    id: m[2] ? decodeURIComponent(m[2]) : null,
+  };
 }
 
-// Build a URL for the SPA: path + optional `?ws=` query.
-function buildUrl(id, ws, { forceWs = false } = {}) {
-  const path = id ? `/${encodeURIComponent(id)}` : '/';
-  if (!ws) return path;
-  if (!forceWs) return path;
-  return `${path}?ws=${encodeURIComponent(ws)}`;
+// Build a URL for the SPA.
+function buildUrl(ws, id) {
+  if (!ws) return '/';
+  if (!id) return `/${encodeURIComponent(ws)}/`;
+  return `/${encodeURIComponent(ws)}/${encodeURIComponent(id)}`;
 }
 
-// Flatten the user object (modules + workspaces.modules) into a single
-// list of entries. Each entry carries enough to load its bundle and build
-// a URL: { id, qid, workspace, hasFrontend, meta }. qid is the qualified
-// id ('kanban' for global, 'bigcorp/kanban' for workspace-scoped) and is
-// the key for `loaded`, dirty tracking, hot-reload moduleId, etc.
+// Flatten the user object (workspaces.modules) into a single list of
+// entries. Every module has a workspace. qid = `<ws>/<id>` and is the key
+// for `loaded`, dirty tracking, hot-reload moduleId, etc.
 function flattenUserModules(user) {
   if (!user) return [];
   const out = [];
-  for (const m of user.modules || []) {
-    out.push({
-      id: m.id,
-      qid: m.id,
-      workspace: null,
-      hasFrontend: m.hasFrontend !== false,
-      meta: m.meta || {},
-    });
-  }
   for (const ws of user.workspaces || []) {
     for (const m of ws.modules || []) {
       out.push({
@@ -1003,29 +939,32 @@ function App() {
   // Auth module's handleUnauth took over → render only its bundle, no chrome.
   if (window.__ATELIER__?.takeover) return <Takeover />;
 
-  const boot = window.__ATELIER__ || { mode: 'host', user: { id: 'local', modules: [], workspaces: [] } };
-  const user = boot.user || { id: 'local', modules: [], workspaces: [] };
+  const boot = window.__ATELIER__ || { mode: 'host', user: { id: 'local', workspaces: [] } };
+  const user = boot.user || { id: 'local', workspaces: [] };
   const allModules = flattenUserModules(user);
+  const wsList = user.workspaces || [];
 
-  // Workspace policy based on count:
-  //   0 → null always. URLs bare. Picker hidden.
-  //   1 → that workspace, implicit. URLs bare. Picker hidden.
-  //   2+ → from URL ?ws= (with last-visited fallback). Picker visible.
-  const workspaceList = (user.workspaces || []).map((w) => w.id);
-  const wsCount = workspaceList.length;
-
-  const [urlState, setUrlState] = useState(parseUrl);      // { id, ws }
+  const [urlState, setUrlState] = useState(parseUrl);      // { ws, id }
   const [loaded, setLoaded] = useState({});                // qid → load entry
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const toggleSidebar = () => setSidebarCollapsed((c) => !c);
 
-  // Effective workspace: server already resolved this and put it in the
-  // bootstrap. Trust the server (single source of truth, see
-  // resolveWorkspaceFromRequest). URL ?ws= is the primary input the
-  // server consults, so urlState.ws will normally match boot.workspace —
-  // but on cold loads with 2+ workspaces the server has already 302-
-  // canonicalized to add ?ws= before this code ever runs.
-  const effectiveWorkspace = boot.workspace || urlState.ws || (wsCount === 1 ? workspaceList[0] : null);
+  // Canonicalize URL: if no workspace in the path, pick a default and
+  // history.replaceState to /<ws>/. Default = first workspace the user
+  // has access to that actually has modules — landing on an empty
+  // workspace (e.g. `global` when all modules live in `$bigcorp/`) is
+  // unhelpful. Falls back to the first listed workspace if none have
+  // modules.
+  const defaultWs = (wsList.find((w) => (w.modules || []).length > 0) || wsList[0])?.id || null;
+
+  useEffect(() => {
+    if (urlState.ws || !defaultWs) return;
+    const target = buildUrl(defaultWs, null);
+    window.history.replaceState(null, '', target);
+    setUrlState(parseUrl());
+  }, [urlState.ws, defaultWs]);
+
+  const effectiveWorkspace = urlState.ws || defaultWs;
 
   // ⌘\ toggles the rail. Bound at the app level so any frame can see it.
   useEffect(() => {
@@ -1039,15 +978,20 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // Load every accessible module's bundle once. With workspace-qualified
+  // URLs the same module id in different workspaces gets distinct bundles,
+  // so we don't refetch on workspace switch — picker does a full reload
+  // anyway, and rail navigation within a workspace is just module
+  // switching.
   useEffect(() => {
     (async () => {
       for (const m of allModules) {
         if (!m.hasFrontend) continue;
-        const res = await loadModule(m, effectiveWorkspace);
+        const res = await loadModule(m);
         setLoaded((l) => ({ ...l, [m.qid]: res }));
       }
     })();
-  }, [effectiveWorkspace]);
+  }, []);
 
   useEffect(() => {
     const onPop = () => setUrlState(parseUrl());
@@ -1055,23 +999,22 @@ function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  // Resolve the active module. Workspace-scoped instance wins if the current
-  // context has it; otherwise the root mount handles. Same fallthrough rule
-  // as the server's buildAllowedQids.
-  const activeMod = urlState.id ? (
-    (effectiveWorkspace && allModules.find((m) => m.workspace === effectiveWorkspace && m.id === urlState.id))
-    || allModules.find((m) => !m.workspace && m.id === urlState.id)
-  ) : null;
+  // Resolve the active module. URL fully identifies it — workspace+id.
+  const activeMod = (urlState.ws && urlState.id)
+    ? allModules.find((m) => m.workspace === urlState.ws && m.id === urlState.id)
+    : null;
   const activeQid = activeMod?.qid || null;
 
-  // URL points at an id that doesn't exist anywhere — tidy back to root.
+  // URL points at a (ws, id) pair that doesn't exist — tidy back to the
+  // workspace home if the workspace is real, else root.
   useEffect(() => {
-    if (urlState.id !== null && !activeMod) {
-      const target = buildUrl(null, effectiveWorkspace, { forceWs: wsCount >= 2 });
-      window.history.replaceState(null, '', target);
-      setUrlState(parseUrl());
-    }
-  }, [activeQid, activeMod, effectiveWorkspace, urlState.id, wsCount]);
+    if (urlState.id === null) return;
+    if (activeMod) return;
+    const wsExists = wsList.some((w) => w.id === urlState.ws);
+    const target = wsExists ? buildUrl(urlState.ws, null) : '/';
+    window.history.replaceState(null, '', target);
+    setUrlState(parseUrl());
+  }, [activeQid, activeMod, urlState.ws, urlState.id, wsList.length]);
 
   // Hot reload — module-aware, qid-keyed. Active module / shell / ambient
   // module / unknown id → full reload. Other modules → mark dirty; the next
@@ -1105,8 +1048,7 @@ function App() {
     return () => { try { unsub?.(); } catch {} };
   }, []);
 
-  // Navigate to a target URL via the SPA. Full-page navigations come from
-  // navigateToItem when a module is dirty.
+  // SPA navigation. Full-page when the target module is dirty.
   function navigateTo(target) {
     const here = window.location.pathname + window.location.search;
     if (here !== target) {
@@ -1116,33 +1058,21 @@ function App() {
     setUrlState(parseUrl());
   }
 
-  // Click a rail item. The active workspace stays the same — this is just
-  // a module switch. URL form depends on workspace count (?ws= only when 2+).
   function navigateToItem(item) {
-    const qid = item.qid;
-    const target = buildUrl(item.id, effectiveWorkspace, { forceWs: wsCount >= 2 });
-    if (qid && dirtyRef.current.has(qid)) { window.location.assign(target); return; }
+    const target = buildUrl(item.workspace, item.id);
+    if (item.qid && dirtyRef.current.has(item.qid)) { window.location.assign(target); return; }
     navigateTo(target);
   }
 
-  // Pick a workspace from the picker. Full reload — workspace is treated
-  // like a login session (cache busts, bundles re-fetch, WS reconnects).
-  // The server will update the atelier_ws cookie when it serves the next
-  // index; no need for client-side persistence.
+  // Pick a workspace from the picker. Full reload — workspace switch is
+  // treated like a login session boundary (cache busts, bundles re-fetch,
+  // WS reconnects). Preserve the current module id if the destination
+  // workspace has a module of the same name.
   function pickWorkspace(ws) {
-    const id = urlState.id;
-    // Preserve the current module id if the destination workspace (or root
-    // fallthrough) has a module of the same name; else go to landing.
-    let preserve = null;
-    if (id) {
-      const hasInWs = ws && allModules.some((m) => m.workspace === ws && m.id === id);
-      const hasRoot = allModules.some((m) => !m.workspace && m.id === id);
-      if (hasInWs || (!ws && hasRoot) || (ws && hasRoot && !allModules.some((m) => m.workspace === ws && m.id === id))) {
-        preserve = id;
-      }
-    }
-    const target = buildUrl(preserve, ws, { forceWs: wsCount >= 2 });
-    window.location.assign(target);
+    const curId = urlState.id;
+    const preserve = curId && allModules.some((m) => m.workspace === ws && m.id === curId)
+      ? curId : null;
+    window.location.assign(buildUrl(ws, preserve));
   }
 
   const entry = activeMod ? loaded[activeMod.qid] : null;
@@ -1154,11 +1084,18 @@ function App() {
   }, [activeName]);
 
   // TopBarCenter slot — first module that exports one wins; subsequent
-  // claimants are warned about and ignored. Ambient-only modules (no
-  // default export) live exclusively in slots like this.
+  // claimants are warned about and ignored. Eligible modules match the
+  // same rail-composition rule (current workspace OR global) so a global
+  // `mission-control` keeps its topbar slot from inside any workspace.
+  // Workspace-mounted slot wins over global if both exist (parallel to
+  // rail shadowing).
   let TopBarCenterSlot = null;
   let topBarCenterClaimedBy = null;
-  for (const m of allModules) {
+  const slotCandidates = allModules
+    .filter((m) => m.workspace === effectiveWorkspace || m.workspace === 'global')
+    // workspace-scoped candidate beats global when ids match
+    .sort((a, b) => (a.workspace === 'global' ? 1 : 0) - (b.workspace === 'global' ? 1 : 0));
+  for (const m of slotCandidates) {
     const e = loaded[m.qid];
     if (e?.status !== 'ok' || !e.TopBarCenter) continue;
     if (TopBarCenterSlot) {
@@ -1171,42 +1108,21 @@ function App() {
     topBarCenterClaimedBy = m.qid;
   }
 
-  // Rail composition: one merged list, ordered stably by module id so
-  // switching workspace context doesn't reshuffle row positions. The
-  // rail shows every module reachable from this context:
-  //
-  //   • Outside a workspace: only root modules.
-  //   • Inside workspace W:  for each id, prefer W's mount if it exists,
-  //     else fall through to root. Workspace-only modules (no root sibling)
-  //     are interleaved alphabetically by id with the rest. Shadows occupy
-  //     the same row position as the root module they replace — switching
-  //     workspaces doesn't move other rows around.
-  //
-  // Each entry keeps its own `workspace` field so the link href and the
-  // active-state check stay correct after merging. Click → preserve the
-  // current workspace context, just change the active module.
-  const byId = new Map();   // id → { root, ws: Map<wsName, mod> }
+  // Rail composition is a UI choice (server doesn't care): show this
+  // workspace's modules PLUS the global ones, so a tab in `bigcorp` still
+  // has the rail-level affordances global modules provide. When the user
+  // is inside `global` itself, this naturally collapses to just global
+  // modules. Sorted by id; workspace mounts win over the global mount
+  // when the same id exists in both.
+  const railById = new Map();
   for (const m of allModules) {
-    if (!byId.has(m.id)) byId.set(m.id, { root: null, ws: new Map() });
-    const entry = byId.get(m.id);
-    if (m.workspace) entry.ws.set(m.workspace, m);
-    else entry.root = m;
-  }
-  const merged = [];
-  for (const id of [...byId.keys()].sort()) {
-    const entry = byId.get(id);
-    // Workspace shadow wins if the current workspace has this id.
-    if (effectiveWorkspace && entry.ws.has(effectiveWorkspace)) {
-      merged.push(entry.ws.get(effectiveWorkspace));
-      continue;
+    if (m.workspace !== 'global' && m.workspace !== effectiveWorkspace) continue;
+    const existing = railById.get(m.id);
+    if (!existing || m.workspace !== 'global') {
+      railById.set(m.id, m);
     }
-    // Root fallthrough — always available when the workspace doesn't shadow.
-    if (entry.root) {
-      merged.push(entry.root);
-      continue;
-    }
-    // Workspace-only module whose workspace isn't current: hide.
   }
+  const wsModules = [...railById.values()].sort((a, b) => a.id.localeCompare(b.id));
 
   // Group/ungrouped split. Bootstrap meta seeds first paint; runtime meta
   // (from the loaded bundle) wins once available so live edits take effect.
@@ -1214,7 +1130,7 @@ function App() {
   const ungrouped = [];
   const groups = [];
   const groupIndex = new Map();
-  for (const m of merged) {
+  for (const m of wsModules) {
     const e = loaded[m.qid];
     if (e?.status === 'ok' && !e.Module) continue;
     const meta = { ...(m.meta || {}), ...(loaded[m.qid]?.meta || {}) };
@@ -1223,7 +1139,7 @@ function App() {
       qid: m.qid,
       workspace: m.workspace,
       name: meta.name || m.id,
-      icon: meta.icon,
+      icon: meta.icon || 'square',    // documented fallback in README
     };
     if (meta.group) {
       let g = groupIndex.get(meta.group);
@@ -1238,18 +1154,19 @@ function App() {
     }
   }
 
-  // Workspace UI rules driven by count:
-  //   0 or 1 workspaces → no picker, no breadcrumb. "Workspace" is invisible.
-  //   2+ workspaces     → picker visible, breadcrumb shows the active one.
-  const showPicker = wsCount >= 2;
-  const forceWsParam = wsCount >= 2;
+  // Picker shows non-global workspaces. `global` is the rail's baseline
+  // (always merged in via railById above), not a destination — so when
+  // the user has any $-workspaces they pick between those. With no
+  // $-workspaces the picker hides entirely.
+  const pickerWorkspaces = wsList.filter((w) => w.id !== 'global');
+  const showPicker = pickerWorkspaces.length >= 1;
 
   return (
     <AppShell
       full
       topBar={
         <TopBar
-          workspace={showPicker ? (effectiveWorkspace || '') : ''}
+          workspace={effectiveWorkspace || ''}
           showWorkspace={showPicker && !!effectiveWorkspace}
           subtitle={activeName}
           env={boot.env}
@@ -1265,19 +1182,18 @@ function App() {
           groups={groups}
           activeId={activeMod?.qid || null}
           onSelect={navigateToItem}
-          onAddModule={() => navigateTo(buildUrl(null, effectiveWorkspace, { forceWs: forceWsParam }))}
+          onAddModule={() => navigateTo(buildUrl(effectiveWorkspace, null))}
           workspace={effectiveWorkspace || null}
-          workspaces={user.workspaces || []}
+          workspaces={pickerWorkspaces}
           onPickWorkspace={pickWorkspace}
           showWorkspace={showPicker}
-          forceWsParam={forceWsParam}
           headerLabel={boot.mode === 'standalone' ? 'module' : 'modules'}
           collapsed={sidebarCollapsed}
         />
       }
     >
       {!activeMod
-        ? <EmptyWorkspace workspace={showPicker ? (effectiveWorkspace || '') : ''} showWorkspace={showPicker && !!effectiveWorkspace} />
+        ? <EmptyWorkspace workspace={effectiveWorkspace || ''} showWorkspace={showPicker && !!effectiveWorkspace} />
         : ActiveModule
           ? <ModuleErrorBoundary moduleId={activeMod.qid}><ActiveModule /></ModuleErrorBoundary>
           : <LoadingScreen modules={allModules} loaded={loaded} activeQid={activeMod.qid} />}

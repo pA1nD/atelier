@@ -96,40 +96,191 @@ export async function getCss(srcPath, scanSources, scanBase) {
 }
 
 /* ============================================================================
- * MODULE CONFIG — optional filter at <workspace>/atelier.config.json.
+ * MODULE CONFIG — optional filter + path inclusion at
+ * <workspace>/atelier.config.json.
  *
  * Shape:
- *   { "modules": ["a","b"] }                        // both envs filtered
+ *   { "modules": [...] }                            // both envs
  *   { "modules": { "dev": [...], "prod": [...] } }  // either key optional
  *
- * Each list is either an allowlist (bare ids — only these run) or a
- * denylist (every id prefixed with `!` — everything except these runs).
- * Mixing bare and bang in one list is rejected (treated as missing, with
- * a warning), since "only these, but also drop that" is ambiguous.
+ * Top-level entries are EITHER global-module entries or workspace objects.
  *
- *   ["kanban","kit"]      → allowlist (only these)
- *   ["!scratch","!wip"]   → denylist  (all except these)
- *   ["kanban","!scratch"] → mixed → warning, no filter applied
+ *   GLOBAL MODULE ENTRIES (apply to root-folder modules, i.e. the `global`
+ *   workspace):
+ *     "kanban"                  bare name — allow this global module
+ *     "!scratch"                bang name — deny this global module
+ *     "./path/to/dir"           path     — mount external dir as global/<basename>
+ *     "~/work/dir"              path     — same, $HOME-relative
+ *     { "path": "./dir" }              — object form, optional `id` to rename
+ *     { "path": "./dir", "id": "x" }   — mounts as global/x
  *
- * Missing file, missing/non-array key, mixed list, or invalid JSON ⇒ no
- * filter (all modules enabled). Items that don't match a real module dir
- * get a non-fatal warning.
+ *   WORKSPACE OBJECTS:
+ *     { "workspace": "ws" }                      include all of ws
+ *     { "workspace": "!ws" }                     deny all of ws
+ *     { "workspace": "ws", "modules": [...] }    include ws + filter its modules
  *
- * Used by the runner (filter discovered modules per ENV at request time)
- * and the deploy CLI (filter siblings before installing/updating in prod).
+ * MODE classification (per scope: top level and inside each workspace's
+ * `modules` list):
+ *
+ *   ALLOW markers — bare name, path, `{workspace: "ws"}`, `{workspace: "ws",
+ *     modules: [...]}`. Presence of any allow marker → ALLOW mode: only
+ *     explicitly listed things run (workspaces NOT listed are excluded).
+ *
+ *   DENY markers — `!name`, `{workspace: "!ws"}`. Presence of any deny marker
+ *     → DENY mode: everything in scope runs EXCEPT the listed denials
+ *     (workspaces NOT denied stay included).
+ *
+ *   Mixing allow + deny markers in the same list → config error → no filter
+ *   applied (everything in scope runs).
+ *
+ *   No entries at all (or only neutral path-only entries) → no filter →
+ *   everything runs + paths added.
+ *
+ * Inside a workspace block (`{workspace: "ws", modules: [...]}`), same rule
+ * recurses. Bare names refer to that workspace's modules. Paths inside a
+ * workspace default to `<that-workspace>/<basename>`.
+ *
+ * Examples:
+ *
+ *   ["kanban"]                              → only global/kanban
+ *   ["!scratch"]                            → all globals except scratch
+ *                                              + all workspaces
+ *   [{"workspace": "bigcorp"}]              → only bigcorp (no globals)
+ *   [{"workspace": "!bigcorp"}]             → everything except bigcorp
+ *   ["kanban", {"workspace": "bigcorp"}]    → global/kanban + all bigcorp
+ *   ["~/work/extra"]                        → global/extra + all globals
+ *                                              + all workspaces (path is
+ *                                              neutral — no mode set)
+ *
+ * Used by the runner (per-request filter) and the deploy CLI (filter
+ * before rsync to prod).
  * ============================================================================ */
 
 export const CONFIG_FILENAME = 'atelier.config.json';
 
-function validateList(list, envLabel) {
+// Path entries are anything starting with /, ~, ./, ../, or the object
+// form { path: ... }. Module names can't start with those chars, so this
+// is a clean discriminator.
+export function isPathEntry(s) {
+  if (s && typeof s === 'object' && !Array.isArray(s) && typeof s.path === 'string') return true;
+  return typeof s === 'string'
+    && (s.startsWith('/') || s.startsWith('~') || s.startsWith('./') || s.startsWith('../'));
+}
+
+// Resolve `~` (and `~/foo`) to $HOME-anchored absolute paths. Relative paths
+// resolve against `base` (typically the workspace root).
+export function resolvePathEntry(p, base) {
+  if (typeof p !== 'string' || !p) return null;
+  let s = p;
+  if (s === '~' || s.startsWith('~/')) {
+    const home = process.env.HOME;
+    if (!home) return null;
+    s = s === '~' ? home : path.join(home, s.slice(2));
+  }
+  if (!path.isAbsolute(s)) s = path.resolve(base, s);
+  return path.normalize(s);
+}
+
+// Normalize a path entry into { path, id? }. Returns null for malformed input.
+function normalizePathEntry(e) {
+  if (typeof e === 'string') return { path: e };
+  if (e && typeof e === 'object' && typeof e.path === 'string') {
+    const out = { path: e.path };
+    if (typeof e.id === 'string' && e.id) out.id = e.id;
+    return out;
+  }
+  return null;
+}
+
+// Parse one scope's list (top-level or a workspace block's `modules`).
+// Returns:
+//   {
+//     mode: 'allow' | 'deny' | null,    // null = no filter
+//     names: string[],                   // bare module ids (no '!' prefix)
+//     paths: { path, id? }[],            // additive external mounts
+//   }
+// Or null on hard failure (mixed allow+deny).
+function parseFilterList(list, label, { allowWorkspaceObjects = false, workspaces = null } = {}) {
   if (!Array.isArray(list)) return null;
-  const bang = list.filter((s) => typeof s === 'string' && s.startsWith('!'));
-  const bare = list.filter((s) => typeof s === 'string' && !s.startsWith('!'));
-  if (bang.length && bare.length) {
-    process.stderr.write(`! ${CONFIG_FILENAME}: ${envLabel} list mixes allow ('${bare[0]}') and deny ('${bang[0]}') entries — pick one (treating as missing)\n`);
+  const names = [];
+  const paths = [];
+  let firstAllow = null;
+  let firstDeny = null;
+  for (const e of list) {
+    if (isPathEntry(e)) {
+      const p = normalizePathEntry(e);
+      if (p) paths.push(p);
+      continue;
+    }
+    if (typeof e === 'string') {
+      if (e.startsWith('!')) {
+        firstDeny ??= e;
+        names.push(e.slice(1));
+        continue;
+      }
+      firstAllow ??= e;
+      names.push(e);
+      continue;
+    }
+    if (allowWorkspaceObjects && e && typeof e === 'object' && typeof e.workspace === 'string') {
+      const wsRaw = e.workspace;
+      const wsDeny = wsRaw.startsWith('!');
+      const wsName = wsDeny ? wsRaw.slice(1) : wsRaw;
+      if (!wsName) {
+        process.stderr.write(`! ${CONFIG_FILENAME}: ${label}: workspace name is empty\n`);
+        continue;
+      }
+      if (RESERVED_NAMES.has(wsName)) {
+        process.stderr.write(`! ${CONFIG_FILENAME}: ${label}: workspace '${wsName}' is a reserved name — skipping\n`);
+        continue;
+      }
+      if (wsDeny) {
+        firstDeny ??= wsRaw;
+        if (Array.isArray(e.modules)) {
+          process.stderr.write(`! ${CONFIG_FILENAME}: ${label}: '${wsRaw}' is a deny — its inner 'modules' list is ignored\n`);
+        }
+        workspaces.set(wsName, { kind: 'deny-all' });
+      } else {
+        firstAllow ??= wsRaw;
+        if (workspaces.has(wsName)) {
+          process.stderr.write(`! ${CONFIG_FILENAME}: ${label}: workspace '${wsName}' appears more than once — keeping the first\n`);
+          continue;
+        }
+        if (Array.isArray(e.modules)) {
+          const inner = parseFilterList(e.modules, `${label} → workspace '${wsName}'`, { allowWorkspaceObjects: false });
+          if (inner) workspaces.set(wsName, { kind: 'filter', ...inner });
+          else workspaces.set(wsName, { kind: 'include-all' });
+        } else {
+          workspaces.set(wsName, { kind: 'include-all' });
+        }
+      }
+      continue;
+    }
+    // Unknown entry shape — log and skip.
+    process.stderr.write(`! ${CONFIG_FILENAME}: ${label}: unrecognized entry ${JSON.stringify(e)} — skipping\n`);
+  }
+  if (firstAllow && firstDeny) {
+    process.stderr.write(`! ${CONFIG_FILENAME}: ${label}: mixes allow ('${firstAllow}') and deny ('${firstDeny}') entries — pick one (treating ${label} filter as missing)\n`);
     return null;
   }
-  return list;
+  let mode = null;
+  if (firstDeny) mode = 'deny';
+  else if (firstAllow) mode = 'allow';
+  return { mode, names, paths };
+}
+
+// Parse a top-level list into:
+//   {
+//     top: { mode, names, paths } | null,   // global-scope filter
+//     workspaces: Map<string, WsPolicy>,    // per-workspace policies
+//   }
+// Returns null when the input isn't an array.
+function parseConfigList(list, label) {
+  if (!Array.isArray(list)) return null;
+  const workspaces = new Map();
+  const top = parseFilterList(list, label, { allowWorkspaceObjects: true, workspaces });
+  if (!top) return { top: null, workspaces };
+  return { top, workspaces };
 }
 
 export function loadModuleConfig(workspaceRoot) {
@@ -145,30 +296,61 @@ export function loadModuleConfig(workspaceRoot) {
   }
   const m = parsed.modules;
   if (Array.isArray(m)) {
-    const v = validateList(m, 'modules');
+    const v = parseConfigList(m, 'modules');
     return { dev: v, prod: v };
   }
   if (m && typeof m === 'object') {
     return {
-      dev:  validateList(m.dev,  'modules.dev'),
-      prod: validateList(m.prod, 'modules.prod'),
+      dev:  parseConfigList(m.dev,  'modules.dev'),
+      prod: parseConfigList(m.prod, 'modules.prod'),
     };
   }
   return { dev: null, prod: null };
 }
 
-export function applyModuleFilter(modules, list, { getId = (x) => x, warn = () => {} } = {}) {
-  if (!list) return modules;
-  const isDeny = list.length > 0 && list[0].startsWith('!');
-  const ids = new Set(modules.map(getId));
-  const stripped = list.map((s) => isDeny ? s.slice(1) : s);
-  for (const a of stripped) {
-    if (!ids.has(a)) warn(a);
+// Predicate: should this discovered module mount under the given parsed config?
+// Discovered modules carry `{id, workspace}`. External paths are handled
+// separately by `collectConfigPaths`.
+export function shouldIncludeModule(parsedEnv, mod, { globalWorkspace = 'global' } = {}) {
+  if (!parsedEnv) return true;                            // no config → all
+  const { top, workspaces } = parsedEnv;
+
+  if (mod.workspace === globalWorkspace) {
+    if (!top) return true;
+    if (top.mode === 'allow') return top.names.includes(mod.id);
+    if (top.mode === 'deny')  return !top.names.includes(mod.id);
+    return true;                                          // top mode null
   }
-  const set = new Set(stripped);
-  return isDeny
-    ? modules.filter((m) => !set.has(getId(m)))
-    : modules.filter((m) =>  set.has(getId(m)));
+
+  // Workspace module.
+  const policy = workspaces.get(mod.workspace);
+  if (!policy) {
+    // Workspace not named in config.
+    if (top && top.mode === 'allow') return false;        // allow mode excludes unnamed
+    return true;
+  }
+  if (policy.kind === 'include-all') return true;
+  if (policy.kind === 'deny-all')    return false;
+  // filter kind
+  if (policy.mode === 'allow') return policy.names.includes(mod.id);
+  if (policy.mode === 'deny')  return !policy.names.includes(mod.id);
+  return true;                                            // inner mode null
+}
+
+// Emit the path entries the config asks for. Each carries the workspace
+// it should land in. The caller mounts these on top of the filtered
+// discovery set.
+export function collectConfigPaths(parsedEnv, { globalWorkspace = 'global' } = {}) {
+  if (!parsedEnv) return [];
+  const out = [];
+  if (parsedEnv.top) {
+    for (const p of parsedEnv.top.paths) out.push({ ...p, workspace: globalWorkspace });
+  }
+  for (const [ws, policy] of parsedEnv.workspaces) {
+    if (policy.kind !== 'filter') continue;
+    for (const p of policy.paths) out.push({ ...p, workspace: ws });
+  }
+  return out;
 }
 
 /* ============================================================================
@@ -179,26 +361,36 @@ export function applyModuleFilter(modules, list, { getId = (x) => x, warn = () =
  *   RESERVED_NAMES — directory names that would shadow URL prefixes the
  *     shell owns, or the shell itself:
  *       • atelier — the shell
- *       • api     — `/api/<id>/…` (every module's route namespace)
+ *       • api     — `/api/<ws>/<id>/…` (module route namespace)
  *       • assets  — `/assets/<name>.(js|css)` (host static)
- *       • modules — `/modules/<id>/frontend.js` (module bundles)
+ *       • modules — `/modules/<ws>/<id>/...` (module bundles + assets)
+ *       • global  — the synthetic workspace name for root-folder modules;
+ *                   `$global/` on disk would collide with it and is
+ *                   rejected (modules at the root ARE the global workspace).
  *
  *   isSpecialDir(name) — true when the first char isn't [a-zA-Z0-9]. Hides
  *     `_archive/`, `.git/`, `-scratch/`, etc. without renaming them. Prefix
  *     a folder with `_` or `.` to opt out of discovery.
  * ============================================================================ */
 
-export const RESERVED_NAMES = new Set(['atelier', 'api', 'assets', 'modules', 'w']);
+export const RESERVED_NAMES = new Set(['atelier', 'api', 'assets', 'modules', 'global']);
+
+export const GLOBAL_WORKSPACE = 'global';
 
 export const isSpecialDir = (name) => !/^[a-zA-Z0-9]/.test(name);
 
 /* `$<name>/` directory at the workspace root is a workspace — discovery
  * recurses one level into it for modules. The leading `$` is the on-disk
- * marker; URLs use `/w/<name>/...` instead. Restrict the rest to the same
- * shape we accept for module names so URLs stay stable. */
+ * marker; URLs use `/<name>/<id>` directly. `$global/` is rejected because
+ * root-folder modules already constitute the synthetic `global` workspace.
+ * Restrict the rest to the same shape we accept for module names so URLs
+ * stay stable. */
 export const WORKSPACE_PREFIX = '$';
 export const isWorkspaceDir = (name) =>
-  name.length > 1 && name[0] === WORKSPACE_PREFIX && /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name.slice(1));
+  name.length > 1
+  && name[0] === WORKSPACE_PREFIX
+  && /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name.slice(1))
+  && !RESERVED_NAMES.has(name.slice(1));
 export const workspaceName = (dirName) =>
   isWorkspaceDir(dirName) ? dirName.slice(1) : null;
 
@@ -305,15 +497,27 @@ function isModuleDir(abs) {
   return fs.existsSync(path.join(abs, 'frontend.jsx')) || fs.existsSync(path.join(abs, 'backend.js'));
 }
 
+// Discovered modules live at WORKSPACE root. Workspace-scoped modules
+// (those inside `$<ws>/`) are NOT picked up by the deploy CLI today —
+// `$<ws>/` directories start with `$` and so are skipped by `isSpecialDir`.
+// The runtime supports workspace modules; the deploy CLI does not yet.
+// Module authors that need a workspace module on prod can use the
+// `{ path: ..., id: ... }` path-config form, which mounts to a flat
+// `~/.atelier/<id>/` destination regardless of workspace.
+//
+// Returns `{ id, dir }`. Sorted by id for deterministic ordering across
+// filesystems with different readdir semantics.
 function discoverSiblings() {
-  return fs.readdirSync(WORKSPACE)
-    .filter((name) => {
-      if (isSpecialDir(name)) return false;
-      if (RESERVED_NAMES.has(name)) return false;
-      const abs = path.join(WORKSPACE, name);
-      try { if (!fs.statSync(abs).isDirectory()) return false; } catch { return false; }
-      return isModuleDir(abs);
-    });
+  const out = [];
+  for (const name of fs.readdirSync(WORKSPACE)) {
+    if (isSpecialDir(name)) continue;
+    if (RESERVED_NAMES.has(name)) continue;
+    const abs = path.join(WORKSPACE, name);
+    try { if (!fs.statSync(abs).isDirectory()) continue; } catch { continue; }
+    if (isModuleDir(abs)) out.push({ id: name, dir: abs });
+  }
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
 }
 
 function installedModules() {
@@ -335,14 +539,18 @@ function buildAtelier() {
   sh('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund'], { cwd: INSTALL_AT });
 }
 
-function deployModule(name) {
-  const src = path.join(WORKSPACE, name);
-  if (!fs.existsSync(src)) { warn(`no such module: ${name}`); return; }
-  if (!isModuleDir(src))    { warn(`${name} has no frontend.jsx/backend.js — skipping`); return; }
-  const dest = path.join(INSTALL, name);
-  sh('rsync', ['-a', '--delete', ...RSYNC_EXCLUDES, ...DEPLOY_FILTERS, src + '/', dest + '/']);
-  installModuleDeps(name, dest);
-  log(`  + ${name}`);
+// Entries are {id, dir}. Accepts a bare string for CLI-arg ergonomics
+// (`npm run atelier -- install kanban` resolves to WORKSPACE/kanban).
+function deployModule(entry) {
+  const { id, dir } = typeof entry === 'string'
+    ? { id: entry, dir: path.join(WORKSPACE, entry) }
+    : entry;
+  if (!fs.existsSync(dir)) { warn(`no such module: ${id} (${dir})`); return; }
+  if (!isModuleDir(dir))   { warn(`${id} has no frontend.jsx/backend.js — skipping`); return; }
+  const dest = path.join(INSTALL, id);
+  sh('rsync', ['-a', '--delete', ...RSYNC_EXCLUDES, ...DEPLOY_FILTERS, dir + '/', dest + '/']);
+  installModuleDeps(id, dest);
+  log(`  + ${id}`);
 }
 
 /* Modules with their own package.json (e.g. abstract → pngjs) need their
@@ -369,10 +577,11 @@ function installModuleDeps(name, dest) {
  * scope, host install, and session aggregation all live in module
  * space — see the `skills` and `mission-control` modules. */
 
-function deployModules(names) {
-  if (names.length === 0) { log('  (no modules)'); return; }
-  step('deploying modules: ' + names.join(', '));
-  for (const n of names) deployModule(n);
+function deployModules(entries) {
+  if (entries.length === 0) { log('  (no modules)'); return; }
+  const labels = entries.map((e) => typeof e === 'string' ? e : e.id);
+  step('deploying modules: ' + labels.join(', '));
+  for (const e of entries) deployModule(e);
 }
 
 function deployResources() {
@@ -401,16 +610,38 @@ function deployRootEnv() {
   log('  + .env');
 }
 
-/* Apply the prod allowlist from atelier.config.json to the discovered
- * siblings. Empty/missing config ⇒ all siblings (current behavior). The
- * prod runtime ALSO reads the config and filters at request time, so
- * shipping the file is what makes the filter effective on the live
- * atelier — see deployConfig below. */
+/* Resolve the prod target set: discovered global modules (the only kind
+ * the install CLI currently knows about — workspace deploy is a future
+ * task) filtered by the config + any external paths the config names.
+ *
+ * The prod runtime ALSO reads the config (see deployConfig) so the same
+ * filter applies at request time. Path entries get rsynced from their
+ * resolved location but land under ~/.atelier/<basename>/ (flat). */
 function prodFilteredSiblings() {
   const cfg = loadModuleConfig(WORKSPACE);
-  return applyModuleFilter(discoverSiblings(), cfg.prod, {
-    warn: (id) => warn(`${CONFIG_FILENAME} lists '${id}' for prod but no such module exists in ${WORKSPACE}`),
-  });
+  const parsed = cfg.prod;
+
+  // Discovered siblings are global modules (workspace='global' synthetic).
+  // Tag them so shouldIncludeModule can reason about them.
+  const discovered = discoverSiblings().map((m) => ({ ...m, workspace: GLOBAL_WORKSPACE }));
+  const filtered = discovered.filter((m) => shouldIncludeModule(parsed, m));
+
+  // Add external paths from the config. All workspaces' paths get rsynced;
+  // workspace assignment is irrelevant on the deploy side today (flat
+  // ~/.atelier/<id>/ destination).
+  const seen = new Set(filtered.map((m) => m.id));
+  const fromPaths = [];
+  for (const p of collectConfigPaths(parsed, { globalWorkspace: GLOBAL_WORKSPACE })) {
+    const abs = resolvePathEntry(p.path, WORKSPACE);
+    if (!abs)                  { warn(`${CONFIG_FILENAME}: path '${p.path}' is malformed — skipping`); continue; }
+    if (!fs.existsSync(abs))   { warn(`${CONFIG_FILENAME}: path '${p.path}' does not exist — skipping`); continue; }
+    if (!isModuleDir(abs))     { warn(`${CONFIG_FILENAME}: path '${p.path}' is not a module dir — skipping`); continue; }
+    const id = p.id || path.basename(abs);
+    if (seen.has(id))          { warn(`${CONFIG_FILENAME}: path '${p.path}' resolves to id '${id}' which is already in the target set — skipping`); continue; }
+    seen.add(id);
+    fromPaths.push({ id, dir: abs });
+  }
+  return [...filtered, ...fromPaths];
 }
 
 /* Ship atelier.config.json to the install root so the prod runtime applies
@@ -524,7 +755,7 @@ function rmModule(name) {
  * invocations like `update kanban` are scoped to those modules — leaving
  * everything else alone is the contract. */
 function reconcileRemovals(targets) {
-  const keep = new Set(targets);
+  const keep = new Set(targets.map((t) => typeof t === 'string' ? t : t.id));
   const orphans = installedModules().filter((name) => !keep.has(name));
   if (orphans.length === 0) return;
   step('removing modules no longer in the install set: ' + orphans.join(', '));
@@ -618,4 +849,4 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

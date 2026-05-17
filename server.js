@@ -1,27 +1,37 @@
 /* Atelier runner — host mode + standalone mode.
  *
- *   node atelier/server.js              → host mode, all modules listed in the rail
- *   node atelier/server.js <module-id>  → standalone mode, just that module
+ *   node atelier/server.js                         → host mode, all modules in the rail
+ *   node atelier/server.js <id>                    → standalone mode — resolves <id> to
+ *                                                    global/<id>
+ *   node atelier/server.js <workspace>/<id>        → standalone mode — exact qualifiedId
  *
  * Conventions:
- *   • A sibling directory of atelier/ is a module iff it contains a `frontend.jsx`
- *     or `backend.js`. The directory name is the id and default name.
- *   • frontend.jsx is compiled as ESM. It should `export default function Module`
- *     and may `export const meta = { icon, color }` to customize the rail item.
- *   • backend.js exports `default { mountRoutes(router, ctx) }` for API routes.
+ *   • A sibling directory of atelier/ is a global-workspace module iff it
+ *     contains `frontend.jsx` or `backend.js`. A `$<ws>/` directory is a
+ *     workspace; its sibling subdirectories are that workspace's modules.
+ *   • frontend.jsx is compiled as ESM. It should `export default function
+ *     Module` and may `export const meta = { icon, color, name, group }`.
+ *   • backend.js exports `default { mountRoutes(router, ctx) }`. The
+ *     router is scoped — paths are relative (`/spaces`, not `/api/...`).
  *
- * Asset URLs (convention-driven, no registration):
- *   /assets/<name>.js              → atelier/<name>.jsx     (esbuild, ESM)
- *   /assets/<name>.css             → atelier/<name>.css     (tailwind + oxide)
- *   /modules/<id>/frontend.js      → <id>/frontend.jsx      (esbuild, ESM)
+ * URL shape: every module has a qualifiedId of `<workspace>/<id>`. Root
+ * modules use the synthetic `global` workspace, so `/global/kanban` is
+ * the kanban module at the root. URLs:
+ *
+ *   /<ws>/<id>                      → SPA page
+ *   /api/<ws>/<id>/...              → module API (scoped router mount)
+ *   /modules/<ws>/<id>/...          → module assets + bundles
+ *   /assets/<name>.js|css           → shell assets
  *
  * Hot reload: /_atelier/ws is a shared multiplexed WebSocket. fs.watch
  * (recursive) fires on any change under the project root and the server
  * broadcasts a `{ topic: 'shell', type: 'reload', moduleId }` frame — the
  * client full-reloads when the active module / shell changed, otherwise
- * marks the module dirty and reloads on next navigation. Discovery is
- * per-request so new folders appear without restart. Backends are mounted
- * lazily on first discovery.
+ * marks the module dirty and reloads on next navigation. Module topics
+ * are qualified ids; subscribers filter client-side.
+ *
+ * Discovery is per-request so new folders appear without restart. Backends
+ * are mounted lazily on first discovery.
  * (Editing server.js or atelier.js still requires a manual restart.)
  */
 
@@ -34,8 +44,9 @@ import chokidar from 'chokidar';
 import { WebSocketServer } from 'ws';
 import {
   getJsx, getCss,
-  loadModuleConfig, applyModuleFilter, CONFIG_FILENAME,
-  RESERVED_NAMES, isSpecialDir, isWorkspaceDir, workspaceName,
+  loadModuleConfig, shouldIncludeModule, collectConfigPaths, resolvePathEntry,
+  CONFIG_FILENAME,
+  RESERVED_NAMES, GLOBAL_WORKSPACE, isSpecialDir, isWorkspaceDir, workspaceName,
 } from './atelier.js';
 
 // Env normalization — shell owns the defaults so modules (and any child
@@ -83,15 +94,10 @@ const authPlugs = new Map();           // qualifiedId → plug
 // Router — tiny path+method matcher with req.json / res.json helpers
 // ------------------------------------------------------------------------
 
-// Workspace lives off-URL (cookie-less). Modules register bare paths like
-// `/api/<id>/foo`; the router resolves which mounted instance handles a
-// given request by reading the request's workspace tag (Referer / ?ws= /
-// X-Atelier-Workspace header) and consulting an `allowedQids` set built
-// per-request — workspace module first, root fallthrough next.
-//
-// Each registered route carries a `qualifiedId` (null for shell-owned
-// routes that always match). At dispatch time, routes whose qualifiedId
-// is in `allowedQids` (or is null) compete for the match.
+// Routes are namespaced by URL: a module mounts at `/api/<ws>/<id>` and
+// its handlers receive relative paths (`/spaces`, not `/api/kanban/spaces`).
+// `makeModuleScope` prefixes paths with `/api/<ws>/<id>` before they hit
+// `_add`, so the router itself stays untyped — first match wins.
 function createRouter() {
   const routes = [];
 
@@ -110,9 +116,9 @@ function createRouter() {
     return { re, paramNames };
   }
 
-  function add(method, pathPattern, handler, qualifiedId = null) {
+  function add(method, pathPattern, handler) {
     const { re, paramNames } = compile(pathPattern);
-    const entry = { method, re, paramNames, handler, qualifiedId };
+    const entry = { method, re, paramNames, handler };
     routes.push(entry);
     return entry;
   }
@@ -122,23 +128,16 @@ function createRouter() {
     if (i >= 0) routes.splice(i, 1);
   }
 
-  async function handle(req, res, { allowedQids = null } = {}) {
+  async function handle(req, res) {
     const url = new URL(req.url, `http://localhost`);
     for (const r of routes) {
       if (r.method !== req.method) continue;
-      if (r.qualifiedId !== null && allowedQids && !allowedQids.has(r.qualifiedId)) continue;
       const m = r.re.exec(url.pathname);
       if (!m) continue;
       const params = {};
       r.paramNames.forEach((n, i) => { params[n] = decodeURIComponent(m[i + 1]); });
       req.params = params;
-      // Strip shell-reserved query params before module handlers see them.
-      // `ws` is the workspace selector — it lives only on req.workspace,
-      // never as a module-visible query, so a module's own `?ws=archived`
-      // semantics (if a not-so-careful author chose that key) can't be
-      // reinterpreted as a workspace switch.
-      const queryEntries = [...url.searchParams.entries()].filter(([k]) => k !== 'ws');
-      req.query = Object.fromEntries(queryEntries);
+      req.query = Object.fromEntries(url.searchParams.entries());
       req.json = () => readJsonBody(req);
       res.json = (data, status = 200) => {
         res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -184,38 +183,28 @@ function readJsonBody(req) {
 }
 
 // ------------------------------------------------------------------------
-// Workspace resolution — workspace is an ambient session attribute,
-// propagated via four channels in a fixed precedence order so no single
-// channel breaking silently misroutes a request:
+// Workspaces
 //
-//   1. ?ws= on the request URL          — per-tab override, authoritative
-//                                          when present
-//   2. ?ws= from Referer                 — module-issued fetches inherit
-//                                          the page's workspace through
-//                                          the browser's Referer header
-//   3. X-Atelier-Workspace header        — explicit (MC agent proxy)
-//   4. atelier_ws cookie                 — durable backstop. Set by the
-//                                          shell on every index serve;
-//                                          covers the cold-load gap, the
-//                                          1→2 transition window, workers,
-//                                          and anything that strips Referer
-//   5. exactly-one-workspace default     — if filesystem has one $<ws>/,
-//                                          that's the implicit context
-//   6. null                              — global / root
+// Every module has a workspace. Root-folder modules belong to the synthetic
+// `global` workspace; modules inside `$<name>/` belong to that workspace.
+// Workspace + id together (the qualifiedId, `<ws>/<id>`) is the module's
+// stable identity — used for URLs, routes, WS topics, slot keys, watchers.
 //
-// Modules are workspace-blind: they call `router.get('/api/<id>/foo', …)`
-// and `fetch('/api/<id>/foo')`. The shell decides per-request which
-// mounted instance answers (workspace shadows root via allowedQids).
+// Workspace lives in the URL path: `/global/kanban`, `/bigcorp/kanban`.
+// No cookie, no header precedence chain — the URL is the only source of
+// truth. Modules that need their own workspace at runtime derive it
+// per-bundle from `import.meta.url` (see the ROUTE/API/TOPIC snippet
+// every module's frontend.jsx starts with) — no separate shell global.
 // ------------------------------------------------------------------------
 
-// Workspaces discovered straight from the filesystem — independent of
-// which modules happen to be mounted. An empty `$<name>/` directory is
+// Workspaces present on disk plus the synthetic `global` (always available
+// because root modules constitute it). An empty `$<name>/` directory is
 // still a workspace; a name filtered out of `atelier.config.json` can't
 // make its workspace disappear.
 function listAllWorkspaces() {
-  const set = new Set();
+  const set = new Set([GLOBAL_WORKSPACE]);
   let names;
-  try { names = fs.readdirSync(ROOT); } catch { return []; }
+  try { names = fs.readdirSync(ROOT); } catch { return [...set]; }
   for (const name of names) {
     if (!isWorkspaceDir(name)) continue;
     const ws = workspaceName(name);
@@ -223,99 +212,6 @@ function listAllWorkspaces() {
     set.add(ws);
   }
   return [...set].sort();
-}
-
-function readWsFromReferer(refererHeader) {
-  if (!refererHeader) return null;
-  try {
-    const u = new URL(refererHeader);
-    const v = u.searchParams.get('ws');
-    return v ? v.trim() || null : null;
-  } catch { return null; }
-}
-
-const COOKIE_NAME = 'atelier_ws';
-
-function parseCookies(req) {
-  const raw = req.headers.cookie;
-  if (!raw || typeof raw !== 'string') return {};
-  const out = {};
-  for (const part of raw.split(';')) {
-    const i = part.indexOf('=');
-    if (i < 0) continue;
-    const k = part.slice(0, i).trim();
-    const v = part.slice(i + 1).trim();
-    if (!k) continue;
-    try { out[k] = decodeURIComponent(v); }
-    catch { out[k] = v; }
-  }
-  return out;
-}
-
-function readWsFromCookie(req) {
-  const c = parseCookies(req)[COOKIE_NAME];
-  return c && c.trim() ? c.trim() : null;
-}
-
-function resolveWorkspaceFromRequest(req) {
-  // 1. URL ?ws= (per-tab override)
-  try {
-    const u = new URL(req.url, `http://localhost:${PORT}`);
-    const q = u.searchParams.get('ws');
-    if (q && q.trim()) return q.trim();
-  } catch {}
-  // 2. Referer ?ws= (module-issued fetch inheriting page workspace)
-  const fromRef = readWsFromReferer(req.headers.referer);
-  if (fromRef) return fromRef;
-  // 3. X-Atelier-Workspace header (agent proxy, explicit callers)
-  const hdr = req.headers['x-atelier-workspace'];
-  if (typeof hdr === 'string' && hdr.trim()) return hdr.trim();
-  // 4. atelier_ws cookie (durable backstop)
-  const fromCookie = readWsFromCookie(req);
-  if (fromCookie) return fromCookie;
-  // 5. exactly-one-workspace default
-  const all = listAllWorkspaces();
-  if (all.length === 1) return all[0];
-  // 6. null
-  return null;
-}
-
-// Build a Set-Cookie value for the resolved workspace. Long Max-Age so
-// the cookie survives across browser restarts and quietly bridges the
-// 1→2 workspace transition for any open tab. HttpOnly so a buggy module
-// can't shadow it from page JS; SameSite=Lax keeps it on top-level
-// navigations without bleeding to cross-site contexts.
-function buildWsCookie(ws) {
-  if (!ws) {
-    // Clear: empty value with Max-Age=0.
-    return `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`;
-  }
-  const v = encodeURIComponent(ws);
-  return `${COOKIE_NAME}=${v}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax`;
-}
-
-// For a given workspace context, return the set of qualifiedIds whose
-// routes are eligible to match. Rule: each module id resolves to its
-// workspace mount when one exists for the active workspace, otherwise to
-// the root mount. So `$bigcorp/<id>` shadows root `<id>` for bigcorp
-// requests, but a request that names no workspace (or whose workspace
-// has no shadow) falls through to root.
-function buildAllowedQids(ws) {
-  const allowed = new Set();
-  const byId = new Map();
-  for (const m of getModules()) {
-    if (!byId.has(m.id)) byId.set(m.id, []);
-    byId.get(m.id).push(m);
-  }
-  for (const [, mods] of byId) {
-    if (ws) {
-      const wsm = mods.find((m) => m.workspace === ws);
-      if (wsm) { allowed.add(wsm.qualifiedId); continue; }
-    }
-    const rootm = mods.find((m) => !m.workspace);
-    if (rootm) allowed.add(rootm.qualifiedId);
-  }
-  return allowed;
 }
 
 // ------------------------------------------------------------------------
@@ -326,19 +222,21 @@ function buildAllowedQids(ws) {
 // from atelier.js so the runner and the install CLI agree on what counts as
 // a module and what counts as a workspace.
 //
-// A module is a directory with frontend.jsx or backend.js. Modules can live:
-//   • at the root  → global, addressed at /<id>, /api/<id>/…
-//   • inside $<ws>/ → workspace-scoped. Addressed via the flat module URL
-//                     /<id> with workspace held as ?ws=<ws> session context.
-//                     Backend routes are the bare `/api/<id>/…` shared with
-//                     the root mount; the shell picks which mount answers
-//                     per-request (see buildAllowedQids).
+// A module is a directory with frontend.jsx or backend.js. Modules live:
+//   • at the root         → workspace = 'global' (synthetic),
+//                            qualifiedId = 'global/<id>'
+//   • inside $<ws>/<id>   → workspace = '<ws>',
+//                            qualifiedId = '<ws>/<id>'
+//
+// Every module has a workspace. There is no "null" — `global` is always
+// the workspace for root-folder modules. URLs are `/<ws>/<id>` (page),
+// `/api/<ws>/<id>/…` (api), `/modules/<ws>/<id>/…` (assets, bundles).
 //
 // Each entry carries:
 //   id          dirname (what modules use as ctx.id)
-//   workspace   workspace name (e.g. 'bigcorp') or null for global
-//   qualifiedId 'kanban' for global, 'bigcorp/kanban' for workspace — the
-//               key used internally for mounts, watchers, slots, WS topics
+//   workspace   workspace name — 'global' for root, '<ws>' for $<ws>/<id>
+//   qualifiedId '<workspace>/<id>' — the key used internally for mounts,
+//               watchers, slots, WS topics
 
 function readModuleAt(dir, name, workspace) {
   if (isSpecialDir(name)) return null;
@@ -355,19 +253,31 @@ function readModuleAt(dir, name, workspace) {
     hasFrontend,
     hasBackend,
     workspace,
-    qualifiedId: workspace ? `${workspace}/${name}` : name,
+    qualifiedId: `${workspace}/${name}`,
   };
 }
+
+const warnedReservedWs = new Set();   // dedupe `$<reserved>/` warnings
 
 function discoverModules() {
   const out = [];
   let names;
   try { names = fs.readdirSync(ROOT); } catch { return out; }
   for (const name of names) {
+    // `$<reserved>/` (e.g. `$global/`, `$api/`) is rejected by isWorkspaceDir.
+    // We detect that case here and warn once so an operator doesn't wonder
+    // why their `$global/` folder isn't discovering.
+    if (name.startsWith('$') && !isWorkspaceDir(name) && /^\$[a-zA-Z0-9]/.test(name)) {
+      if (!warnedReservedWs.has(name)) {
+        warnedReservedWs.add(name);
+        console.warn(`  ! ${name}/ is not a valid workspace dir (reserved name or invalid characters) — skipping`);
+      }
+      continue;
+    }
     // Workspaces: $<ws>/ recurses one level for modules.
     if (isWorkspaceDir(name)) {
       const ws = workspaceName(name);
-      if (!ws || RESERVED_NAMES.has(ws)) continue;
+      if (!ws || RESERVED_NAMES.has(ws)) continue;     // defensive; isWorkspaceDir already filters
       const wsDir = path.join(ROOT, name);
       let subnames;
       try { subnames = fs.readdirSync(wsDir); } catch { continue; }
@@ -377,11 +287,25 @@ function discoverModules() {
       }
       continue;
     }
-    // Global module at root.
-    const m = readModuleAt(path.join(ROOT, name), name, null);
+    // Root module → synthetic 'global' workspace.
+    const m = readModuleAt(path.join(ROOT, name), name, GLOBAL_WORKSPACE);
     if (m) out.push(m);
   }
+  // Sort by qualifiedId so auth-slot election + rail order are stable
+  // across filesystems with different readdir semantics.
+  out.sort((a, b) => a.qualifiedId.localeCompare(b.qualifiedId));
   return out;
+}
+
+// Read a module from an explicit path entry in atelier.config.json.
+// `entry` is `{ path, id?, workspace }` — workspace comes from where the
+// path appeared in the config (top-level → 'global', inside a workspace
+// block → that workspace's name). `id` overrides the basename if set.
+function readModuleFromPath(entry) {
+  const abs = resolvePathEntry(entry.path, ROOT);
+  if (!abs) return null;
+  const id = entry.id || path.basename(abs);
+  return readModuleAt(abs, id, entry.workspace);
 }
 
 // Per-id dedupe so a typo in atelier.config.json doesn't spam the log on
@@ -389,28 +313,46 @@ function discoverModules() {
 const warnedConfigMisses = new Set();
 
 function getModules() {
-  let mods = discoverModules();
+  const discovered = discoverModules();
   if (MODE === 'standalone') {
     // Standalone mode is an explicit user choice — bypass the config filter
     // so a module excluded for this env can still be inspected. Match by
-    // qualifiedId first ('bigcorp/kanban'); fall back to id ('kanban') so
-    // the unambiguous case still works without typing the workspace.
-    const only = mods.find((m) => m.qualifiedId === requestedId)
-              || mods.find((m) => m.id === requestedId && !m.workspace);
+    // qualifiedId first ('bigcorp/kanban' or 'global/kanban'); fall back to
+    // bare id, which resolves to the global workspace's mount so users can
+    // type `node server.js kanban` without thinking about workspaces.
+    const only = discovered.find((m) => m.qualifiedId === requestedId)
+              || discovered.find((m) => m.id === requestedId && m.workspace === GLOBAL_WORKSPACE);
     return only ? [only] : [];
   }
   const cfg = loadModuleConfig(ROOT);
-  return applyModuleFilter(mods, cfg[ENV], {
-    // Config filter operates on qualifiedId so a workspace module can be
-    // listed as 'bigcorp/kanban'. A bare 'kanban' in the list matches the
-    // global module; workspace ones must be named explicitly.
-    getId: (m) => m.qualifiedId,
-    warn: (id) => {
-      if (warnedConfigMisses.has(id)) return;
-      warnedConfigMisses.add(id);
-      console.warn(`  ! ${CONFIG_FILENAME}: '${id}' listed for ${ENV} but no such module exists`);
-    },
-  });
+  const parsed = cfg[ENV];
+
+  // Apply the parsed filter to discovered modules.
+  const filtered = discovered.filter((m) =>
+    shouldIncludeModule(parsed, m, { globalWorkspace: GLOBAL_WORKSPACE })
+  );
+
+  // Add external paths from the config. Each carries its target workspace
+  // (top-level → 'global', inside a workspace block → that workspace).
+  // Path mounts bypass the filter — they're explicit user inclusions.
+  // Dedupe by qualifiedId so a path that happens to point inside ROOT
+  // doesn't double-mount with the discovered copy.
+  const fromPaths = [];
+  const seen = new Set(filtered.map((m) => m.qualifiedId));
+  for (const entry of collectConfigPaths(parsed, { globalWorkspace: GLOBAL_WORKSPACE })) {
+    const m = readModuleFromPath(entry);
+    if (!m) {
+      const key = `${entry.workspace}/${entry.path}`;
+      if (warnedConfigMisses.has(key)) continue;
+      warnedConfigMisses.add(key);
+      console.warn(`  ! ${CONFIG_FILENAME}: path '${entry.path}' is not a module dir (no frontend.jsx or backend.js)`);
+      continue;
+    }
+    if (seen.has(m.qualifiedId)) continue;
+    seen.add(m.qualifiedId);
+    fromPaths.push(m);
+  }
+  return [...filtered, ...fromPaths];
 }
 
 // ------------------------------------------------------------------------
@@ -656,7 +598,7 @@ function checkRequires() {
 if (MODE === 'standalone') {
   const all = discoverModules();
   const ok = all.find((m) => m.qualifiedId === requestedId)
-          || all.find((m) => m.id === requestedId && !m.workspace);
+          || all.find((m) => m.id === requestedId && m.workspace === GLOBAL_WORKSPACE);
   if (!ok) {
     console.error(`\n  Module '${requestedId}' not found.`);
     if (all.length) console.error(`  Available: ${all.map((m) => m.qualifiedId).join(', ')}\n`);
@@ -705,12 +647,12 @@ const backendWatchers = new Map();   // id → fs.FSWatcher
 const pendingReloads = new Map();    // id → debounce timer
 const lastReloadMtime = new Map();   // id → mtimeMs actually processed
 
-// Cross-module slot registry. Each module id maps to a plain object that
-// any module can read or write to. Lives on globalThis so hot-reloads of
-// individual modules don't reset the shared state. The shell itself isn't
-// hot-reloaded — editing server.js requires a manual restart — so this
-// Map is created once per `npm run dev` lifetime and survives every
-// backend.js edit.
+// Cross-module slot registry. Each `(workspace, id)` pair maps to a plain
+// object that any module within the same workspace can read or write to.
+// Lives on globalThis so hot-reloads of individual modules don't reset
+// the shared state. The shell itself isn't hot-reloaded — editing
+// server.js requires a manual restart — so this Map is created once per
+// `npm run dev` lifetime and survives every backend.js edit.
 //
 // The contract is plain data: there are NO methods, NO subscribe/notify,
 // NO validation. Owning modules read their slot lazily (at use time, not
@@ -719,18 +661,13 @@ const lastReloadMtime = new Map();   // id → mtimeMs actually processed
 // otherwise create real races (e.g. `mc-lab` mounting before
 // `mission-control`).
 //
-// Owners decide what shape they accept; consumers write that shape; both
-// sides document the contract in their own source. The shell stays
-// neutral about meaning.
-//
-// Slots are keyed by (callerWorkspace, id). Root modules and
-// $alpha-modules can't leak state through a shared slot — each workspace
-// is a tenancy boundary. A workspace-aware infrastructure module that
-// genuinely wants to look across workspaces uses persisted records (with
-// a workspace column) instead of the slot primitive.
+// Workspace boundary: a `global` module and a `$alpha` module can't leak
+// state through a shared slot. A workspace-aware infrastructure module
+// that genuinely wants to look across workspaces uses persisted records
+// (with a workspace column) instead of the slot primitive.
 const moduleSlots = (globalThis.__atelierModuleSlots ??= new Map());
 function slotKey(callerWorkspace, id) {
-  return `${callerWorkspace || ''} ${id}`;
+  return `${callerWorkspace}/${id}`;
 }
 function getModuleSlot(callerWorkspace, id) {
   const key = slotKey(callerWorkspace, id);
@@ -740,42 +677,48 @@ function getModuleSlot(callerWorkspace, id) {
 
 function makeCtx(m) {
   return {
-    id: m.id,                      // dirname — what modules build paths from
+    id: m.id,                      // dirname
     name: m.id,
-    workspace: m.workspace,        // 'bigcorp' for $bigcorp/<mod>, null for global
+    workspace: m.workspace,        // 'global' for root, '<ws>' for $<ws>/<mod>
+    qualifiedId: m.qualifiedId,    // '<workspace>/<id>'
     env: ENV,
     port: PORT,
     baseUrl: BASE_URL,
     dataDir: path.join(m.dir, 'data'),
     log: (...args) => console.log(`[${m.qualifiedId}]`, ...args),
-    // Broadcast a real-time event to every browser tab connected to the
-    // shared WebSocket. The topic is the module's qualified id — bare
-    // 'kanban' for global, 'bigcorp/kanban' for $bigcorp's kanban — so
-    // the shell stays out of authorship questions and same-named modules
-    // in different scopes can't cross-broadcast.
+    // Broadcast a real-time event to every browser tab subscribed to this
+    // module's topic. Topic = qualifiedId ('global/kanban' or
+    // 'bigcorp/kanban'). Module bundles derive this from `import.meta.url`
+    // and subscribe to their own qid. Same-named modules in different
+    // workspaces can't cross-broadcast.
     broadcast: (event) => wsBroadcastFromModule(m.qualifiedId, event || {}),
-    // In-process slot lookup. Returns the SAME plain object for any
-    // caller within the SAME workspace — that's the shared bit. The
-    // workspace is the caller's mount workspace (`m.workspace`), so
-    // root modules share root slots, $alpha modules share $alpha slots,
-    // and they can't cross. See moduleSlots above for the contract.
+    // In-process slot lookup. Returns the SAME plain object for any caller
+    // within the SAME workspace — global modules share global slots,
+    // $alpha modules share $alpha slots, and they can't cross.
     module: (id) => getModuleSlot(m.workspace, id),
   };
 }
 
 function makeModuleScope(m) {
   const mine = [];
-  // No path rewriting. Modules register `/api/<id>/foo` literally. The
-  // shell tags each route with the module's qualifiedId so the dispatcher
-  // can choose between a workspace mount and a root mount per-request
-  // (see buildAllowedQids).
-  const qid = m.qualifiedId;
+  // Routes are namespaced by URL. The scope prefixes every path with
+  // `/api/<workspace>/<id>` before adding to the router, so a module
+  // writes `router.get('/spaces', …)` and it answers at
+  // `/api/global/kanban/spaces` (or `/api/bigcorp/kanban/spaces`).
+  //
+  // Empty path ('' or '/') maps to the bare module root — register that
+  // for a "module index" endpoint at exactly /api/<ws>/<id>.
+  const prefix = `/api/${m.workspace}/${m.id}`;
+  const join = (p) => {
+    if (!p || p === '/') return prefix;
+    return prefix + (p.startsWith('/') ? p : '/' + p);
+  };
   return {
-    get:    (p, h) => { mine.push(router._add('GET',    p, h, qid)); },
-    post:   (p, h) => { mine.push(router._add('POST',   p, h, qid)); },
-    put:    (p, h) => { mine.push(router._add('PUT',    p, h, qid)); },
-    delete: (p, h) => { mine.push(router._add('DELETE', p, h, qid)); },
-    patch:  (p, h) => { mine.push(router._add('PATCH',  p, h, qid)); },
+    get:    (p, h) => { mine.push(router._add('GET',    join(p), h)); },
+    post:   (p, h) => { mine.push(router._add('POST',   join(p), h)); },
+    put:    (p, h) => { mine.push(router._add('PUT',    join(p), h)); },
+    delete: (p, h) => { mine.push(router._add('DELETE', join(p), h)); },
+    patch:  (p, h) => { mine.push(router._add('PATCH',  join(p), h)); },
     _dispose() {
       for (const e of mine) router._remove(e);
       mine.length = 0;
@@ -1133,7 +1076,7 @@ const RAW_CONTENT_TYPES = {
   '.woff2': 'font/woff2',
 };
 
-function resolveAssetSource(pathname, ws) {
+function resolveAssetSource(pathname) {
   // /assets/<name>.js  → atelier/<name>.jsx
   let m = /^\/assets\/([a-z0-9-]+)\.js$/.exec(pathname);
   if (m) {
@@ -1146,23 +1089,21 @@ function resolveAssetSource(pathname, ws) {
     const src = path.join(HOST_DIR, m[1] + '.css');
     return fs.existsSync(src) ? { kind: 'css', src } : null;
   }
-  // /modules/<id>/<...rest> — workspace-aware dir-keyed asset routing.
+  // /modules/<ws>/<id>/<...rest> — workspace-qualified, dir-keyed asset
+  // routing. The URL fully identifies the mount; no shadow logic, no
+  // fallthrough, no per-request ambient context.
   //
-  // The shell resolves the module to its workspace mount (shadow → root
-  // fallthrough), then serves any file under that module's directory.
   // Multi-file modules can `import './helper.js'`; helpers, images,
   // JSON, etc. all live alongside frontend.jsx and ship together.
   //
   // For .js requests, .jsx source wins (JSX builder) if it exists — so
   // `frontend.js` and `import './foo.js'` both resolve to their `.jsx`
   // when one is there, otherwise to the literal `.js` file.
-  //
-  // Cache-Control: no-store at the response level so two workspaces
-  // don't share a cache entry for the same URL.
-  m = /^\/modules\/([^/]+)\/(.+)$/.exec(pathname);
+  m = /^\/modules\/([^/]+)\/([^/]+)\/(.+)$/.exec(pathname);
   if (m) {
-    const id = m[1];
-    const rest = m[2];
+    const ws = m[1];
+    const id = m[2];
+    const rest = m[3];
     // Path traversal guard. URL decoding happens; resolve and verify the
     // file is inside the module's dir.
     let relPath;
@@ -1185,10 +1126,7 @@ function resolveAssetSource(pathname, ws) {
       if (/^[._-]/.test(seg)) return null;
     }
 
-    const all = getModules();
-    let mod = null;
-    if (ws) mod = all.find((x) => x.id === id && x.workspace === ws);
-    if (!mod) mod = all.find((x) => x.id === id && !x.workspace);
+    const mod = getModules().find((x) => x.id === id && x.workspace === ws);
     if (!mod) return null;
 
     const absRoot = path.resolve(mod.dir);
@@ -1253,10 +1191,11 @@ function cssScanSources() {
 // this section runs.
 
 function findAuthModule() {
-  // Global modules, alphabetical by qualifiedId (== id for global). First
-  // mounted module exporting `authenticate` claims the slot.
+  // Global-workspace modules only, alphabetical by qualifiedId. First
+  // mounted module exporting `authenticate` claims the slot. Workspace
+  // modules can't gate the shell — auth is a single-tenant decision.
   for (const m of getModules()) {
-    if (m.workspace) continue;
+    if (m.workspace !== GLOBAL_WORKSPACE) continue;
     if (!m.hasBackend) continue;
     const plug = authPlugs.get(m.qualifiedId);
     if (plug && typeof plug.authenticate === 'function') {
@@ -1268,34 +1207,33 @@ function findAuthModule() {
 
 function buildDefaultUser({ metaByQId } = {}) {
   // Synthesized from raw discovery. Has full access to every discovered
-  // module/workspace. Authmodule receives this as `defaultUser` and can
-  // pass-through, filter, replace, or null. Without an auth module the
-  // shell uses it directly (today's dev mode).
+  // module/workspace. An auth module receives this as `defaultUser` and
+  // can pass-through, filter, replace, or null. Without an auth module
+  // the shell uses it directly (today's dev mode).
   //
   // Workspaces are enumerated from the filesystem (listAllWorkspaces),
   // not from mounted modules — empty workspaces still appear in the
-  // picker so the user can see them, and a workspace whose modules are
-  // all filtered by atelier.config.json doesn't silently vanish.
+  // picker, and a workspace whose modules are all filtered by
+  // atelier.config.json doesn't silently vanish. `global` is always
+  // present.
   const mods = getModules().filter((m) => m.hasFrontend);
-  const globalMods = [];
   const wsMap = new Map();              // ws → [{ id, meta? }]
-  // Seed every filesystem workspace with an empty module list so empty
-  // ones survive the projection.
   for (const ws of listAllWorkspaces()) wsMap.set(ws, []);
   for (const m of mods) {
     const entry = { id: m.id };
     if (metaByQId) entry.meta = metaByQId.get(m.qualifiedId) || {};
-    if (m.workspace) {
-      if (!wsMap.has(m.workspace)) wsMap.set(m.workspace, []);
-      wsMap.get(m.workspace).push(entry);
-    } else {
-      globalMods.push(entry);
-    }
+    if (!wsMap.has(m.workspace)) wsMap.set(m.workspace, []);
+    wsMap.get(m.workspace).push(entry);
   }
+  // Sort: 'global' first, others alphabetical.
   const workspaces = [...wsMap.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => {
+      if (a === GLOBAL_WORKSPACE) return -1;
+      if (b === GLOBAL_WORKSPACE) return 1;
+      return a.localeCompare(b);
+    })
     .map(([id, modules]) => ({ id, modules }));
-  return { id: 'local', name: 'local', modules: globalMods, workspaces };
+  return { id: 'local', name: 'local', workspaces };
 }
 
 // Bare gate — runs the auth slot's `authenticate` and returns the user, or
@@ -1337,63 +1275,41 @@ async function authenticateRequest(req, res, defaultUser) {
 // Index.html — rendered per request with injected bootstrap
 // ------------------------------------------------------------------------
 
-async function serveIndex(req, res) {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-
-  // Auth runs FIRST. A logged-out visitor must NEVER see workspace info
-  // leak via a 302 Location header or a Set-Cookie for atelier_ws. The
-  // unauth handler owns the response entirely and renders its takeover.
-  const template = fs.readFileSync(path.join(HOST_DIR, 'index.html'), 'utf8');
+// Build the {qualifiedId → meta} map used to enrich entries in the user
+// payload. Cached per-qid in metaCache by mtime, so subsequent calls inside
+// one request (or across requests) are cheap.
+async function getMetaByQId() {
   const allFront = getModules().filter((m) => m.hasFrontend);
   const metas = await Promise.all(allFront.map((m) => getModuleMeta(m)));
-  const metaByQId = new Map(allFront.map((m, i) => [m.qualifiedId, metas[i]]));
+  return new Map(allFront.map((m, i) => [m.qualifiedId, metas[i]]));
+}
+
+async function serveIndex(req, res) {
+  // Auth runs FIRST. A logged-out visitor must NEVER see workspace info
+  // leak in the bootstrap — the unauth handler owns the response and
+  // renders its takeover.
+  const template = fs.readFileSync(path.join(HOST_DIR, 'index.html'), 'utf8');
+  const metaByQId = await getMetaByQId();
 
   const defaultUser = buildDefaultUser({ metaByQId });
   const user = await authenticateRequest(req, res, defaultUser);
   if (!user) return;                    // unauth handler took over the response
 
-  // Canonicalize AFTER auth. The redirect target is scoped to the
-  // workspaces THIS user is allowed to see — so a non-admin can't be
-  // redirected to a workspace they don't belong in, and a user with
-  // a single allowed workspace keeps a bare URL (their personal 1-ws mode).
-  const userWs = (user.workspaces || []).map((w) => w.id);
-  if (userWs.length >= 2 && !url.searchParams.get('ws')) {
-    const preferred = readWsFromCookie(req) || null;
-    const target = preferred && userWs.includes(preferred) ? preferred : userWs[0];
-    const dest = `${url.pathname}?ws=${encodeURIComponent(target)}${url.hash || ''}`;
-    res.writeHead(302, {
-      Location: dest,
-      'Set-Cookie': buildWsCookie(target),
-      'Cache-Control': 'no-store',
-    });
-    res.end();
-    return;
-  }
-
-  // req.workspace was set at request entry. Pass it to the client so the
-  // UI doesn't have to re-derive — server is the single source of truth
-  // for workspace resolution.
-  const resolvedWs = req.workspace || null;
-
+  // Workspace identity now lives in the URL path (`/<ws>/<id>`). No
+  // canonicalization, no cookie — the client parses the URL on every
+  // render and the picker writes a new URL on switch.
   const bootstrap = {
     mode: MODE,
     env: ENV,
     user,
-    workspace: resolvedWs,
-    // Legacy field — current client.jsx still reads boot.modules. Phase 6
-    // updates the client to read user.modules + user.workspaces and this
-    // line goes away.
-    modules: (user.modules || []).map((m) => ({ ...m, hasFrontend: true, name: m.id })),
   };
   const html = template.replace(
     '/*__ATELIER_BOOTSTRAP__*/',
     `window.__ATELIER__ = ${JSON.stringify(bootstrap)};`
   );
-  // Refresh the workspace cookie on every index serve so it's always the
-  // most recently-resolved value. Lasts a year; updated on every visit.
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
-    'Set-Cookie': buildWsCookie(resolvedWs),
+    'Cache-Control': 'no-store',
   });
   res.end(html);
 }
@@ -1401,50 +1317,41 @@ async function serveIndex(req, res) {
 // ------------------------------------------------------------------------
 // WebSocket multiplex — shell-owned shared transport for real-time events.
 //
-// Workspace-aware fan-out. Each connection is tagged with the workspace
-// it was opened from (?ws= on the upgrade URL). When a module broadcasts:
+// Wire protocol: each frame is JSON `{ topic, ...event }`. Topics are
+// qualified ids:
 //
-//   • workspace module (qid = '<ws>/<id>') → only clients tagged with the
-//     same workspace receive.
-//   • root module (qid = '<id>')           → clients whose effective <id>
-//     is the root mount receive: untagged clients always, workspace-tagged
-//     clients only if their workspace has no shadowing `$<ws>/<id>`.
-//   • shell broadcasts (topic = 'shell')   → every client.
+//   • '<workspace>/<id>' — events from a specific module mount. A module
+//     subscribes to its own qid (derived client-side from `import.meta.url`)
+//     and only sees its own broadcasts. Two same-named modules in
+//     different workspaces can't cross-talk.
+//   • 'shell'            — shell events (hot reload, etc). Every client
+//     subscribes to 'shell'.
 //
-// The frame's `topic` is the bare module id (not the qualified id), so a
-// frontend just does `__atelier.subscribe('<id>', …)` — the shell handles
-// which workspace's events that subscription actually receives.
-//
-// Wire protocol: each frame is JSON `{ topic, ...event }`. Topic 'shell'
-// carries shell events (hot reload, etc).
+// The server doesn't filter fan-out — every frame goes to every connected
+// client, and the client's per-topic subscriber map decides what each one
+// actually receives. With qualified topics, that's both correct and simple.
 // ------------------------------------------------------------------------
 
 const wss = new WebSocketServer({ noServer: true });
 // wsClients is declared near the top of the file (hoisted) so module
 // mounting can safely call ctx.broadcast before this section runs.
 
-// Broadcast from a module mount. `qid` is the module's qualifiedId — the
-// shell parses it to derive (workspace, bareId) and filters clients.
+// Broadcast from a module mount. Topic = qualifiedId.
 //
-// Spread order: shell-owned fields come LAST so a module that accidentally
+// Spread order: shell-owned `topic` comes LAST so a module that accidentally
 // (or maliciously) names an event field `topic` can't override the routing
 // key. Same defensive ordering everywhere the shell merges module data
 // into a structure it owns.
 function wsBroadcastFromModule(qid, event) {
   if (wsClients.size === 0) return;
-  const slash = qid.indexOf('/');
-  const eventWs = slash >= 0 ? qid.slice(0, slash) : null;
-  const bareId  = slash >= 0 ? qid.slice(slash + 1) : qid;
-  const frame = JSON.stringify({ ...event, topic: bareId });
+  const frame = JSON.stringify({ ...event, topic: qid });
   for (const ws of wsClients) {
     if (ws.readyState !== 1 /* OPEN */) continue;
-    if (!clientReceivesModuleEvent(ws, eventWs, bareId)) continue;
     try { ws.send(frame); } catch { /* drop */ }
   }
 }
 
-// Shell-level broadcasts (hot reload, etc) reach every client regardless
-// of workspace tag — the on-disk state changed, everyone re-syncs.
+// Shell-level broadcasts (hot reload, etc) reach every client.
 function wsBroadcastShell(event) {
   if (wsClients.size === 0) return;
   const frame = JSON.stringify({ ...event, topic: 'shell' });
@@ -1452,14 +1359,6 @@ function wsBroadcastShell(event) {
     if (ws.readyState !== 1) continue;
     try { ws.send(frame); } catch { /* drop */ }
   }
-}
-
-function clientReceivesModuleEvent(ws, eventWs, bareId) {
-  if (eventWs) return ws.workspace === eventWs;
-  // Root module event. Untagged clients always see it; workspace clients
-  // see it iff their workspace doesn't shadow this module.
-  if (!ws.workspace) return true;
-  return !mountedBackends.has(`${ws.workspace}/${bareId}`);
 }
 
 wss.on('connection', (ws) => {
@@ -1513,7 +1412,7 @@ fs.watch(ROOT, { recursive: true }, (event, filename) => {
   if (segs[segs.length - 1] === 'backend.js') return;
 
   // Resolve the qualified id of the (possibly affected) module.
-  //   global:    <mod>/...        → qualifiedId = '<mod>'
+  //   root:      <mod>/...        → qualifiedId = 'global/<mod>'
   //   workspace: $<ws>/<mod>/...  → qualifiedId = '<ws>/<mod>'
   let qualifiedId = null;
   if (segs.length >= 1 && isWorkspaceDir(segs[0])) {
@@ -1522,7 +1421,7 @@ fs.watch(ROOT, { recursive: true }, (event, filename) => {
     }
     // bare $<ws> (workspace creation) — fall through to shell reload.
   } else if (segs.length > 1) {
-    qualifiedId = segs[0];
+    qualifiedId = `${GLOBAL_WORKSPACE}/${segs[0]}`;
   }
 
   if (!qualifiedId) {
@@ -1544,8 +1443,8 @@ fs.watch(ROOT, { recursive: true }, (event, filename) => {
 // Shared asset response — used by both shell-asset (public) and module-asset
 // (auth-gated) paths. Resolves source via resolveAssetSource and writes the
 // appropriate compiled or raw response.
-async function serveAsset(req, res, url, reqWs) {
-  const asset = resolveAssetSource(url.pathname, reqWs);
+async function serveAsset(req, res, url) {
+  const asset = resolveAssetSource(url.pathname);
   if (!asset) {
     res.writeHead(404);
     res.end('Not found');
@@ -1566,11 +1465,6 @@ async function serveAsset(req, res, url, reqWs) {
       headers['Content-Type'] = asset.contentType;
       body = fs.readFileSync(asset.src);
     }
-    // Module assets vary by workspace; bypass caching so two workspaces
-    // don't share an entry for the same URL. Shell assets stay cacheable.
-    if (url.pathname.startsWith('/modules/')) {
-      headers['Cache-Control'] = 'no-store';
-    }
     res.writeHead(200, headers);
     res.end(body);
   } catch (err) {
@@ -1587,11 +1481,7 @@ async function serveAsset(req, res, url, reqWs) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  // Resolve workspace context once per request. Available to assets, SPA,
-  // and API alike. `req.workspace` is exposed for module handlers.
   await mountPendingBackends();
-  const reqWs = resolveWorkspaceFromRequest(req);
-  req.workspace = reqWs;
 
   if (url.pathname === '/' || url.pathname === '/index.html') {
     await serveIndex(req, res);
@@ -1603,18 +1493,18 @@ const server = http.createServer(async (req, res) => {
   // cookie exists. These are first-party shell bytes; no module-installation
   // disclosure happens here.
   if (url.pathname.startsWith('/assets/')) {
-    await serveAsset(req, res, url, reqWs);
+    await serveAsset(req, res, url);
     return;
   }
 
   // Everything below — module assets and API — is auth-gated. Auth-gating
   // `/modules/*` closes a module-enumeration disclosure: without this, an
-  // unauthenticated visitor could probe `/modules/<guess>/frontend.js` and
-  // distinguish 200 (installed) from 404 (not), learning what's on the
+  // unauthenticated visitor could probe `/modules/<guess>/<id>/frontend.js`
+  // and distinguish 200 (installed) from 404 (not), learning what's on the
   // server. The auth module's `authenticate()` whitelists its own bundle
-  // path (e.g. `/modules/auth/...`) by returning a synthetic guest user
-  // for those paths — same pattern it uses for `/api/auth/login`.
-  const apiUser = await authenticateRequest(req, res, buildDefaultUser());
+  // path (e.g. `/modules/global/auth/...`) by returning a synthetic guest
+  // user for those paths — same pattern it uses for `/api/global/auth/login`.
+  const apiUser = await authenticateRequest(req, res, buildDefaultUser({ metaByQId: await getMetaByQId() }));
   if (!apiUser) return;                 // auth module owned the response
   req.user = apiUser;
 
@@ -1627,26 +1517,40 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       id: apiUser.id || null,
       name: apiUser.name || null,
-      workspace: reqWs,
       anonymous: !!apiUser.anonymous,
     }));
     return;
   }
 
-  // Module assets — workspace-aware, dir-keyed, served only to authed users.
+  // Module assets — `/modules/<ws>/<id>/<rest>`. Workspace+id is fully
+  // identified by URL; served only to authed users.
   if (url.pathname.startsWith('/modules/')) {
-    await serveAsset(req, res, url, reqWs);
+    await serveAsset(req, res, url);
     return;
   }
 
-  // API — router dispatch with workspace-resolved qids.
-  const allowedQids = buildAllowedQids(reqWs);
-  if (await router.handle(req, res, { allowedQids })) return;
+  // API — `/api/<ws>/<id>/...`. Routes were registered with the same
+  // prefix by `makeModuleScope`, so the dispatcher just matches by URL.
+  if (await router.handle(req, res)) return;
 
-  // SPA fallback. URLs are flat — `/` (empty) or `/<id>` (module). Workspace
-  // lives off-URL as `?ws=<x>` query param when 2+ workspaces exist; that's
-  // a query, not a path segment, so single-segment match covers it.
-  if (req.method === 'GET' && /^\/[a-z0-9-]+\/?$/.test(url.pathname)) {
+  // SPA fallback. Workspace + id is in the URL:
+  //   /<ws>/                — workspace home
+  //   /<ws>/<id>            — module page
+  // Both serve the same index.html; the client parses the URL on render.
+  //
+  // Reserved prefixes (/api/, /assets/, /modules/, /_atelier/) must NOT fall
+  // through here — an unmatched API route should 404 cleanly instead of
+  // serving HTML. The router and asset handler above already claim the happy
+  // paths; the explicit prefix check catches the mismatched ones.
+  const isReservedPrefix =
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/assets/') ||
+    url.pathname.startsWith('/modules/') ||
+    url.pathname.startsWith('/_atelier/');
+  if (req.method === 'GET'
+      && !isReservedPrefix
+      && /^\/[a-zA-Z0-9][a-zA-Z0-9_-]*(?:\/(?:[a-zA-Z0-9][a-zA-Z0-9_-]*)?)?\/?$/
+        .test(url.pathname)) {
     await serveIndex(req, res);
     return;
   }
@@ -1672,21 +1576,17 @@ server.on('upgrade', async (req, socket, head) => {
   if (pathname !== '/_atelier/ws') { socket.destroy(); return; }
 
   await mountPendingBackends();
-  const user = await gateRequest(req, buildDefaultUser());
+  const user = await gateRequest(req, buildDefaultUser({ metaByQId: await getMetaByQId() }));
   if (!user) {
     try { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); } catch {}
     socket.destroy();
     return;
   }
 
-  // Tag the connection with its workspace so wsBroadcastFromModule can
-  // filter fan-out. Resolution uses the same order as HTTP requests, but
-  // the upgrade URL's `?ws=` is the primary signal — the client always
-  // appends it (see client.jsx).
-  const connWs = resolveWorkspaceFromRequest(req);
+  // No per-connection workspace tagging — topics are qualified
+  // (`<ws>/<id>`) and the client subscribes to the ones it cares about.
   wss.handleUpgrade(req, socket, head, (ws) => {
     ws.user = user;
-    ws.workspace = connWs;
     wss.emit('connection', ws, req);
   });
 });
