@@ -315,11 +315,18 @@ function App() {
   const [chromeEntry, setChromeEntry] = useState(null); // load entry for chrome
 
   // Canonicalize URL: if no workspace in the path, redirect to the first
-  // non-empty workspace (or first listed if all are empty).
+  // non-empty workspace (or first listed if all are empty). If any module
+  // declares `meta.primary: true`, land on that module instead of the
+  // workspace home — prefer one in the chosen defaultWs, fall back to any.
   const defaultWs = (wsList.find((w) => (w.modules || []).length > 0) || wsList[0])?.id || null;
   useEffect(() => {
     if (urlState.ws || !defaultWs) return;
-    window.history.replaceState(null, '', buildUrl(defaultWs, null));
+    const primary = allModules.find((m) => m.workspace === defaultWs && m.meta?.primary)
+                 || allModules.find((m) => m.meta?.primary);
+    const target = primary
+      ? buildUrl(primary.workspace, primary.id)
+      : buildUrl(defaultWs, null);
+    window.history.replaceState(null, '', target);
     setUrlState(parseUrl());
   }, [urlState.ws, defaultWs]);
   const effectiveWorkspace = urlState.ws || defaultWs;
