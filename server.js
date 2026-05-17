@@ -259,6 +259,27 @@ function readModuleAt(dir, name, workspace) {
 
 const warnedReservedWs = new Set();   // dedupe `$<reserved>/` warnings
 
+// Builtin chrome ships inside the shell folder (atelier/builtin-chrome/) so a
+// fresh checkout always has a working visual layer. A custom chrome — any
+// global-workspace module exporting `meta = { chrome: true }` — wins the
+// `chromeQid` lookup over the builtin. Both can coexist in discovery; the
+// builtin's meta carries `hidden: true` so it's filtered out of the rail.
+const BUILTIN_CHROME_ID = 'atelier-chrome';
+const BUILTIN_CHROME_DIR = path.join(HOST_DIR, 'builtin-chrome');
+const BUILTIN_CHROME_QID = `${GLOBAL_WORKSPACE}/${BUILTIN_CHROME_ID}`;
+
+function getBuiltinChromeModule() {
+  if (!fs.existsSync(path.join(BUILTIN_CHROME_DIR, 'frontend.jsx'))) return null;
+  return {
+    id: BUILTIN_CHROME_ID,
+    dir: BUILTIN_CHROME_DIR,
+    hasFrontend: true,
+    hasBackend: false,
+    workspace: GLOBAL_WORKSPACE,
+    qualifiedId: BUILTIN_CHROME_QID,
+  };
+}
+
 function discoverModules() {
   const out = [];
   let names;
@@ -291,6 +312,12 @@ function discoverModules() {
     const m = readModuleAt(path.join(ROOT, name), name, GLOBAL_WORKSPACE);
     if (m) out.push(m);
   }
+  // Always present: builtin chrome from atelier/builtin-chrome/. Lives
+  // outside ROOT (the workspace dir) so it never collides with user modules.
+  // Prepended before sorting so the rest of the pipeline (asset routing,
+  // CSS scan, meta extraction) sees it as just another module.
+  const builtin = getBuiltinChromeModule();
+  if (builtin) out.push(builtin);
   // Sort by qualifiedId so auth-slot election + rail order are stable
   // across filesystems with different readdir semantics.
   out.sort((a, b) => a.qualifiedId.localeCompare(b.qualifiedId));
@@ -314,6 +341,7 @@ const warnedConfigMisses = new Set();
 
 function getModules() {
   const discovered = discoverModules();
+  const builtin = discovered.find((m) => m.qualifiedId === BUILTIN_CHROME_QID);
   if (MODE === 'standalone') {
     // Standalone mode is an explicit user choice — bypass the config filter
     // so a module excluded for this env can still be inspected. Match by
@@ -322,13 +350,21 @@ function getModules() {
     // type `node server.js kanban` without thinking about workspaces.
     const only = discovered.find((m) => m.qualifiedId === requestedId)
               || discovered.find((m) => m.id === requestedId && m.workspace === GLOBAL_WORKSPACE);
-    return only ? [only] : [];
+    if (!only) return [];
+    // Always include the builtin chrome alongside the requested module so
+    // standalone has a renderable shell. (Custom chromes still resolve via
+    // the meta.chrome lookup; standalone just guarantees a fallback.)
+    if (builtin && only.qualifiedId !== builtin.qualifiedId) return [only, builtin];
+    return [only];
   }
   const cfg = loadModuleConfig(ROOT);
   const parsed = cfg[ENV];
 
-  // Apply the parsed filter to discovered modules.
+  // Apply the parsed filter to discovered modules. The builtin chrome
+  // bypasses the filter — even an empty modules list keeps the shell
+  // renderable.
   const filtered = discovered.filter((m) =>
+    m.qualifiedId === BUILTIN_CHROME_QID ||
     shouldIncludeModule(parsed, m, { globalWorkspace: GLOBAL_WORKSPACE })
   );
 
@@ -378,7 +414,17 @@ let reactStubbed = false;
 
 function stubReactOnce() {
   if (reactStubbed) return;
-  const stub = new Proxy({}, { get: () => () => null });
+  // React.Component / React.PureComponent must be extendable so modules
+  // (or the chrome) declaring `class Foo extends React.Component` at module
+  // top level don't blow up during meta extraction. Everything else is a
+  // no-op function (covers hooks, createElement, etc.).
+  class StubComponent { render() { return null; } }
+  const stub = new Proxy({}, {
+    get(_, prop) {
+      if (prop === 'Component' || prop === 'PureComponent') return StubComponent;
+      return () => null;
+    },
+  });
   globalThis.React = stub;
   globalThis.ReactDOM = stub;
   globalThis.window = stub;
@@ -1220,8 +1266,12 @@ function buildDefaultUser({ metaByQId } = {}) {
   const wsMap = new Map();              // ws → [{ id, meta? }]
   for (const ws of listAllWorkspaces()) wsMap.set(ws, []);
   for (const m of mods) {
-    const entry = { id: m.id };
-    if (metaByQId) entry.meta = metaByQId.get(m.qualifiedId) || {};
+    const meta = (metaByQId && metaByQId.get(m.qualifiedId)) || {};
+    // Chrome modules and other `hidden` modules don't appear in the rail —
+    // they're addressable (assets, bundle imports) but the client treats
+    // them as infrastructure, not rail entries.
+    if (meta.chrome === true || meta.hidden === true) continue;
+    const entry = { id: m.id, meta };
     if (!wsMap.has(m.workspace)) wsMap.set(m.workspace, []);
     wsMap.get(m.workspace).push(entry);
   }
@@ -1284,6 +1334,24 @@ async function getMetaByQId() {
   return new Map(allFront.map((m, i) => [m.qualifiedId, metas[i]]));
 }
 
+// Resolve which module owns the `chrome` slot — first global-workspace
+// module whose meta declares `chrome: true` wins. A custom chrome wins over
+// the builtin (sorted alphabetically among customs for determinism). If no
+// custom is installed, falls back to the builtin (atelier/builtin-chrome).
+//
+// The shell's client.jsx dynamic-imports `/modules/<chromeQid>/frontend.js`
+// and renders its `chrome` named export as the root component.
+function resolveChromeQid(metaByQId) {
+  const candidates = [...metaByQId.entries()]
+    .filter(([qid, meta]) => meta?.chrome === true && qid.split('/')[0] === GLOBAL_WORKSPACE);
+  if (candidates.length === 0) return null;
+  const customs = candidates
+    .filter(([qid]) => qid !== BUILTIN_CHROME_QID)
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (customs.length) return customs[0][0];
+  return BUILTIN_CHROME_QID;
+}
+
 async function serveIndex(req, res) {
   // Auth runs FIRST. A logged-out visitor must NEVER see workspace info
   // leak in the bootstrap — the unauth handler owns the response and
@@ -1302,6 +1370,7 @@ async function serveIndex(req, res) {
     mode: MODE,
     env: ENV,
     user,
+    chromeQid: resolveChromeQid(metaByQId),
   };
   const html = template.replace(
     '/*__ATELIER_BOOTSTRAP__*/',
@@ -1404,6 +1473,21 @@ const watchSkipSeg = (s) =>
   s.startsWith('.') ||
   s.startsWith('-');
 
+// Builtin chrome lives in HOST_DIR (outside ROOT), so the ROOT watcher
+// below doesn't see it. A small separate watcher keeps edits to the
+// builtin chrome's frontend.jsx / styles.css hot-reloadable like any
+// other module.
+if (fs.existsSync(BUILTIN_CHROME_DIR)) {
+  try {
+    fs.watch(BUILTIN_CHROME_DIR, { recursive: true }, (event, filename) => {
+      if (!filename) return;
+      broadcastReload(BUILTIN_CHROME_QID);
+    });
+  } catch (err) {
+    console.warn(`  ! could not watch builtin chrome: ${err.message}`);
+  }
+}
+
 fs.watch(ROOT, { recursive: true }, (event, filename) => {
   if (!filename) return;
   const segs = filename.split(path.sep);
@@ -1489,9 +1573,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Shell assets (`/assets/*`) are ALWAYS public — the takeover login page
-  // itself loads /assets/client.js and /assets/styles.css before any auth
-  // cookie exists. These are first-party shell bytes; no module-installation
-  // disclosure happens here.
+  // itself loads /assets/client.js before any auth cookie exists. These are
+  // first-party shell bytes; no module-installation disclosure happens here.
+  // (Visual styles live in the chrome module's bundle, not in /assets/ —
+  // see atelier/builtin-chrome/ for the default chrome.)
   if (url.pathname.startsWith('/assets/')) {
     await serveAsset(req, res, url);
     return;

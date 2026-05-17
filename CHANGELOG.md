@@ -2,6 +2,72 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.3.0
+
+**Chrome-slot extraction.** The shell no longer ships any pixels. Every visual concern — rail, topbar, workspace picker, connection banner, takeover wrapping, fonts, colors, scrollbars, design tokens — moved into a `chrome`-slot module. The default `atelier/builtin-chrome/` is shipped inside the shell; any global-workspace module exporting `meta = { chrome: true }` claims the slot and replaces it.
+
+### What changed
+
+- **New slot: `chrome`.** First global-workspace module whose `meta.chrome === true` wins (mirrors the auth-slot pattern). Custom chromes beat the builtin; among customs, alphabetical by qualifiedId. Fallback is `global/atelier-chrome` (the builtin).
+- **`atelier/builtin-chrome/`** is the default skin — a real module folder shipped with the shell. `frontend.jsx` exports `chrome(props)` and `meta = { chrome: true, hidden: true }`. `styles.css` carries all Tailwind tokens, fonts, base styles, keyframes. Copy the folder to write a custom skin.
+- **Server resolves `chromeQid` per request** and injects it into the bootstrap (`window.__ATELIER__.chromeQid`). The shell's `client.jsx` dynamic-imports the chrome bundle and renders its `chrome` named export as the root component.
+- **Shell ships zero visual bytes.** `atelier/styles.css` is gone (moved into the builtin). `index.html` keeps only a one-line inline `<style>` (`html,body{margin:0;background:#1d2021}`) to prevent a white flash before the chrome's CSS lands. `client.jsx` shrunk to a router + bundle loader + error fallback (no Icon, Spinner, TopBar, LeftRail, etc.).
+- **Chrome props contract:**
+  ```js
+  chrome({
+    boot,           // { mode, env }
+    user,           // post-auth user
+    modules,        // [{ qid, id, workspace, hasFrontend, meta }]
+    workspaces,     // [{ id, modules }]
+    workspace,      // currently routed workspace
+    activeQid,      // string | null
+    active,         // { kind: 'none' | 'loading' | 'error' | 'ready', element?, err?, qid? }
+    loadedModules,  // { [qid]: { hasDefault, TopBarCenter, meta, status, err } }
+    navigate,       // (qid: string) => void  (SPA push)
+    pickWorkspace,  // (wsId: string) => void  (full reload)
+  })
+  ```
+- **Chrome owns:** rail + topbar + sidebar toggle (⌘\), workspace picker, `ConnectionBanner` (listens to `atelier:connection` events itself), module error boundary, loading + empty + load-error placeholders, lucide MutationObserver, the stylesheet.
+- **Shell still owns:** URL routing (`/<ws>/<id>`), `window.__atelier.subscribe` (WS multiplex), `window.__atelier.callModule` (registry), bundle loading, hot-reload subscription, takeover passthrough.
+- **Hidden modules in rail.** Modules with `meta.hidden === true` are addressable (assets, bundle imports) but never rendered in the rail. Chrome modules are auto-hidden via `meta.chrome` as well.
+- **Tokens, banner, takeover styling — all chrome.** A custom chrome with a different palette is now a CSS-only edit. Takeover (unauth handoff) currently bypasses chrome and renders the auth bundle bare — auth modules ship their own takeover visuals (chrome-wrapped takeover is a future enhancement; see Known limitations).
+
+### Writing a custom chrome
+
+```bash
+cp -r atelier/builtin-chrome ~/my-skin
+# Edit ~/my-skin/frontend.jsx — same Chrome export, different visuals.
+# Edit ~/my-skin/styles.css — new tokens, new layout.
+# Register the path in atelier.config.json:
+#   { "modules": [{ "path": "~/my-skin", "id": "my-skin" }] }
+```
+
+Both `my-skin/frontend.jsx` and `builtin-chrome/frontend.jsx` will be discovered as chrome candidates; `my-skin` wins (custom beats builtin).
+
+### Migrating a v2 module to v3
+
+**Nothing.** Module contract is unchanged. Modules still:
+- Export `default function Module()` (rail entry)
+- Export `TopBarCenter` (topbar slot — chrome still resolves it)
+- Use `window.__atelier.subscribe`, `window.__atelier.callModule`
+- Live in `frontend.jsx` / `backend.js`
+- See the same `ctx` on the backend (qualifiedId, workspace, broadcast, etc.)
+
+The only architectural change is at the shell level. v2 modules continue to work in v3 unmodified.
+
+### Known limitations in 0.3.0
+
+- **Takeover bypasses chrome.** When the auth module hands off (no user), the shell loads the auth bundle bare — no chrome wrapping, so chrome's `ConnectionBanner` / fonts / colors don't apply during the login flow. Auth modules ship their own takeover visuals. A future commit can pass `chromeQid` into the takeover bootstrap and let the chrome render around the auth body.
+- **Builtin chrome bypasses `atelier.config.json` filters.** Even if a user's config excludes everything, the shell still resolves a chrome (otherwise nothing would render). Modules with `meta.chrome === true` from path entries can still be installed and win the slot.
+- **CSS scan base is `atelier/`.** Tailwind scans modules' `frontend.jsx` files relative to `HOST_DIR`. Pre-existing behavior; unchanged.
+
+### Files removed / cleaned up
+
+- `atelier/styles.css` (moved into `atelier/builtin-chrome/styles.css`)
+- `~70%` of `atelier/client.jsx` (every visual component, lucide observer, helpers)
+- `index.html` lost its `<link rel="stylesheet" href="/assets/styles.css">` — replaced by chrome-injected stylesheet
+- `/assets/styles.css` now 404s — chrome serves at `/modules/<chromeQid>/styles.css`
+
 ## 0.2.0
 
 **Workspaces + scoped-router shell rewrite.** Big breaking architecture change in pre-release territory — every module needs a small migration. The migration is mechanical and described below.

@@ -5,27 +5,31 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Atelier</title>
 
-  <!-- Deploy-ready stack:
-         JSX is precompiled server-side via esbuild (atelier/atelier.js) and
-         served from /assets/client.js + /modules/<id>/frontend.js. CSS compiled
-         via Tailwind v4 + oxide, served from /assets/styles.css (fonts included).
-         React, ReactDOM, Lucide come from CDN (small, cacheable, stable). -->
+  <!-- Atelier 0.3 shell shape:
+         The shell ships zero pixels. Visual concerns — fonts, colors, rail,
+         topbar, banner, takeover wrapping — live entirely in a chrome-slot
+         module (`atelier/builtin-chrome/` by default, or any global-workspace
+         module exporting `meta = { chrome: true }`). The shell's client.jsx
+         dynamic-imports the chrome bundle and renders it as the root.
 
-  <!-- Favicon — the four-quadrant atelier mark (solid, full-color), inlined as
-       SVG data URI so we don't need a separate route. Theme color matches the
-       canvas dark for OS-chrome tinting on supported browsers. -->
+         The single inline <style> below sets only the body background so
+         users don't see a white flash before the chrome's stylesheet loads.
+         Everything else is the chrome's job. -->
+
+  <!-- Favicon — four-quadrant atelier mark. Theme color matches the dark
+       canvas for OS-chrome tinting on supported browsers. -->
   <link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1" fill="%23d79921"/><rect x="13" y="3" width="8" height="8" rx="1" fill="%23689d6a"/><rect x="3" y="13" width="8" height="8" rx="1" fill="%23689d6a"/><rect x="13" y="13" width="8" height="8" rx="1" fill="%23d79921"/></svg>' />
-  <meta name="theme-color" content="#282828" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#1d2021" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#f7f5f2" media="(prefers-color-scheme: light)" />
 
-  <link rel="stylesheet" href="/assets/styles.css" />
+  <style>html,body{margin:0;background:#1d2021}</style>
 
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
 
   <!-- Injected by atelier/server.js per request:
-       window.__ATELIER__ = { mode, env, user }
+       window.__ATELIER__ = { mode, env, user, chromeQid }
        Or, on the unauth handoff lane:
        window.__ATELIER__ = { takeover, moduleBundle } -->
   <script>/*__ATELIER_BOOTSTRAP__*/</script>
@@ -33,11 +37,10 @@
 <body>
   <div id="root"></div>
 
-  <!-- Shell + app bootstrap — an ES module served at /assets/client.js. Renders
-       the chrome (TopBar, LeftRail, AppShell), wires the shared WebSocket bridge
-       (window.__atelier.subscribe), and dynamic-imports each module's frontend.js
-       on demand. Modules see only React (UMD on window), Tailwind, and Lucide;
-       the shell does not expose any internal components. -->
+  <!-- Shell — an ES module served at /assets/client.js. Wires the shared
+       WebSocket bridge (window.__atelier.subscribe), the callModule registry,
+       URL routing, dynamic-imports the chrome and module bundles, and renders.
+       The chrome owns all visual bytes. -->
   <script type="module" src="/assets/client.js"></script>
 </body>
 </html>

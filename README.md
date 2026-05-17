@@ -384,19 +384,31 @@ return () => { shuttingDown = true; proc.kill('SIGTERM'); };
 
 ## What lives here
 
-- `server.js` — runner, router, discovery, WebSocket multiplex (`/_atelier/ws`), hot-reload broadcaster, auth slot
+- `server.js` — runner, router, discovery, WebSocket multiplex (`/_atelier/ws`), hot-reload broadcaster, auth slot, chrome-slot resolution
 - `atelier.js` — build pipeline (esbuild JSX + Tailwind v4 + oxide), module-config parsing, install CLI
-- `index.html` — template; React + ReactDOM + Lucide from CDN
-- `styles.css` — webfonts + Tailwind v4 `@theme` tokens + base styles
-- `client.jsx` — host shell (TopBar, LeftRail, AppShell, WorkspacePicker, ConnectionBanner) + app bootstrap. A RAF-debounced `MutationObserver` calls `lucide.createIcons()` when modules render `<i data-lucide="…">` tags, so modules never touch lucide themselves.
+- `index.html` — template; React + ReactDOM + Lucide from CDN. A single inline `<style>` sets the body background to prevent a flash before the chrome's stylesheet loads. Otherwise the shell paints zero pixels.
+- `client.jsx` — slim router + bundle loader + error fallback. Loads the chrome bundle (`chromeQid` resolved server-side) and renders it as the root. Wires the WS multiplex and the `callModule` registry.
+- `builtin-chrome/` — the default skin. A real module folder with `frontend.jsx` (rail + topbar + banner + layout + lucide observer) and `styles.css` (webfonts + Tailwind `@theme` tokens + base styles). Copy this folder to write a custom chrome.
+
+## Chrome slot
+
+The shell ships zero visual bytes. Everything you see — rail, topbar, fonts, colors, picker, banner — lives in a `chrome`-slot module. The first global-workspace module whose `meta.chrome === true` wins; otherwise the builtin (`global/atelier-chrome`) takes the slot.
+
+To swap the skin: copy `atelier/builtin-chrome/` somewhere, edit, register via `atelier.config.json`:
+
+```json
+{ "modules": [{ "path": "~/my-skin", "id": "my-skin" }] }
+```
+
+Your chrome's `frontend.jsx` must export a `chrome` function and `meta = { chrome: true, hidden: true }`. The shell calls `chrome(props)` and renders the result as the root. See [`builtin-chrome/frontend.jsx`](builtin-chrome/frontend.jsx) for the full props contract.
 
 ## What modules get
 
 Ambient only — no shared UI library, no imports:
 
 - **React** on `window.React` (UMD). Modules destructure hooks when they need them: `const { useState } = React`.
-- **Tailwind** classes from `styles.css`. Modules use `className=` freely.
-- **Lucide icons** via the DOM convention `<i data-lucide="kanban-square" className="w-3.5 h-3.5" />`. The shell's MutationObserver turns them into SVGs.
+- **Tailwind** classes from whichever chrome is mounted (default tokens in `builtin-chrome/styles.css`). Modules use `className=` freely.
+- **Lucide icons** via the DOM convention `<i data-lucide="kanban-square" className="w-3.5 h-3.5" />`. The chrome's MutationObserver turns them into SVGs.
 - **`window.__atelier.subscribe(topic, handler)`** — shared WS multiplex.
 - **`window.__atelier.registerModule(id, api)` / `callModule(id, method, ...)`** — opt-in cross-module method registry. Module that wants to expose a callable API does `registerModule`; callers do `callModule`. Missing target = warn-and-no-op (no crash).
 
@@ -404,7 +416,7 @@ That's it. A module is React + Tailwind + the browser, plus a thin WS subscribe 
 
 ## Design source of truth
 
-Tokens live in [`styles.css`](styles.css). Reusable primitives that aren't yet imported by any module sit in [`../kit/`](../kit/) as a living gallery — look at each one and decide whether to promote, copy into a module, or cull.
+Tokens live in [`builtin-chrome/styles.css`](builtin-chrome/styles.css) — the default chrome's stylesheet, which the chrome bundle injects via `<link>` at load time. A custom chrome supplies its own `styles.css` with whatever tokens it wants. Reusable primitives that aren't yet imported by any module sit in [`../kit/`](../kit/) as a living gallery — look at each one and decide whether to promote, copy into a module, or cull.
 
 ## Selecting which modules are enabled — `atelier.config.json`
 
