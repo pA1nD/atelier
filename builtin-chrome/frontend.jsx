@@ -59,23 +59,35 @@ const { useState, useEffect, useRef, useLayoutEffect } = React;
   document.head.appendChild(link);
 })();
 
-/* Favicon — chrome owns visual identity, favicon included. The shell's
- * `index.html` ships a default for the boot-paint flash (so the tab gets
- * an icon before the chrome bundle parses); chromes then replace it with
- * their own. Builtin's mark: the four-quadrant outline that matches the
- * top-bar logo + gruvbox accents (amber + aqua). */
-(function ensureChromeFavicon() {
+/* Chrome owns ALL visual identity meta in <head>: favicon, theme-color,
+ * (and the title, which the chrome sets reactively in App via useEffect).
+ * Everything left in `index.html` is technical bootstrap — charset,
+ * viewport, the React UMDs, the bootstrap script. This IIFE replaces the
+ * shell's defaults with builtin's. Idempotent under hot reload. */
+(function ensureChromeIdentity() {
   if (typeof document === 'undefined') return;
+
+  // Favicon — four-quadrant atelier mark with gruvbox accents.
   const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='8' height='8' rx='1' fill='%23d79921'/><rect x='13' y='3' width='8' height='8' rx='1' fill='%23689d6a'/><rect x='3' y='13' width='8' height='8' rx='1' fill='%23689d6a'/><rect x='13' y='13' width='8' height='8' rx='1' fill='%23d79921'/></svg>`;
-  const href = 'data:image/svg+xml;utf8,' + svg;
   for (const existing of document.querySelectorAll('link[rel~="icon"]')) {
     existing.remove();
   }
-  const link = document.createElement('link');
-  link.rel = 'icon';
-  link.type = 'image/svg+xml';
-  link.href = href;
-  document.head.appendChild(link);
+  const icon = document.createElement('link');
+  icon.rel = 'icon';
+  icon.type = 'image/svg+xml';
+  icon.href = 'data:image/svg+xml;utf8,' + svg;
+  document.head.appendChild(icon);
+
+  // theme-color — gruvbox bg-canvas across both color schemes (builtin
+  // is dark-only). Replace any shell-shipped tags so the OS chrome
+  // resolves a single source.
+  for (const existing of document.querySelectorAll('meta[name="theme-color"]')) {
+    existing.remove();
+  }
+  const theme = document.createElement('meta');
+  theme.name = 'theme-color';
+  theme.content = '#282828';                  // bg-canvas
+  document.head.appendChild(theme);
 })();
 
 /* =========================================================================

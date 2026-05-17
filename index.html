@@ -16,8 +16,12 @@
          users don't see a white flash before the chrome's stylesheet loads.
          Everything else is the chrome's job. -->
 
-  <!-- Favicon — four-quadrant atelier mark. Theme color matches the dark
-       canvas for OS-chrome tinting on supported browsers. -->
+  <!-- Boot-paint defaults — favicon, theme-color, body bg. All of these
+       belong to the chrome (visual identity), but the chrome bundle takes
+       ~50-100ms to parse on a cold load. The defaults below paint during
+       that window so the browser tab + OS chrome have an icon and color
+       before the chrome's IIFE replaces them. Both the builtin and any
+       custom chrome rewrite these on module load. -->
   <link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1" fill="%23d79921"/><rect x="13" y="3" width="8" height="8" rx="1" fill="%23689d6a"/><rect x="3" y="13" width="8" height="8" rx="1" fill="%23689d6a"/><rect x="13" y="13" width="8" height="8" rx="1" fill="%23d79921"/></svg>' />
   <meta name="theme-color" content="#1d2021" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#f7f5f2" media="(prefers-color-scheme: light)" />
