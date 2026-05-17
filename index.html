@@ -37,6 +37,15 @@
        Or, on the unauth handoff lane:
        window.__ATELIER__ = { takeover, moduleBundle } -->
   <script>/*__ATELIER_BOOTSTRAP__*/</script>
+
+  <!-- Import map for chrome-published bare specifiers. Server replaces
+       the placeholder with `<script type="importmap">{...}</script>` when
+       the active chrome ships a kit.js (or any future at-atelier-prefixed
+       file). Must appear BEFORE the first <script type="module"> below;
+       once parsed, the map applies to every subsequent static + dynamic
+       import (so module bundles loaded later via import() resolve
+       `@atelier/kit` correctly). -->
+  <!--__ATELIER_IMPORTMAP__-->
 </head>
 <body>
   <div id="root"></div>

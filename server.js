@@ -1425,6 +1425,22 @@ function resolveChromeQid(metaByQId) {
   return BUILTIN_CHROME_QID;
 }
 
+// Build the per-request import map. A chrome MAY publish a `kit.js`
+// (`kit.jsx`) — when present, modules can `import { Button } from
+// '@atelier/kit'` and the browser resolves it via this map. The map is
+// chrome-decided: each chrome picks what to publish, and modules paired
+// with that chrome rely on its specific exports. No enforced contract.
+function buildImportMap(chromeQid) {
+  if (!chromeQid) return null;
+  const m = getModules().find((x) => x.qualifiedId === chromeQid);
+  if (!m) return null;
+  const imports = {};
+  if (fs.existsSync(path.join(m.dir, 'kit.js')) || fs.existsSync(path.join(m.dir, 'kit.jsx'))) {
+    imports['@atelier/kit'] = `/modules/${chromeQid}/kit.js`;
+  }
+  return Object.keys(imports).length ? { imports } : null;
+}
+
 async function serveIndex(req, res) {
   // Auth runs FIRST. A logged-out visitor must NEVER see workspace info
   // leak in the bootstrap — the unauth handler owns the response and
@@ -1439,16 +1455,22 @@ async function serveIndex(req, res) {
   // Workspace identity now lives in the URL path (`/<ws>/<id>`). No
   // canonicalization, no cookie — the client parses the URL on every
   // render and the picker writes a new URL on switch.
+  const chromeQid = resolveChromeQid(metaByQId);
   const bootstrap = {
     mode: MODE,
     env: ENV,
     user,
-    chromeQid: resolveChromeQid(metaByQId),
+    chromeQid,
   };
-  const html = template.replace(
+  const importMap = buildImportMap(chromeQid);
+  const importMapTag = importMap
+    ? `<script type="importmap">${JSON.stringify(importMap)}</script>`
+    : '';
+  let html = template.replace(
     '/*__ATELIER_BOOTSTRAP__*/',
     `window.__ATELIER__ = ${JSON.stringify(bootstrap)};`
   );
+  html = html.replace('<!--__ATELIER_IMPORTMAP__-->', importMapTag);
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -1625,11 +1647,16 @@ fs.watch(ROOT, { recursive: true }, (event, filename) => {
   broadcastReload(qualifiedId);
 });
 
-// If `srcPath` is the entry frontend.jsx of a chrome module, return that
-// module's dir (used as absWorkingDir for the bundled build). Else null.
+// If `srcPath` is a bundle-entry of a chrome module, return that module's
+// dir (used as absWorkingDir for the bundled build). Else null.
 // Chrome modules need esbuildBuild (bundling with node_modules resolution
 // + react alias) instead of the per-file transform; this detection picks
 // the right path lazily so non-chrome modules keep their cheap pipeline.
+//
+// Bundle entries are `frontend.jsx` (the chrome itself) and `kit.js` /
+// `kit.jsx` (the chrome's published primitives for companion modules,
+// resolved via the `@atelier/kit` import-map specifier the shell injects
+// in serveIndex).
 async function chromeBundleRootFor(srcPath) {
   const metaByQId = await getMetaByQId();
   for (const m of getModules()) {
@@ -1637,6 +1664,8 @@ async function chromeBundleRootFor(srcPath) {
     const meta = metaByQId.get(m.qualifiedId) || {};
     if (meta.chrome !== true) continue;
     if (srcPath === path.join(m.dir, 'frontend.jsx')) return m.dir;
+    if (srcPath === path.join(m.dir, 'kit.js'))       return m.dir;
+    if (srcPath === path.join(m.dir, 'kit.jsx'))      return m.dir;
   }
   return null;
 }
