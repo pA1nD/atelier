@@ -1477,11 +1477,26 @@ async function serveIndex(req, res) {
   const importMapTag = importMap
     ? `<script type="importmap">${JSON.stringify(importMap)}</script>`
     : '';
+
+  // Render-blocking <link> to the chrome's stylesheet so it arrives before
+  // the chrome bundle parses and React renders — eliminates the FOUC where
+  // Lucide SVGs paint at default 24px before Tailwind utilities apply.
+  // Only emit if the chrome ships a styles.css; the chrome's own JS IIFE
+  // checks for the `atelier-chrome-styles` id and skips a duplicate.
+  let chromeStylesTag = '';
+  if (chromeQid) {
+    const chromeMod = getModules().find((x) => x.qualifiedId === chromeQid);
+    if (chromeMod && fs.existsSync(path.join(chromeMod.dir, 'styles.css'))) {
+      chromeStylesTag = `<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/${chromeQid}/styles.css">`;
+    }
+  }
+
   let html = template.replace(
     '/*__ATELIER_BOOTSTRAP__*/',
     `window.__ATELIER__ = ${JSON.stringify(bootstrap)};`
   );
   html = html.replace('<!--__ATELIER_IMPORTMAP__-->', importMapTag);
+  html = html.replace('<!--__ATELIER_CHROME_STYLES__-->', chromeStylesTag);
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',

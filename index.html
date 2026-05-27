@@ -28,6 +28,15 @@
 
   <style>html,body{margin:0;background:#1d2021}</style>
 
+  <!-- Render-blocking link to the active chrome's stylesheet, injected by
+       atelier/server.js based on `chromeQid`. Pre-loading here (rather than
+       letting the chrome's JS IIFE inject it later) eliminates the flash of
+       unstyled icons (Lucide-generated SVGs at default 24px) before Tailwind
+       utility classes apply. The chrome's IIFE checks for this id and skips
+       a duplicate injection. Empty if the active chrome has no styles.css
+       on disk. -->
+  <!--__ATELIER_CHROME_STYLES__-->
+
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
