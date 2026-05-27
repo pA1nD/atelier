@@ -9,7 +9,7 @@
     "atelier": "node atelier.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "24.16.0"
   },
   "dependencies": {
     "@tailwindcss/node": "^4.2.4",
