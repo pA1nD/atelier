@@ -1,20 +1,20 @@
 # Authentication
 
-Atelier is single-user by default. Authentication is opt-in: drop in a module that exports `authenticate`, the shell starts gating requests; remove it, the shell stops. The auth module owns all policy — identity, session, workspace membership, per-document ACLs, the login and denied UI. The shell only does dispatch.
+Atelier is ungated by default. Authentication is opt-in: name a module in the `auth` setting and the shell gates every request through it; leave `auth` unset (the default) and the shell doesn't gate. The auth module owns all policy — identity, session, workspace membership, per-document ACLs, the login and denied UI. The shell only does dispatch.
 
 For the workspace model itself (URL shape, `$<ws>/` folders, the synthetic `global` workspace, rail composition, picker behavior), see [README.md](./README.md). This document covers the *auth* layer that lives on top of it.
 
-## The auth module slot
+## The auth module
 
-The shell scans discovered modules at startup. The **first** module whose `backend.js` default export includes an `authenticate` function claims the auth slot. Subsequent ones are logged once and ignored — same precedence rule as everywhere else.
+### The auth module slot
 
-Discovery order is alphabetical by qualifiedId. Only `global`-workspace modules are eligible — auth gates the whole shell and must work before any workspace selection. Workspace modules (`$bigcorp/auth`) exporting `authenticate` are skipped by the slot search and treated as ordinary modules.
+Auth is **explicit and opt-in**: the `auth` setting in `atelier.config.json` names the gating module (a path, or a `global`-workspace module id), or is `false` (the default) to run ungated. A module exporting `authenticate` does **not** gate the shell unless it's the configured one — so a stray export can't silently gate the instance, and a missing one can't silently expose it. `ATELIER_AUTH` overrides the setting at startup.
 
-If no module claims the slot, **the shell does not gate anything**. Every request gets `req.user = defaultUser` (synthesized from discovery, full access). This is the dev default.
+Only `global`-workspace modules are eligible — auth gates the whole shell and must work before any workspace selection. A workspace module (`$bigcorp/auth`) named as `auth` is ignored. The named module must be mounted (listed in `modules`, or path-mounted).
 
-If you want a specific auth module to win, use `atelier.config.json` to limit which modules mount in that environment.
+With `auth: false` (or unset), **the shell does not gate anything**. Every request gets `req.user = defaultUser` (synthesized from discovery, full access). An ungated instance whose `baseUrl` isn't localhost logs a startup warning.
 
-## The contract
+### The contract
 
 The auth module exports four things:
 
@@ -51,7 +51,7 @@ export default function Module() { ... }
 
 The takeover view (login form, denied page, OAuth redirect target, MFA challenge) is whatever response `handleUnauth` produces. The auth module is responsible for serving its own bundle if it wants a React-rendered takeover. The shell does not provide helpers for this — same `index.html` template, different injected bootstrap, served by the auth module itself.
 
-## The `user` object
+### The `user` object
 
 The shape the shell injects into every page bootstrap and sets as `req.user` on every request:
 
@@ -71,7 +71,7 @@ Everything except `id` is optional. The chrome reads `user.workspaces` to popula
 
 **The shape is identical in no-auth and auth mode.** Only the content differs: in no-auth, the shell synthesizes the user from raw discovery; in auth, the auth module produces it. Module code never branches on "is auth installed."
 
-### `defaultUser`
+#### `defaultUser`
 
 The shell builds `defaultUser` from raw discovery on every request and passes it to `authenticate`:
 
@@ -94,12 +94,14 @@ The auth module can:
 - Replace it — user sees what the auth module synthesized from its own data store.
 - Return null — unauth handoff.
 
-When no auth module is installed, the shell uses `defaultUser` as-is. This is how `npm run dev` keeps working with zero configuration.
+When `auth` is off (the default), the shell uses `defaultUser` as-is — the zero-config local experience.
 
-## Per-request flow
+## Request gating
+
+### Per-request flow
 
 1. Build `defaultUser` from current discovery.
-2. If no auth module installed → `req.user = defaultUser` → route normally.
+2. If `auth` is off (the default) → `req.user = defaultUser` → route normally.
 3. Otherwise: `result = await authModule.authenticate(req, defaultUser)`.
    - `result === null` → `authModule.handleUnauth(req, res, ctx)`. Shell is done; the auth module owns the response.
    - `result` is a user object → `req.user = result` → route normally.
@@ -108,11 +110,11 @@ For page requests, the user object is injected into the bootstrap as `window.__A
 
 For API requests, `req.user` is set on the request the module receives.
 
-### Auth runs before the index responds
+#### Auth runs before the index responds
 
 The shell's `serveIndex` calls `authenticateRequest` **first**, before any workspace inference, before any 302 canonicalization, before any cookie set. This means a logged-out visitor never sees workspace-membership info leak in headers or in the HTML — the unauth handler owns the response start to finish.
 
-### Order of layers in the HTTP handler
+#### Order of layers in the HTTP handler
 
 ```
 /  or /index.html       → serveIndex (auth-first)
@@ -125,7 +127,7 @@ The shell's `serveIndex` calls `authenticateRequest` **first**, before any works
 
 The auth module's `authenticate` is expected to whitelist its own bundle path (`/modules/global/auth/...`) and its own login endpoints (`/api/global/auth/login`, etc.) so unauthenticated visitors can fetch them during the takeover render. This is module-side convention, not shell-enforced.
 
-## WebSocket gating
+### WebSocket gating
 
 The shared shell WebSocket at `/_atelier/ws` goes through the **same `authenticate` slot** as HTTP. An upgrade is just an HTTP request with a `Connection: Upgrade` header — cookies are present in `req.headers`, the auth module reads them the same way it does for any other request, and returns a user or null.
 
@@ -139,13 +141,13 @@ Per upgrade:
 
 No new auth-module contract surface. The same `authenticate` function gates both surfaces.
 
-### Topic-level filtering inside the WS
+#### Topic-level filtering inside the WS
 
 Topics are fully qualified (`'<workspace>/<id>'`). The server doesn't filter fan-out — every frame goes to every connected client. The client-side subscriber map decides what's actually delivered to handlers. Because topics carry the workspace, same-named modules in different workspaces can't cross-broadcast.
 
 For per-user/per-workspace WS-level filtering (e.g. "only members of `bigcorp` see `bigcorp/*` frames"), the auth module can attach an ACL to `ws.user` and the shell would need to consult it before send. **This is not implemented yet** — `wsBroadcastFromModule` currently fans out to every client. If you need it, ask before adding; the surface is straightforward but the contract needs thought.
 
-### Limitation: WS connections survive session invalidation
+#### Limitation: WS connections survive session invalidation
 
 `authenticate` runs at the upgrade only — once a socket is admitted, it stays admitted for its lifetime. If the auth module deletes a session (logout, admin revoke, expiry), the matching WS connection keeps receiving frames until the client closes it.
 
@@ -156,7 +158,7 @@ In practice this is usually not visible:
 
 The shell does not provide a `disconnectClients` helper today. If a future auth module needs to force-tear connections (admin force-logout, hard expiry) the shape is straightforward to add — it's the symmetric peer to `ctx.broadcast`, only the shell can do it because the shell owns the connected-clients set, and `ws.user` is already attached. Add it when there's a use case; not before.
 
-## The connection banner
+### The connection banner
 
 When the WebSocket drops, the client distinguishes "server gone" from "session expired" via a one-shot probe to `/_atelier/whoami`:
 
@@ -166,7 +168,7 @@ When the WebSocket drops, the client distinguishes "server gone" from "session e
 
 The probe is gated by `authenticate` (sits in the gated lane) so a 401 is unambiguous "session is dead." Auth modules that return a 200 HTML body for `/_atelier/whoami` would confuse this — auth modules MUST return either 200 JSON for authed or 401 for unauthed on that path. The shell handles the response body itself when authed.
 
-## Takeover render
+### Takeover render
 
 When `authenticate` returns null and `handleUnauth` runs, the auth module decides everything:
 
@@ -190,22 +192,25 @@ The shell's `client.jsx` checks for `boot.takeover` and, if present, mounts the 
 
 There is no `LoggedOut` named export, no `Takeover` prop convention. The auth module's frontend is a normal module frontend that branches on what the bootstrap injected. One bundle, two bootstrap shapes, one branch in `client.jsx`.
 
-## Disabling auth in dev
+## For module authors
 
-Use the existing `atelier.config.json` mechanism — no new flag, no environment variable:
+### Running ungated vs gated
+
+Ungated is the default — leave `auth` unset (or `false`) and the shell never gates (`req.user = defaultUser`, full access):
 
 ```json
-{
-  "modules": {
-    "dev":  ["kanban", "posts"],
-    "prod": ["auth", "kanban", "posts"]
-  }
-}
+{ "modules": ["kanban", "posts"] }
 ```
 
-Auth not in the dev list → no auth module mounted → shell uses `defaultUser` → full access.
+To gate an instance, name the auth module (and make sure it's mounted):
 
-## Module-side consumption
+```json
+{ "auth": "auth", "modules": ["auth", "kanban", "posts"] }
+```
+
+`auth` is a bare global module id or a path; `ATELIER_AUTH` overrides it at startup. Two instances can share a folder and differ only here — one ungated for local work, one gated for exposure.
+
+### Module-side consumption
 
 Modules see the user through `req.user` per request, and learn their workspace context through `ctx.workspace`:
 
@@ -231,7 +236,7 @@ export default {
 
 Modules whose handlers don't care about identity ignore `req.user` and work in either mode. Modules that need user-aware behavior (a personal kanban board, an inbox-per-user, an admin route) read `req.user.id` / `req.user.name` / etc.
 
-## Module portability — workspace-blind module source
+### Module portability — workspace-blind module source
 
 A module's `backend.js` and `frontend.jsx` are identical whether the module lives at the root (`<id>/`) or inside a workspace (`$<ws>/<id>/`). The shell handles the workspace-aware addressing transparently:
 
@@ -279,7 +284,7 @@ Why this shape:
 - **No shell magic.** No bundle rewrite, no `define`-injected identifier, no shell-injected ambient global, no per-request runtime helper. The bundle reads its own URL and computes the rest.
 - **Same bytes, different context.** The bundle is identical on disk for global vs. workspace; the browser populates `import.meta.url` to the URL it fetched it from.
 
-### Cross-module calls
+#### Cross-module calls
 
 A module that needs to call another module's API derives the workspace from `ROUTE` and addresses the peer in the same workspace:
 
@@ -291,7 +296,7 @@ const AGENTS_TOPIC = `${WS}/agents`;
 
 This means a workspace-scoped activity calls a workspace-scoped agents; a global activity calls a global agents. Cross-workspace calls (e.g. `bigcorp/activity` → `global/agents`) are an explicit policy choice the calling module makes — they're not automatic.
 
-### Checklist for making a module workspace-portable
+#### Checklist for making a module workspace-portable
 
 1. **Backend** — write relative paths in `router.<verb>('/...', handler)`. Use `ctx.dataDir` for storage. Use `ctx.broadcast(event)` for live events. Use `ctx.module(id)` for cross-module slot access. Use `'/api/' + ctx.qualifiedId + '/...'` when building absolute URLs in response bodies.
 2. **Frontend** — paste the ROUTE / API / TOPIC block at the top of `frontend.jsx`. Use `${API}` everywhere you'd otherwise write `/api/<your-name>`. Use `TOPIC` where you'd subscribe to your own qualified id.
@@ -300,7 +305,9 @@ This means a workspace-scoped activity calls a workspace-scoped agents; a global
 
 Modules that follow this checklist work as both global modules AND inside any workspace, with one source. The shell-side parts are automatic.
 
-## What the shell does not do
+## Shell scope
+
+### What the shell does not do
 
 - **No helpers for the auth module.** No `serveTakeover`, no `isApiRequest`, no shared utility module. The auth module re-implements anything it needs — those handful of lines belong with the policy that uses them. Atelier is not a helper library; that is what modules are for.
 - **No event or hook for the rail.** The bootstrap is injected once per page load; hot-reload triggers full reload via the existing WS ping. Same mechanism as today.
@@ -308,14 +315,14 @@ Modules that follow this checklist work as both global modules AND inside any wo
 - **No `Denied` component, no `meta.public` opt-out, no role/ACL system in the shell.** Everything beyond "is there a user?" lives in the auth module's data and code.
 - **No per-frame WS ACL filtering.** Topics are workspace-qualified so cross-workspace leakage isn't possible by accident, but every connected client receives every broadcast for topics it subscribes to. If you need per-user filtering inside one workspace, the auth module needs to push that policy into the shell — coordinate before adding.
 
-## Summary of shell responsibilities
+### Summary of shell responsibilities
 
 1. **`$<name>/` recursive discovery** — one level deep; same module rules apply. Hot-reload watches the new dirs too; `_*` and `data/` segments are excluded from the watcher.
 2. **`/<workspace>/<id>` URL routing** — every module has a qualifiedId; URLs/topics/slots all use it directly. The synthetic `global` workspace anchors root-folder modules.
 3. **Scoped router per mount** — each module gets a sub-router rooted at `/api/<workspace>/<id>`; module source uses relative paths.
-4. **Auth slot detection** — first `global`-workspace module exporting `authenticate` wins; later ones logged & ignored. Workspace modules are not eligible.
+4. **Auth slot** — the `auth` setting names the gating module (path or global id), or `false` (default) for ungated. A stray `authenticate` export does not gate; only the configured module does. Workspace modules aren't eligible.
 5. **`defaultUser` builder** — synthesized from discovery on every request.
-6. **Per-request dispatch** — call `authenticate(req, defaultUser)` if auth installed; on null, call `handleUnauth`; otherwise set `req.user` and route.
+6. **Per-request dispatch** — call `authenticate(req, defaultUser)` when `auth` is configured; on null, call `handleUnauth`; otherwise set `req.user` and route.
 7. **WebSocket upgrade gate** — `/_atelier/ws` upgrades go through the same `authenticate` slot. On null, the shell writes a bare `401` and destroys the socket (no `handleUnauth` — no body to render). On allow, `ws.user` is attached to the connection. Per-frame ACL filtering is not implemented.
 8. **`/_atelier/whoami` identity probe** — gated by the same `authenticate`; returns 200 JSON for authed users, 401 for unauthed. Drives the connection banner.
 9. **`client.jsx` takeover branch** — when `boot.takeover` is present, mount the auth bundle full-screen instead of `AppShell`.

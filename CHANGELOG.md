@@ -2,6 +2,43 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.4.0
+
+**The carve-back — smaller core, production posture.** Atelier shrinks to its three pillars — **modules, workspaces, auth** — and sheds the machinery that grew around them. Several breaking changes; all mechanical.
+
+### Removed
+
+- **The install CLI is gone.** No more `npm run atelier -- install/update/uninstall/status`, no launchd plist, no `/etc/hosts` wiring, no `~/.atelier/` deploy, no rsync. **An instance is just a folder you run** (`npm run dev`, or `node atelier/server.js`). Run two instances as two folders (or one folder with different startup config). `atelier.js` was split into **`build.js`** (the esbuild/Tailwind pipeline) and **`discovery.js`** (discovery rules + config parsing); the install half was deleted. This also drops atelier's only macOS-specific coupling — it now runs anywhere Node does.
+- **No default theme.** The shell ships zero pixels and zero visual assumptions. `atelier/builtin-chrome/` was removed; the gruvbox skin lives on as a standalone, opt-in chrome (`gruvbox-chrome/`, peer of `catalyst-chrome`). With no chrome installed the client renders a plain "add a chrome" screen. `index.html` no longer ships a favicon, theme-color, background color, or the Lucide icon library — each chrome injects its own (both shipped chromes now do via an `ensureLucide` IIFE).
+- **The dev/prod concept is gone.** Atelier no longer reads or sets `NODE_ENV` and has no environment notion. The config's `{ "modules": { "dev": [...], "prod": [...] } }` object form is removed — `modules` is now a flat array.
+- **The frontend cross-module registry is gone.** `window.__atelier.callModule` / `registerModule` / `unregisterModule` / `hasModule` were removed (they existed for an agentic topbar system no longer present). The real cross-module surfaces remain: the WS multiplex (`window.__atelier.subscribe` / `ctx.broadcast`), backend slots (`ctx.module`), and `@atelier/kit`.
+
+### Changed
+
+- **`atelier.config.json` is the instance's source of truth, with three precedence layers: system defaults ← config file ← environment variables** (env wins, so a PaaS can inject a dynamic `PORT`). All settings optional:
+
+  | Setting | Default | Env override | Notes |
+  |---|---|---|---|
+  | `port` | `1844` | `PORT` | |
+  | `baseUrl` | `http://localhost:<port>` | `BASE_URL` | |
+  | `chrome` | _(none → election)_ | `ATELIER_CHROME` | path/id of the chrome module; overrides alphabetical election |
+  | `hotReload` | `true` | `ATELIER_HOT_RELOAD` | gates all file watchers + backend hot-swap; set `false` when deployed |
+  | `auth` | `false` _(ungated)_ | `ATELIER_AUTH` | path/id of the auth module; see below |
+  | `label` | `null` | `ATELIER_LABEL` | optional instance name a chrome may show (replaces the dev/prod badge) |
+  | `modules` | _(all run)_ | — | flat allow/deny/path/workspace filter (grammar unchanged) |
+
+- **Auth is explicit.** A module exporting `authenticate` no longer auto-claims the gate — you name it via `auth`, or leave `auth: false` to run ungated. This closes the "a stray export silently gates the shell — or a missing one silently exposes it" footgun. An ungated instance whose `baseUrl` isn't localhost logs a startup warning.
+- **`ctx.env` → `ctx.label`** and **`window.__ATELIER__.env` → `window.__ATELIER__.label`** (string from config, or `null`).
+
+### Migration
+
+- Replace any `npm run atelier -- install` workflow with running the folder directly; for a "prod" instance, run a second folder whose config sets `auth`, `hotReload: false`, and a `port`.
+- Flatten `{ "modules": { "dev": [...], "prod": [...] } }` to `{ "modules": [...] }` per instance folder.
+- If you relied on auto-detected auth, add `"auth": "<your-auth-module>"`.
+- If a module read `ctx.env`, read `ctx.label` (or drop it).
+- A custom chrome must inject its own icon library (the shell no longer ships Lucide) — see `ensureLucide` in either shipped chrome.
+- A characterization test suite now ships at `atelier/test/` (`npm test`, zero new deps). Run it after any shell change.
+
 ## 0.3.0
 
 **Chrome-slot extraction.** The shell no longer ships any pixels. Every visual concern — rail, topbar, workspace picker, connection banner, takeover wrapping, fonts, colors, scrollbars, design tokens — moved into a `chrome`-slot module. The default `atelier/builtin-chrome/` is shipped inside the shell; any global-workspace module exporting `meta = { chrome: true }` claims the slot and replaces it.

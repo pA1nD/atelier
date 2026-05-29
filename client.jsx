@@ -3,11 +3,10 @@
  * Compiled by esbuild, served at /assets/client.js, loaded as an ES module
  * after React + ReactDOM (UMD from CDN — see index.html). The chrome
  * (rail, topbar, banner, layout, fonts, tokens — everything visual) lives
- * in a separate `chrome`-slot module (defaults to `atelier/builtin-chrome/`).
+ * in a separate `chrome`-slot module. The shell ships no default chrome.
  *
  * What the shell does:
  *   • Establishes the shared WebSocket multiplex (window.__atelier.subscribe)
- *   • Wires the cross-module callModule registry (window.__atelier.callModule)
  *   • Resolves which chrome module is active (server tells us via
  *     window.__ATELIER__.chromeQid) and dynamic-imports its bundle
  *   • Owns URL routing (`/<workspace>/<id>`)
@@ -23,43 +22,6 @@
  * ========================================================================= */
 
 const { useState, useEffect, useRef } = React;
-
-/* =========================================================================
- * Cross-module API registry
- *
- * `window.__atelier.callModule(id, method, ...args)` — call into another
- * module's published API. No-ops with a console.warn if the target isn't
- * installed or doesn't expose the method.
- * ========================================================================= */
-(function wireModuleRegistry() {
-  if (typeof window === 'undefined') return;
-  window.__atelier = window.__atelier || {};
-  if (window.__atelier.callModule) return;
-  const registry = new Map();
-  window.__atelier.registerModule = (id, api) => {
-    if (registry.has(id)) {
-      console.warn(`[atelier] registerModule: "${id}" already registered, overwriting.`);
-    }
-    registry.set(id, api);
-  };
-  window.__atelier.unregisterModule = (id) => registry.delete(id);
-  window.__atelier.hasModule = (id) => registry.has(id);
-  window.__atelier.callModule = (id, method, ...args) => {
-    const api = registry.get(id);
-    if (!api) {
-      console.warn(
-        `[atelier] callModule: no "${id}" module installed; "${method}" call ignored. ` +
-        `Install/enable the "${id}" module to surface this action.`
-      );
-      return null;
-    }
-    if (typeof api[method] !== 'function') {
-      console.warn(`[atelier] callModule: "${id}" doesn't expose method "${method}".`);
-      return null;
-    }
-    return api[method](...args);
-  };
-})();
 
 /* =========================================================================
  * Shared WebSocket multiplex — one connection per tab, multiple topics.
@@ -290,10 +252,15 @@ function Takeover() {
  * ========================================================================= */
 function ChromeMissingFallback({ qid, err }) {
   const body = err
-    ? `atelier: chrome '${qid}' failed to load.\n\n${String(err?.stack || err?.message || err)}`
-    : `atelier: no chrome configured (chromeQid is missing from bootstrap).`;
+    ? `atelier — chrome '${qid}' failed to load.\n\n${String(err?.stack || err?.message || err)}`
+    : `atelier — no chrome installed.\n\n`
+      + `The shell ships no theme. Add a chrome module: a folder with a\n`
+      + `frontend.jsx exporting\n\n`
+      + `    export const meta = { chrome: true, hidden: true }\n`
+      + `    export function chrome(props) { /* render the shell UI */ }\n\n`
+      + `Discover it as a global module, or name it in atelier.config.json.`;
   return React.createElement('pre',
-    { style: { padding: 24, color: '#fb4934', background: '#1d2021', minHeight: '100vh', margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' } },
+    { style: { padding: 24, margin: 0, minHeight: '100vh', colorScheme: 'light dark', fontFamily: 'ui-monospace, monospace', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' } },
     body);
 }
 

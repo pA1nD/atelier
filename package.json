@@ -1,25 +1,21 @@
 {
   "name": "atelier",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node server.js",
     "dev:module": "node server.js",
-    "atelier": "node atelier.js"
+    "test": "node --test test/*.test.js"
   },
   "engines": {
-    "node": "24.16.0"
+    "node": ">=24"
   },
   "dependencies": {
-    "@tailwindcss/node": "^4.2.4",
-    "@tailwindcss/oxide": "^4.2.4",
-    "chokidar": "^5.0.0",
-    "esbuild": "^0.28.0",
-    "tailwindcss": "^4.2.4",
-    "ws": "^8.20.0"
-  },
-  "devDependencies": {
-    "dev-browser": "^0.2.7"
+    "@tailwindcss/node": "4.2.4",
+    "@tailwindcss/oxide": "4.2.4",
+    "esbuild": "0.28.0",
+    "tailwindcss": "4.2.4",
+    "ws": "8.21.0"
   }
 }

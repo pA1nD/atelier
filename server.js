@@ -32,7 +32,7 @@
  *
  * Discovery is per-request so new folders appear without restart. Backends
  * are mounted lazily on first discovery.
- * (Editing server.js or atelier.js still requires a manual restart.)
+ * (Editing server.js, build.js, or discovery.js still requires a manual restart.)
  */
 
 import http from 'node:http';
@@ -40,46 +40,67 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
-import chokidar from 'chokidar';
 import { WebSocketServer } from 'ws';
+import { getJsx, getJsxBundle, getCss } from './build.js';
 import {
-  getJsx, getJsxBundle, getCss,
-  loadModuleConfig, shouldIncludeModule, collectConfigPaths, resolvePathEntry,
+  loadConfig, loadModuleConfig, shouldIncludeModule, collectConfigPaths, resolvePathEntry,
   CONFIG_FILENAME,
   RESERVED_NAMES, GLOBAL_WORKSPACE, isSpecialDir, isWorkspaceDir, workspaceName,
-} from './atelier.js';
-
-// Env normalization — shell owns the defaults so modules (and any child
-// processes they spawn) can read process.env.{NODE_ENV,PORT,BASE_URL}
-// without inventing fallbacks of their own. NODE_ENV follows the Node
-// canonical 'development'/'production'; ctx.env exposes the short 'dev'
-// /'prod' form that Atelier code uses. Default ports differ by env so
-// dev (5172) and prod (1844) can coexist on the same machine; an external
-// PORT= override wins in either case.
-if (process.env.NODE_ENV !== 'production') process.env.NODE_ENV = 'development';
-process.env.PORT     ||= process.env.NODE_ENV === 'production' ? '1844' : '5172';
-process.env.BASE_URL ||= `http://localhost:${process.env.PORT}`;
+} from './discovery.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
-// See atelier.js for the same logic. PWD is bash's logical cwd (works for
-// shared/symlinked atelier/); HOST_DIR is the prod fallback (launchd doesn't
-// set PWD; atelier/ is a real dir there).
+// PWD is the shell's logical cwd (works when atelier/ is shared/symlinked
+// across instances); HOST_DIR is the fallback when PWD is unset. ROOT is the
+// instance folder — atelier/'s parent — where modules are discovered.
 const ROOT = path.resolve(process.env.PWD || HOST_DIR, '..');
-const PORT = parseInt(process.env.PORT, 10);
-const BASE_URL = process.env.BASE_URL;
-const ENV = process.env.NODE_ENV === 'production' ? 'prod' : 'dev';
-const IS_DEV = ENV === 'dev';
 
 const [, , requestedId] = process.argv;
 const MODE = requestedId ? 'standalone' : 'host';
+
+// ---- Instance settings — system defaults ← atelier.config.json ← env vars ----
+// atelier has no built-in dev/prod concept: one folder = one instance, and the
+// config file is that instance's source of truth. Env vars override the file at
+// startup (so a PaaS can inject a dynamic PORT), and sensible defaults mean a
+// bare folder just runs. Settings are resolved once at boot; the module LIST is
+// re-read per request (see getModules) so adding/removing modules stays hot.
+const bootConfig = loadConfig(ROOT);
+const envOr = (envKey, configKey, fallback) => {
+  const e = process.env[envKey];
+  if (e != null && e !== '') return e;                  // env wins (string)
+  if (bootConfig[configKey] != null) return bootConfig[configKey];
+  return fallback;
+};
+const toBool = (v) => v === true || v === 'true' || v === '1' || v === 'on';
+
+const PORT = Number(envOr('PORT', 'port', 1844));
+const BASE_URL = String(envOr('BASE_URL', 'baseUrl', `http://localhost:${PORT}`));
+const HOT_RELOAD = toBool(envOr('ATELIER_HOT_RELOAD', 'hotReload', true));
+const LABEL = envOr('ATELIER_LABEL', 'label', null);      // optional instance name
+const CHROME = envOr('ATELIER_CHROME', 'chrome', null);   // chrome module path/name, or null
+const AUTH = (() => {                                     // auth module path/name, or false (ungated)
+  const v = envOr('ATELIER_AUTH', 'auth', false);
+  return (v === false || v == null || v === 'false' || v === 'off' || v === '') ? false : v;
+})();
+
+// Publish the resolved port/baseUrl so modules (and processes they spawn) read
+// the same values. NODE_ENV is intentionally NOT set — atelier has no
+// environment concept; libraries that want one read their own.
+process.env.PORT = String(PORT);
+process.env.BASE_URL = BASE_URL;
+
+// Footgun guard: an ungated instance reachable somewhere other than localhost
+// is wide open. Auth is opt-in (config `auth`); this is just a startup nudge.
+if (!AUTH && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(BASE_URL)) {
+  console.warn(`  ! auth is off and baseUrl is ${BASE_URL} — this instance is ungated. Set "auth" in ${CONFIG_FILENAME} to gate it.`);
+}
 
 // Hoisted up here (out of the WS section below) because module mounting
 // happens at `await mountPendingBackends()` further down, and a module's
 // mountRoutes can spawn child processes whose stdout/stderr stream events
 // fire async handlers that call ctx.broadcast → wsBroadcastFromModule → wsClients.
-// If wsClients is still in TDZ when one of those handlers fires (typical
-// in prod where ATELIER_AGENTS=on spawns a child immediately), the throw
-// is uncaught and crashes the server. Declaring it before mounting puts
+// If wsClients is still in TDZ when one of those handlers fires (a module
+// whose mountRoutes spawns a child during mount), the throw is uncaught and
+// crashes the server. Declaring it before mounting puts
 // wsClients in scope for every closure that needs it.
 const wsClients = new Set();
 
@@ -146,11 +167,12 @@ function createRouter() {
       try {
         await r.handler(req, res);
       } catch (err) {
+        const status = err.statusCode || 500;
         if (!res.writableEnded) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
-        console.error(err);
+        if (status >= 500) console.error(err);   // 4xx are client errors, not shell faults — don't spam the log
       }
       return true;
     }
@@ -169,11 +191,31 @@ function createRouter() {
   };
 }
 
+// Cap request bodies so an exposed instance can't be memory-DoS'd by an
+// oversized POST. 10 MB is generous for module APIs; over that, the handler's
+// `await req.json()` rejects with a 413 (the error carries statusCode, which
+// the router honors). Bodies are only buffered when a handler reads them via
+// req.json() — handlers that ignore the body never accumulate it.
+const MAX_JSON_BODY = 10 * 1024 * 1024;
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => { body += chunk; });
+    let size = 0;
+    let over = false;
+    req.on('data', (chunk) => {
+      if (over) return;                      // past the cap — discard, don't grow memory
+      size += chunk.length;
+      if (size > MAX_JSON_BODY) {
+        over = true;
+        const err = new Error(`request body exceeds ${MAX_JSON_BODY} bytes`);
+        err.statusCode = 413;
+        reject(err);
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
+      if (over) return;
       if (!body) return resolve({});
       try { resolve(JSON.parse(body)); }
       catch (e) { reject(e); }
@@ -219,8 +261,8 @@ function listAllWorkspaces() {
 // ------------------------------------------------------------------------
 
 // Discovery rules (RESERVED_NAMES, isSpecialDir, isWorkspaceDir) are imported
-// from atelier.js so the runner and the install CLI agree on what counts as
-// a module and what counts as a workspace.
+// from discovery.js so there's a single definition of what counts as a
+// module and what counts as a workspace.
 //
 // A module is a directory with frontend.jsx or backend.js. Modules live:
 //   • at the root         → workspace = 'global' (synthetic),
@@ -259,26 +301,11 @@ function readModuleAt(dir, name, workspace) {
 
 const warnedReservedWs = new Set();   // dedupe `$<reserved>/` warnings
 
-// Builtin chrome ships inside the shell folder (atelier/builtin-chrome/) so a
-// fresh checkout always has a working visual layer. A custom chrome — any
-// global-workspace module exporting `meta = { chrome: true }` — wins the
-// `chromeQid` lookup over the builtin. Both can coexist in discovery; the
-// builtin's meta carries `hidden: true` so it's filtered out of the rail.
-const BUILTIN_CHROME_ID = 'atelier-chrome';
-const BUILTIN_CHROME_DIR = path.join(HOST_DIR, 'builtin-chrome');
-const BUILTIN_CHROME_QID = `${GLOBAL_WORKSPACE}/${BUILTIN_CHROME_ID}`;
-
-function getBuiltinChromeModule() {
-  if (!fs.existsSync(path.join(BUILTIN_CHROME_DIR, 'frontend.jsx'))) return null;
-  return {
-    id: BUILTIN_CHROME_ID,
-    dir: BUILTIN_CHROME_DIR,
-    hasFrontend: true,
-    hasBackend: false,
-    workspace: GLOBAL_WORKSPACE,
-    qualifiedId: BUILTIN_CHROME_QID,
-  };
-}
+// The shell ships NO chrome of its own — zero visual assumptions. A chrome is
+// any global-workspace module exporting `meta = { chrome: true }`; it's
+// discovered and mounted like any other module (the user's config typically
+// path-mounts one). resolveChromeQid picks one; with none installed the client
+// renders an "add a chrome" screen.
 
 function discoverModules() {
   const out = [];
@@ -312,12 +339,6 @@ function discoverModules() {
     const m = readModuleAt(path.join(ROOT, name), name, GLOBAL_WORKSPACE);
     if (m) out.push(m);
   }
-  // Always present: builtin chrome from atelier/builtin-chrome/. Lives
-  // outside ROOT (the workspace dir) so it never collides with user modules.
-  // Prepended before sorting so the rest of the pipeline (asset routing,
-  // CSS scan, meta extraction) sees it as just another module.
-  const builtin = getBuiltinChromeModule();
-  if (builtin) out.push(builtin);
   // Sort by qualifiedId so auth-slot election + rail order are stable
   // across filesystems with different readdir semantics.
   out.sort((a, b) => a.qualifiedId.localeCompare(b.qualifiedId));
@@ -341,30 +362,22 @@ const warnedConfigMisses = new Set();
 
 function getModules() {
   const discovered = discoverModules();
-  const builtin = discovered.find((m) => m.qualifiedId === BUILTIN_CHROME_QID);
   if (MODE === 'standalone') {
     // Standalone mode is an explicit user choice — bypass the config filter
     // so a module excluded for this env can still be inspected. Match by
     // qualifiedId first ('bigcorp/kanban' or 'global/kanban'); fall back to
     // bare id, which resolves to the global workspace's mount so users can
     // type `node server.js kanban` without thinking about workspaces.
+    // (No chrome is bundled in — a single-module standalone view shows the
+    // "add a chrome" screen unless the requested module is itself a chrome.)
     const only = discovered.find((m) => m.qualifiedId === requestedId)
               || discovered.find((m) => m.id === requestedId && m.workspace === GLOBAL_WORKSPACE);
-    if (!only) return [];
-    // Always include the builtin chrome alongside the requested module so
-    // standalone has a renderable shell. (Custom chromes still resolve via
-    // the meta.chrome lookup; standalone just guarantees a fallback.)
-    if (builtin && only.qualifiedId !== builtin.qualifiedId) return [only, builtin];
-    return [only];
+    return only ? [only] : [];
   }
-  const cfg = loadModuleConfig(ROOT);
-  const parsed = cfg[ENV];
+  const parsed = loadModuleConfig(ROOT);
 
-  // Apply the parsed filter to discovered modules. The builtin chrome
-  // bypasses the filter — even an empty modules list keeps the shell
-  // renderable.
+  // Apply the parsed filter to discovered modules.
   const filtered = discovered.filter((m) =>
-    m.qualifiedId === BUILTIN_CHROME_QID ||
     shouldIncludeModule(parsed, m, { globalWorkspace: GLOBAL_WORKSPACE })
   );
 
@@ -660,9 +673,9 @@ function getModuleReadme(m) {
 
 function checkRequires() {
   const mods = getModules();
-  // requires can name either a global module ('mission-control') or a
-  // workspace one ('bigcorp/kanban'). The set holds qualified ids; bare
-  // ids match the global module of that name.
+  // requires can name either a global module ('kanban') or a workspace one
+  // ('bigcorp/posts'). The set holds qualified ids; bare ids match the
+  // global module of that name.
   const idSet = new Set(mods.map((x) => x.qualifiedId));
   for (const m of mods) {
     const fm = getModuleReadme(m);
@@ -722,7 +735,7 @@ checkRequires();
 // process.once listeners). Without it, routes still get stripped but
 // module-held state leaks across reloads.
 //
-// Hot-swap is dev-only (see IS_DEV) — prod runs untouched under launchd.
+// Hot-swap only runs when hot reload is enabled (see HOT_RELOAD).
 // ------------------------------------------------------------------------
 
 const router = createRouter();
@@ -743,8 +756,8 @@ const lastReloadMtime = new Map();   // id → mtimeMs actually processed
 // NO validation. Owning modules read their slot lazily (at use time, not
 // at mount time) so the order in which modules mount is irrelevant — the
 // fact that `discoverModules` happens to return them alphabetically would
-// otherwise create real races (e.g. `mc-lab` mounting before
-// `mission-control`).
+// otherwise create real races (e.g. one module mounting before another it
+// shares a slot with).
 //
 // Workspace boundary: a `global` module and a `$alpha` module can't leak
 // state through a shared slot. A workspace-aware infrastructure module
@@ -766,7 +779,7 @@ function makeCtx(m) {
     name: m.id,
     workspace: m.workspace,        // 'global' for root, '<ws>' for $<ws>/<mod>
     qualifiedId: m.qualifiedId,    // '<workspace>/<id>'
-    env: ENV,
+    label: LABEL,
     port: PORT,
     baseUrl: BASE_URL,
     dataDir: path.join(m.dir, 'data'),
@@ -823,8 +836,7 @@ async function importBackend(m) {
   // normal cache (we don't want to re-bundle express on every save).
   // `define` rewrites `import.meta.url` to the original file URL so
   // modules using `fileURLToPath(import.meta.url)` to locate themselves
-  // at module scope (posts, agents, kanban, extract, dev-tools) keep
-  // working without migration.
+  // at module scope keep working without any migration.
   const entry = path.join(m.dir, 'backend.js');
   const result = await esbuildBuild({
     entryPoints: [entry],
@@ -921,39 +933,32 @@ async function unmountBackend(id, reason = 'removed') {
 }
 
 function watchBackend(m) {
-  if (!IS_DEV) return;                // prod stays untouched
+  if (!HOT_RELOAD) return;            // hot reload off → no backend hot-swap
   if (backendWatchers.has(m.qualifiedId)) return;
-  // Watch the module dir (not just backend.js) so transitive file edits
-  // — parser.js, helpers.js, whatever backend.js imports — trigger a
-  // reload too. Dir-level watching via chokidar survives atomic saves
-  // (rename-over changes inode), which the previous `fs.watch(file)`
-  // did not — first edit worked, subsequent ones silently died.
-  //
-  // `awaitWriteFinish` waits for the file size to settle before firing,
-  // so a mid-write read can't hit a half-flushed bundle.
-  //
-  // Ignore: node_modules, the module's own data/, dotfiles, and any path
-  // segment starting with `_` (workspaces have _inbox/_generations/_agents
-  // data dirs that aren't modules and shouldn't trigger reloads).
+  // Native recursive fs.watch on the module DIR (not the file): dir-level
+  // watching survives atomic saves (rename-over swaps the file's inode, but the
+  // directory handle persists and sees the new file). Same paths that used to
+  // be ignored are filtered here; the 150ms debounce + mtime-dedupe in
+  // scheduleReload stand in for the old awaitWriteFinish — a half-written read
+  // just fails the esbuild rebuild, and the next event reloads cleanly.
+  // (Verified across atomic-save, rapid, transitive, and teardown reloads.)
+  const ignored = (segs) => segs.some((s) =>
+    s === 'node_modules' || s === 'data' || s.startsWith('.') || s.startsWith('_'));
   try {
-    const w = chokidar.watch(m.dir, {
-      ignored: [/node_modules/, /(^|[\/\\])data[\/\\]/, /(^|[\/\\])\./, /(^|[\/\\])_/],
-      ignoreInitial: true,
-      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 40 },
-    });
-    const onFile = (p) => { if (p.endsWith('.js')) scheduleReload(m); };
-    w.on('change', onFile).on('add', onFile);
-    // Module folder removed (or backend.js gone) → teardown immediately so
-    // routes, timers, and file handles don't outlive the source on disk.
-    // Existence check guards against transient unlink events that chokidar
-    // can emit during atomic saves on some filesystems.
-    const onGone = () => {
+    const w = fs.watch(m.dir, { recursive: true }, (event, filename) => {
+      if (!filename) return;
+      const segs = filename.split(path.sep);
+      if (ignored(segs)) return;
+      // Module dir / backend.js gone → teardown so routes, timers, and file
+      // handles don't outlive the source. Existence-checked so a transient
+      // event during an atomic save can't false-fire.
       if (!fs.existsSync(m.dir) || !fs.existsSync(path.join(m.dir, 'backend.js'))) {
         unmountBackend(m.qualifiedId, 'source removed').catch((err) =>
           console.warn(`  ! unmount ${m.qualifiedId}: ${err.message}`));
+        return;
       }
-    };
-    w.on('unlinkDir', onGone).on('unlink', onGone);
+      if (filename.endsWith('.js')) scheduleReload(m);
+    });
     backendWatchers.set(m.qualifiedId, w);
   } catch (err) {
     console.warn(`  ! could not watch ${m.qualifiedId}/: ${err.message}`);
@@ -969,8 +974,20 @@ function scheduleReload(m) {
     // window, so they become two distinct reloads. Reading the mtime here
     // and comparing to the last one we processed is cheap and robust: real
     // saves always bump mtime, duplicate events don't.
+    // Dedupe on the NEWEST .js mtime in the module dir, not just backend.js, so
+    // a transitive import edit (lib.js) still reloads while same-save double
+    // events (identical max mtime) are dropped.
     let mtime = 0;
-    try { mtime = fs.statSync(path.join(m.dir, 'backend.js')).mtimeMs; } catch {}
+    const scan = (dir) => {
+      let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const ent of ents) {
+        if (ent.name.startsWith('.') || ent.name === 'node_modules' || ent.name === 'data') continue;
+        const p = path.join(dir, ent.name);
+        if (ent.isDirectory()) scan(p);
+        else if (ent.name.endsWith('.js')) { try { mtime = Math.max(mtime, fs.statSync(p).mtimeMs); } catch {} }
+      }
+    };
+    scan(m.dir);
     if (mtime && mtime === lastReloadMtime.get(m.qualifiedId)) return;
     lastReloadMtime.set(m.qualifiedId, mtime);
     reloadBackend(m).catch((err) => console.error(`  ! reload ${m.qualifiedId}: ${err.message}`));
@@ -981,10 +998,10 @@ async function mountPendingBackends() {
   const live = getModules();
   const liveIds = new Set(live.map((m) => m.qualifiedId));
   // Reconcile: unmount anything that disappeared from disk since last call.
-  // Belt-and-braces with the chokidar watcher in watchBackend — the watcher
+  // Belt-and-braces with the fs.watch watcher in watchBackend — the watcher
   // catches in-session deletions instantly; this cleans up edge cases (e.g.
   // a module folder removed between server boot and first request, or
-  // chokidar missing an event on some filesystems).
+  // the watcher missing an event on some filesystems).
   for (const id of [...mountedBackends.keys()]) {
     if (!liveIds.has(id)) await unmountBackend(id, 'not in discovery');
   }
@@ -1002,12 +1019,10 @@ await mountPendingBackends();
 // ------------------------------------------------------------------------
 // Shutdown — fire every mounted module's teardown on graceful exit.
 //
-// Without this, Ctrl+C / SIGTERM kills the shell but leaves module
-// children orphaned to launchd (PPID 1). The clearest case is statusbar
-// (Swift NSStatusItem keeps drawing until the child's own stdin EOF
-// detection trips, if it has one), but anything spawned by a module —
-// agents' supervised claude processes, posts' workers, the voice
-// sidecar — has the same shape.
+// Without this, Ctrl+C / SIGTERM kills the shell but leaves any child
+// processes a module spawned orphaned (reparented to the init process).
+// Anything a module spawns — a supervised worker, a sidecar daemon, a
+// watcher's child — has this shape and needs a teardown to clean it up.
 //
 // Idempotent: we may be reached via SIGINT, SIGTERM, AND 'exit' for the
 // same shutdown. Run teardowns once and immediately exit.
@@ -1025,12 +1040,11 @@ function teardownAllBackends(reason) {
   mountedBackends.clear();
 }
 
-// `prependListener`, not `on`: agents/backend.js registers its own
-// `process.on('SIGINT', stopAll)` during mount. Node fires handlers in
-// registration order, and stopAll calls process.exit(0) immediately when
-// it has no live children (the common dev case), which preempted mine.
-// Prepending puts our global teardown ahead of any module's per-process
-// signal handler.
+// `prependListener`, not `on`: a module's backend.js may register its own
+// `process.on('SIGINT', ...)` during mount. Node fires handlers in
+// registration order, and a module handler that calls process.exit()
+// immediately would preempt ours. Prepending puts the shell's global
+// teardown ahead of any module's per-process signal handler.
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.prependListener(sig, () => {
     teardownAllBackends(sig);
@@ -1048,8 +1062,8 @@ process.on('exit', () => teardownAllBackends('exit'));
 //
 // We deliberately do NOT swallow uncaughtException / unhandledRejection —
 // hiding bugs grows them. But the default Node output buries the cause
-// under teardown noise, so when scrolling /tmp/atelier-dev.log after a
-// crash you can't tell at a glance which module killed the server.
+// under teardown noise, so when scrolling the log after a crash you can't
+// tell at a glance which module killed the server.
 //
 // These handlers print a single highly-visible banner identifying the
 // fault before letting Node exit normally. The banner names the originating
@@ -1213,7 +1227,7 @@ function resolveAssetSource(pathname) {
     //   • data/      — runtime state. Never shipped to clients.
     //   • .* / _*    — dotfiles, package metadata, .env, _archive, etc.
     //                  Convention is "private by name" — match the same
-    //                  rules used by isSpecialDir in atelier.js.
+    //                  rules used by isSpecialDir in discovery.js.
     //   • node_modules — module deps; shouldn't be reached this way.
     for (const seg of segs) {
       if (seg === 'backend.js') return null;
@@ -1301,7 +1315,7 @@ function cssScanSources() {
 }
 
 // ------------------------------------------------------------------------
-// Authentication contract — see atelier/AUTH.md.
+// Authentication contract — see atelier/docs/AUTH.md.
 //
 // Auth slot: first discovered global module whose mounted plug exports an
 // `authenticate` function claims it. Workspace modules are not eligible
@@ -1321,16 +1335,19 @@ function cssScanSources() {
 // this section runs.
 
 function findAuthModule() {
-  // Global-workspace modules only, alphabetical by qualifiedId. First
-  // mounted module exporting `authenticate` claims the slot. Workspace
-  // modules can't gate the shell — auth is a single-tenant decision.
+  // Auth is opt-in and EXPLICIT: the `auth` setting names the gating module
+  // (a path or a global module id), or is false to run ungated. A module
+  // exporting `authenticate` does NOT gate unless it's the configured one, so
+  // an instance can't be silently gated by a stray export — nor silently
+  // exposed. Only global-workspace modules are eligible; auth gates the whole
+  // shell, before any workspace selection.
+  if (!AUTH) return null;
+  const wantId = path.basename(String(AUTH));
   for (const m of getModules()) {
-    if (m.workspace !== GLOBAL_WORKSPACE) continue;
-    if (!m.hasBackend) continue;
+    if (m.workspace !== GLOBAL_WORKSPACE || !m.hasBackend) continue;
+    if (m.qualifiedId !== AUTH && m.qualifiedId !== `${GLOBAL_WORKSPACE}/${wantId}` && m.id !== wantId) continue;
     const plug = authPlugs.get(m.qualifiedId);
-    if (plug && typeof plug.authenticate === 'function') {
-      return { m, plug };
-    }
+    if (plug && typeof plug.authenticate === 'function') return { m, plug };
   }
   return null;
 }
@@ -1418,22 +1435,26 @@ async function getMetaByQId() {
   return new Map(allFront.map((m, i) => [m.qualifiedId, metas[i]]));
 }
 
-// Resolve which module owns the `chrome` slot — first global-workspace
-// module whose meta declares `chrome: true` wins. A custom chrome wins over
-// the builtin (sorted alphabetically among customs for determinism). If no
-// custom is installed, falls back to the builtin (atelier/builtin-chrome).
+// Resolve which module owns the `chrome` slot. If the `chrome` setting names a
+// module (path or id) that's a mounted chrome, it wins; otherwise the first
+// global-workspace module declaring `meta.chrome` (alphabetical by qualifiedId
+// for determinism). The shell ships no chrome of its own; with none installed
+// this returns null and the client renders an "add a chrome" screen.
 //
 // The shell's client.jsx dynamic-imports `/modules/<chromeQid>/frontend.js`
 // and renders its `chrome` named export as the root component.
 function resolveChromeQid(metaByQId) {
-  const candidates = [...metaByQId.entries()]
-    .filter(([qid, meta]) => meta?.chrome === true && qid.split('/')[0] === GLOBAL_WORKSPACE);
-  if (candidates.length === 0) return null;
-  const customs = candidates
-    .filter(([qid]) => qid !== BUILTIN_CHROME_QID)
-    .sort(([a], [b]) => a.localeCompare(b));
-  if (customs.length) return customs[0][0];
-  return BUILTIN_CHROME_QID;
+  const chromes = [...metaByQId.entries()]
+    .filter(([qid, meta]) => meta?.chrome === true && qid.split('/')[0] === GLOBAL_WORKSPACE)
+    .map(([qid]) => qid)
+    .sort((a, b) => a.localeCompare(b));
+  if (CHROME) {
+    const wantId = path.basename(String(CHROME));
+    const hit = chromes.find((qid) => qid === CHROME || qid === `${GLOBAL_WORKSPACE}/${wantId}`);
+    if (hit) return hit;
+    console.warn(`  ! config chrome '${CHROME}' is not a mounted chrome module — falling back to discovery`);
+  }
+  return chromes[0] || null;
 }
 
 // Build the per-request import map. A chrome MAY publish a `kit.js`
@@ -1469,7 +1490,7 @@ async function serveIndex(req, res) {
   const chromeQid = resolveChromeQid(metaByQId);
   const bootstrap = {
     mode: MODE,
-    env: ENV,
+    label: LABEL,
     user,
     chromeQid,
   };
@@ -1601,21 +1622,6 @@ const watchSkipSeg = (s) =>
   s.startsWith('.') ||
   s.startsWith('-');
 
-// Builtin chrome lives in HOST_DIR (outside ROOT), so the ROOT watcher
-// below doesn't see it. A small separate watcher keeps edits to the
-// builtin chrome's frontend.jsx / styles.css hot-reloadable like any
-// other module.
-if (fs.existsSync(BUILTIN_CHROME_DIR)) {
-  try {
-    fs.watch(BUILTIN_CHROME_DIR, { recursive: true }, (event, filename) => {
-      if (!filename) return;
-      broadcastReload(BUILTIN_CHROME_QID);
-    });
-  } catch (err) {
-    console.warn(`  ! could not watch builtin chrome: ${err.message}`);
-  }
-}
-
 // Path-mounted modules (atelier.config.json `{ "path": ... }` entries) can
 // live anywhere on disk — outside ROOT, so the ROOT watcher misses them.
 // Walk current discovery once at boot and add a watcher per off-ROOT
@@ -1623,9 +1629,9 @@ if (fs.existsSync(BUILTIN_CHROME_DIR)) {
 // npm-install events.
 const offRootWatched = new Set();
 function watchOffRootModules() {
+  if (!HOT_RELOAD) return;
   for (const m of getModules()) {
     if (offRootWatched.has(m.qualifiedId)) continue;
-    if (m.dir === BUILTIN_CHROME_DIR) continue;       // already covered
     const isUnderRoot = m.dir.startsWith(ROOT + path.sep) || m.dir === ROOT;
     if (isUnderRoot) continue;
     if (!fs.existsSync(m.dir)) continue;
@@ -1644,11 +1650,11 @@ function watchOffRootModules() {
 }
 watchOffRootModules();
 
-fs.watch(ROOT, { recursive: true }, (event, filename) => {
+if (HOT_RELOAD) fs.watch(ROOT, { recursive: true }, (event, filename) => {
   if (!filename) return;
   const segs = filename.split(path.sep);
   if (segs.some(watchSkipSeg)) return;
-  // backend.js hot-swaps server-side via chokidar — never nudge the browser.
+  // backend.js hot-swaps server-side via fs.watch — never nudge the browser.
   if (segs[segs.length - 1] === 'backend.js') return;
 
   // Resolve the qualified id of the (possibly affected) module.
@@ -1757,8 +1763,7 @@ const server = http.createServer(async (req, res) => {
   // Shell assets (`/assets/*`) are ALWAYS public — the takeover login page
   // itself loads /assets/client.js before any auth cookie exists. These are
   // first-party shell bytes; no module-installation disclosure happens here.
-  // (Visual styles live in the chrome module's bundle, not in /assets/ —
-  // see atelier/builtin-chrome/ for the default chrome.)
+  // (Visual styles live in the chrome module's bundle, not in /assets/.)
   if (url.pathname.startsWith('/assets/')) {
     await serveAsset(req, res, url);
     return;

@@ -5,44 +5,35 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Atelier</title>
 
-  <!-- Atelier 0.3 shell shape:
-         The shell ships zero pixels. Visual concerns — fonts, colors, rail,
-         topbar, banner, takeover wrapping — live entirely in a chrome-slot
-         module (`atelier/builtin-chrome/` by default, or any global-workspace
-         module exporting `meta = { chrome: true }`). The shell's client.jsx
-         dynamic-imports the chrome bundle and renders it as the root.
+  <!-- The shell ships zero pixels and makes zero visual assumptions. All
+       visual identity — fonts, colors, rail, topbar, banner, favicon,
+       theme-color, icon set — lives in a chrome-slot module (any global
+       module exporting `meta = { chrome: true }`). There is no default chrome.
+       client.jsx dynamic-imports the active chrome and renders it as the root;
+       with none installed it renders a plain "add a chrome" screen.
 
-         The single inline <style> below sets only the body background so
-         users don't see a white flash before the chrome's stylesheet loads.
-         Everything else is the chrome's job. -->
-
-  <!-- Boot-paint defaults — favicon, theme-color, body bg. All of these
-       belong to the chrome (visual identity), but the chrome bundle takes
-       ~50-100ms to parse on a cold load. The defaults below paint during
-       that window so the browser tab + OS chrome have an icon and color
-       before the chrome's IIFE replaces them. Both the builtin and any
-       custom chrome rewrite these on module load. -->
-  <link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1" fill="%23d79921"/><rect x="13" y="3" width="8" height="8" rx="1" fill="%23689d6a"/><rect x="3" y="13" width="8" height="8" rx="1" fill="%23689d6a"/><rect x="13" y="13" width="8" height="8" rx="1" fill="%23d79921"/></svg>' />
-  <meta name="theme-color" content="#1d2021" media="(prefers-color-scheme: dark)" />
-  <meta name="theme-color" content="#f7f5f2" media="(prefers-color-scheme: light)" />
-
-  <style>html,body{margin:0;background:#1d2021}</style>
+       The one inline rule below is non-visual: a margin reset plus a
+       color-scheme hint, so the brief pre-chrome paint follows the OS
+       light/dark setting instead of forcing a color. -->
+  <style>html{color-scheme:light dark}html,body{margin:0}</style>
 
   <!-- Render-blocking link to the active chrome's stylesheet, injected by
        atelier/server.js based on `chromeQid`. Pre-loading here (rather than
-       letting the chrome's JS IIFE inject it later) eliminates the flash of
-       unstyled icons (Lucide-generated SVGs at default 24px) before Tailwind
-       utility classes apply. The chrome's IIFE checks for this id and skips
-       a duplicate injection. Empty if the active chrome has no styles.css
-       on disk. -->
+       letting the chrome's JS IIFE inject it later) eliminates a flash of
+       unstyled content before the chrome's utility classes apply. The chrome's
+       IIFE checks for this id and skips a duplicate injection. Empty when no
+       chrome is installed or the active chrome has no styles.css. -->
   <!--__ATELIER_CHROME_STYLES__-->
 
+  <!-- React + ReactDOM are the only ambient runtime the shell provides —
+       modules are React components sharing this one instance. Every visual
+       dependency (icon libraries, fonts, …) belongs to the chrome, which
+       injects its own. -->
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
-  <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
 
   <!-- Injected by atelier/server.js per request:
-       window.__ATELIER__ = { mode, env, user, chromeQid }
+       window.__ATELIER__ = { mode, user, chromeQid, ... }
        Or, on the unauth handoff lane:
        window.__ATELIER__ = { takeover, moduleBundle } -->
   <script>/*__ATELIER_BOOTSTRAP__*/</script>
@@ -60,9 +51,9 @@
   <div id="root"></div>
 
   <!-- Shell — an ES module served at /assets/client.js. Wires the shared
-       WebSocket bridge (window.__atelier.subscribe), the callModule registry,
-       URL routing, dynamic-imports the chrome and module bundles, and renders.
-       The chrome owns all visual bytes. -->
+       WebSocket bridge (window.__atelier.subscribe), URL routing,
+       dynamic-imports the chrome and module bundles, and renders. The chrome
+       owns all visual bytes. -->
   <script type="module" src="/assets/client.js"></script>
 </body>
 </html>
