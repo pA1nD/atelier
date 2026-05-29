@@ -137,26 +137,26 @@ Per upgrade:
 2. `await mountPendingBackends()` so a freshly-installed auth module claims the slot before its first upgrade.
 3. `result = await authModule.authenticate(req, defaultUser)` — same call as HTTP.
 4. `null` → write `HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n` and destroy the socket. `handleUnauth` does **not** run: the WS handshake has nowhere to render an HTML takeover or a JSON body. The browser surfaces "WS connection failed" to JS; the client's reconnect loop retries after the user signs in (the post-login cookie is sent on the next attempt).
-5. user → `wss.handleUpgrade(...)`; the connection is admitted with `ws.user = result` attached for downstream use (per-frame ACL filtering, server-side disconnects, etc.).
+5. user → `wss.handleUpgrade(...)`; the connection is admitted with `ws.user = result` attached and a per-module topic ACL (`ws.allowed`) precomputed from it — see "Per-module WS ACL" below.
 
 No new auth-module contract surface. The same `authenticate` function gates both surfaces.
 
-#### Topic-level filtering inside the WS
+#### Per-module WS ACL
 
-Topics are fully qualified (`'<workspace>/<id>'`). The server doesn't filter fan-out — every frame goes to every connected client. The client-side subscriber map decides what's actually delivered to handlers. Because topics carry the workspace, same-named modules in different workspaces can't cross-broadcast.
+Topics are fully qualified (`'<workspace>/<id>'`), and the shell **gates the fan-out per frame**: a client receives a module's frames only if its user can see that module. The check uses the *same* `user.workspaces[].modules[]` the chrome renders the rail from — so **"if you can see the module, you receive its frames; if you can't, you don't,"** per-module, not just per-workspace. There is **no `global` exception** — a global module's frames reach a user only if it's in their view; globals usually *are* granted to all, but the auth module can withhold one, and then that user sees neither the rail entry nor its frames. The only topic that always reaches every client is `'shell'` (hot-reload and other shell events — never module data).
 
-For per-user/per-workspace WS-level filtering (e.g. "only members of `bigcorp` see `bigcorp/*` frames"), the auth module can attach an ACL to `ws.user` and the shell would need to consult it before send. **This is not implemented yet** — `wsBroadcastFromModule` currently fans out to every client. If you need it, ask before adding; the surface is straightforward but the contract needs thought.
+This makes `user.workspaces[].modules` a **security boundary**, not just a rail hint — the auth module must return it accurately and completely.
 
-#### Limitation: WS connections survive session invalidation
+Mechanics: at the WS upgrade the shell precomputes `ws.allowed = Set('<ws>/<id>' …)` from the user's view, so the per-frame check is a single `ws.allowed.has(topic)` — **O(1) per client**, which matters when one broadcast fans to hundreds of sockets. With no auth module the user is the full-access `defaultUser`, so the ACL is a no-op (everyone sees everything).
 
-`authenticate` runs at the upgrade only — once a socket is admitted, it stays admitted for its lifetime. If the auth module deletes a session (logout, admin revoke, expiry), the matching WS connection keeps receiving frames until the client closes it.
+#### Live session invalidation + permission changes
 
-In practice this is usually not visible:
+`authenticate` runs at the upgrade, but the shell also **re-validates every live socket on an interval** (`revalidateMs`, default 30 000 ms; env `ATELIER_REVALIDATE_MS`). Each cycle re-runs `authenticate` against the socket's original upgrade request:
 
-- **User-initiated logout** — the auth module's frontend typically navigates the page right after `POST /logout`, which closes the WS naturally. The window where the stale WS receives frames is a few ms of data the same logged-in user already had access to.
-- **Server-initiated invalidation** — the next HTTP request from the affected client gets `401` (HTTP path runs `authenticate` per request), so any user action after revocation hits the takeover. Idle WS connections continue to stream until the user does anything.
+- returns `null` → the session ended (logout / admin revoke / expiry) → the socket is closed (code `4001`);
+- returns a **changed** user → `ws.user` + `ws.allowed` are refreshed, so a granted or revoked module takes effect on the live socket **without a reconnect**.
 
-The shell does not provide a `disconnectClients` helper today. If a future auth module needs to force-tear connections (admin force-logout, hard expiry) the shape is straightforward to add — it's the symmetric peer to `ctx.broadcast`, only the shell can do it because the shell owns the connected-clients set, and `ws.user` is already attached. Add it when there's a use case; not before.
+So both revocation *and* mid-session permission changes propagate within one interval. The cost: `authenticate` is called once per open socket per interval, so it must be a cheap session lookup. The interval only runs when an auth module is configured (an ungated user never changes). User-initiated logout still closes the WS instantly by navigating the page; the interval is the backstop that also catches *external* changes (admin actions, expiry) the client never initiated.
 
 ### The connection banner
 
@@ -313,7 +313,7 @@ Modules that follow this checklist work as both global modules AND inside any wo
 - **No event or hook for the rail.** The bootstrap is injected once per page load; hot-reload triggers full reload via the existing WS ping. Same mechanism as today.
 - **No 401-vs-403 convention enforced.** The auth module sets whatever status it wants in `handleUnauth`. Modules consuming gated APIs read the auth module's docs. (Exception: `/_atelier/whoami` must follow 200/401 so the connection banner can distinguish offline from unauthed.)
 - **No `Denied` component, no `meta.public` opt-out, no role/ACL system in the shell.** Everything beyond "is there a user?" lives in the auth module's data and code.
-- **No per-frame WS ACL filtering.** Topics are workspace-qualified so cross-workspace leakage isn't possible by accident, but every connected client receives every broadcast for topics it subscribes to. If you need per-user filtering inside one workspace, the auth module needs to push that policy into the shell — coordinate before adding.
+- **No per-document/per-record ACL.** The WS ACL is per-*module* (driven by `user.workspaces[].modules`); filtering *which records within a module* a user may see is the module's own job, enforced in its handlers.
 
 ### Summary of shell responsibilities
 
@@ -323,7 +323,7 @@ Modules that follow this checklist work as both global modules AND inside any wo
 4. **Auth slot** — the `auth` setting names the gating module (path or global id), or `false` (default) for ungated. A stray `authenticate` export does not gate; only the configured module does. Workspace modules aren't eligible.
 5. **`defaultUser` builder** — synthesized from discovery on every request.
 6. **Per-request dispatch** — call `authenticate(req, defaultUser)` when `auth` is configured; on null, call `handleUnauth`; otherwise set `req.user` and route.
-7. **WebSocket upgrade gate** — `/_atelier/ws` upgrades go through the same `authenticate` slot. On null, the shell writes a bare `401` and destroys the socket (no `handleUnauth` — no body to render). On allow, `ws.user` is attached to the connection. Per-frame ACL filtering is not implemented.
+7. **WebSocket gate + per-module ACL** — `/_atelier/ws` upgrades go through the same `authenticate` slot. On null, the shell writes a bare `401` and destroys the socket. On allow, `ws.user` is attached and a per-module topic ACL (`ws.allowed`) is precomputed from `user.workspaces`; the fan-out delivers a module's frames only to clients that can see it. Live sockets are re-validated on an interval (`revalidateMs`), so revocation and permission changes propagate without a reconnect.
 8. **`/_atelier/whoami` identity probe** — gated by the same `authenticate`; returns 200 JSON for authed users, 401 for unauthed. Drives the connection banner.
 9. **`client.jsx` takeover branch** — when `boot.takeover` is present, mount the auth bundle full-screen instead of `AppShell`.
 10. **TopBar workspace picker** — rendered when the user has any non-`global` workspaces; hidden otherwise.

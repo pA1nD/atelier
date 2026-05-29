@@ -81,6 +81,7 @@ const AUTH = (() => {                                     // auth module path/na
   const v = envOr('ATELIER_AUTH', 'auth', false);
   return (v === false || v == null || v === 'false' || v === 'off' || v === '') ? false : v;
 })();
+const REVALIDATE_MS = Number(envOr('ATELIER_REVALIDATE_MS', 'revalidateMs', 30000)); // WS session re-check interval
 
 // Publish the resolved port/baseUrl so modules (and processes they spawn) read
 // the same values. NODE_ENV is intentionally NOT set — atelier has no
@@ -1553,11 +1554,28 @@ const wss = new WebSocketServer({ noServer: true });
 // (or maliciously) names an event field `topic` can't override the routing
 // key. Same defensive ordering everywhere the shell merges module data
 // into a structure it owns.
+// The set of WS topics a user may receive — `<ws>/<id>` for every module in
+// their workspaces view. Mirrors what the chrome renders the rail from, so a
+// client receives a module's frames iff it can see that module. Computed once
+// per connection (see the upgrade handler) so the per-frame check stays O(1) —
+// it runs for every client on every broadcast.
+function allowedTopics(user) {
+  const set = new Set();
+  for (const ws of user?.workspaces || []) {
+    for (const m of ws.modules || []) set.add(`${ws.id}/${m.id}`);
+  }
+  return set;
+}
+
 function wsBroadcastFromModule(qid, event) {
   if (wsClients.size === 0) return;
   const frame = JSON.stringify({ ...event, topic: qid });
   for (const ws of wsClients) {
     if (ws.readyState !== 1 /* OPEN */) continue;
+    // Per-module ACL: only deliver a module's frames to a client whose user can
+    // see that module (ws.allowed is the precomputed topic set). With no auth
+    // module the user is the full-access defaultUser, so this is a no-op.
+    if (ws.allowed && !ws.allowed.has(qid)) continue;
     try { ws.send(frame); } catch { /* drop */ }
   }
 }
@@ -1578,6 +1596,31 @@ wss.on('connection', (ws) => {
   ws.on('close', drop);
   ws.on('error', drop);
 });
+
+// Periodic re-validation of live WS connections. `authenticate` runs only at the
+// upgrade, so without this a revoked session would keep streaming. Every
+// REVALIDATE_MS we re-run it per open socket against the same upgrade request:
+// null → the session ended → close (code 4001); a changed user → refresh
+// ws.user + ws.allowed so granted/revoked module access takes effect without a
+// reconnect. Only runs when an auth module is configured (an ungated user never
+// changes). `authenticate` must be cheap (a session lookup) — it's called once
+// per open socket per interval.
+if (AUTH) {
+  const timer = setInterval(async () => {
+    if (wsClients.size === 0) return;
+    let defaultUser;
+    try { defaultUser = buildDefaultUser({ metaByQId: await getMetaByQId() }); } catch { return; }
+    for (const ws of wsClients) {
+      if (ws.readyState !== 1 || !ws.authReq) continue;
+      let user;
+      try { user = await gateRequest(ws.authReq, defaultUser); } catch { user = null; }
+      if (!user) { try { ws.close(4001, 'session ended'); } catch {} continue; }
+      ws.user = user;
+      ws.allowed = allowedTopics(user);
+    }
+  }, REVALIDATE_MS);
+  timer.unref?.();
+}
 
 // ------------------------------------------------------------------------
 // Hot reload — fs.watch → WS broadcast (topic: 'shell')
@@ -1855,10 +1898,13 @@ server.on('upgrade', async (req, socket, head) => {
     return;
   }
 
-  // No per-connection workspace tagging — topics are qualified
-  // (`<ws>/<id>`) and the client subscribes to the ones it cares about.
+  // Attach the user + a precomputed per-module topic ACL (ws.allowed): the
+  // server only fans a module's frames to clients whose user can see it.
+  // ws.authReq is kept so the socket can be re-validated periodically below.
   wss.handleUpgrade(req, socket, head, (ws) => {
     ws.user = user;
+    ws.allowed = allowedTopics(user);
+    ws.authReq = req;
     wss.emit('connection', ws, req);
   });
 });

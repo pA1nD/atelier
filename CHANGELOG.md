@@ -2,6 +2,20 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.5.0
+
+**Multi-tenant WebSocket access control.** The shared WS now enforces per-module permissions, so one instance can safely host multiple tenants.
+
+### Added
+- **Per-module WS ACL** — `wsBroadcastFromModule` delivers a module's frames only to clients whose user can see that module, keyed off the same `user.workspaces[].modules[]` the chrome renders the rail from. Per-module (not just per-workspace); `global` modules are gated identically (no exception); only the `'shell'` topic always sends. `ws.allowed` is precomputed at the WS upgrade → O(1) per frame, so it scales to hundreds of concurrent sockets.
+- **Live session re-validation** — every `revalidateMs` (default `30000`; env `ATELIER_REVALIDATE_MS`) each open socket re-runs `authenticate`: `null` → close (code `4001`); a changed user → refresh `ws.user` + `ws.allowed`. Revocation *and* mid-session permission changes propagate without a reconnect. Runs only when an auth module is configured.
+
+### Changed
+- **`user.workspaces[].modules` is now a security boundary**, not just a rail hint — the auth module must return it accurately and completely. `docs/AUTH.md` rewritten (the two "not implemented" WS sections are now the real model).
+
+### Tests
+- `test/ws-acl.test.js` + a multi-tenant fixture (two orgs, per-module membership): cross-org + per-module isolation, global-module gating, revoke-closes-socket, grant-flows-after-revalidation. Suite now 50.
+
 ## 0.4.0
 
 **The carve-back — smaller core, production posture.** Atelier shrinks to its three pillars — **modules, workspaces, auth** — and sheds the machinery that grew around them. Several breaking changes; all mechanical.
