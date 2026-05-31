@@ -210,6 +210,62 @@ That's it. A module is React + Tailwind + the browser, plus a thin WS primitive.
 
 ---
 
+## Sidecar servers
+
+Some modules need a **second HTTP server on their own port** — a public surface the shell's request lane can't serve. The shipped `sites` module is the reference: it runs a dedicated `http.createServer` on `SITES_DOCS_PORT` (default `7322`) to serve published pages at `/p/<id>/…` — arbitrary path depth, its own auth, public visitors — none of which fits the shell's scoped, no-wildcard `/api/<ws>/<id>` router.
+
+Reach for a sidecar when you need one of:
+
+- **URL shapes the module router won't match** — wildcards, deep/arbitrary paths, a bare `/`. The shell router is exact-prefix under `/api/<ws>/<id>`, no wildcards.
+- **A surface outside the shell's auth** — something an unauthenticated visitor or another service hits directly, with the module enforcing its own scheme.
+- **Its own CORS, content types, or protocol**, independent of the shell.
+
+If you only need module API routes, use the `mountRoutes` router — not a sidecar.
+
+### The shell's role is small
+
+A sidecar is **plain Node `http`** — there's no "sidecar API." What the shell gives you, via `ctx` / env:
+
+- **`ctx.baseUrl`** (and `process.env.BASE_URL`) — the instance's external URL, so the sidecar and anything it spawns build correct links.
+- **`ctx.log(msg)`** — log through the shell.
+- **`ctx.broadcast(event)`** — push onto the module's own WS topic from inside the sidecar.
+- **Teardown on shutdown** — the shell fires every module's teardown on `SIGINT` / `SIGTERM` / exit, so your sidecar (and any child process) is closed, not orphaned.
+
+The shell does **not** allocate the port, proxy to it, gate it, or expose it. Those are yours (and the operator's).
+
+### Lifecycle — start in `mountRoutes`, close in teardown
+
+A sidecar is a long-lived listener, so it lives by the [hot-reload teardown contract](#hot-reload-dev): `mountRoutes` re-runs on every reload, so you **must** close the old server or the next reload hits `EADDRINUSE`.
+
+```js
+import http from 'node:http'
+const PORT = Number(process.env.MYMOD_PORT || 7400)
+
+export default {
+  async mountRoutes(router, ctx) {
+    // ... your /api routes on `router` ...
+
+    const server = http.createServer((req, res) => { /* raw URL routing */ })
+    server.on('error', (e) => {                       // never crash the shell
+      if (e.code === 'EADDRINUSE') ctx.log(`mymod · port ${PORT} in use — sidecar not started`)
+    })
+    server.listen(PORT, '127.0.0.1', () => ctx.log(`mymod · sidecar on http://127.0.0.1:${PORT}`))
+
+    return () => { try { server.close() } catch {} }   // ← closes on reload AND on shutdown
+  },
+}
+```
+
+### Exposure & auth — you own both
+
+A sidecar sits **outside** the shell's three pillars (frontend rail / HTTP presence / WS ACL — see [Auth](./AUTH.md)). `authenticate` and `authorize` never run for it. So:
+
+- **Bind to `127.0.0.1`**, not `0.0.0.0`. Let the **operator's reverse proxy / tunnel** (nginx, cloudflared, …) map a public hostname to the port — the shell doesn't proxy to it. (`sites` is fronted by a cloudflared tunnel → `DOCS_PORT`.)
+- **Enforce your own auth** on anything non-public. The shell can't help — a sidecar that needs to know who's calling must carry its own scheme (`sites` uses signed per-document tokens: `/d/<id>/<token>/<user>/…`). Treat it like any service you put on the internet.
+- **Pick the port from a module-specific env var** with a sensible default (`MYMOD_PORT`), and document it. Avoiding collisions across the shell port and other sidecars is the operator's job.
+
+---
+
 ## Special module: the chrome
 
 The shell ships **zero visual bytes** — no rail, topbar, fonts, colors, favicon, or icon set. All of it lives in a **chrome**: a global-workspace module that exports `meta = { chrome: true, hidden: true }` and a `chrome(props)` function the shell renders as the root. The chrome named by `atelier.config.json`'s `chrome` setting wins; otherwise the first global module with `meta.chrome === true` (alphabetical by qualifiedId). **There is no default chrome** — with none installed the client renders a plain "add a chrome" screen.

@@ -74,7 +74,7 @@ The full contract — `ctx`, the real-time WebSocket, `ctx.module(id)` slots, ho
 Four pages (also browsable in-app via the chrome's Documentation viewer, in this order):
 
 - **[docs/README.md](docs/README.md)** — **Atelier**: running an instance, what lives in `atelier/`, and `atelier.config.json`.
-- **[docs/MODULES.md](docs/MODULES.md)** — **Modules**: module shape, `ctx`, real-time (`self`/`broadcast`), hot-reload, cross-module slots — plus the special modules (the **chrome** + `@atelier/kit`).
+- **[docs/MODULES.md](docs/MODULES.md)** — **Modules**: module shape, `ctx`, real-time (`self`/`broadcast`), hot-reload, cross-module slots, sidecar servers — plus the special modules (the **chrome** + `@atelier/kit`).
 - **[docs/WORKSPACES.md](docs/WORKSPACES.md)** — **Workspaces**: the multi-tenant model (`global` + `$<ws>/`), the `qualifiedId`, rail and picker.
 - **[docs/AUTH.md](docs/AUTH.md)** — **Auth**: the auth-module slot, the `user`/`defaultUser` contract, request + WebSocket gating, takeover render.
 - **[CHANGELOG.md](CHANGELOG.md)** — version history and migration notes.
