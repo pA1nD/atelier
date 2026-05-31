@@ -138,6 +138,29 @@ const { useState, useEffect, useRef } = React;
     };
   };
 
+  // Workspace-aware self-identity for a module frontend. Pass `import.meta.url`
+  // and get back the module's qualifiedId (`<ws>/<id>`, `global` the default),
+  // its WS topic, and its API base — all derived from where the module is
+  // actually mounted, so the SAME module works in any workspace without
+  // hardcoding it. This mirrors how backend routes are workspace-scoped:
+  //
+  //   const self = window.__atelier.self(import.meta.url);
+  //   self.subscribe((frame) => { … });        // listens on '<ws>/<id>' — never hardcode
+  //   fetch(self.api + '/items');                // hits /api/<ws>/<id>/items
+  window.__atelier.self = (metaUrl) => {
+    let qid = '';
+    try { qid = new URL('.', metaUrl).pathname.replace(/^\/modules\//, '').replace(/\/+$/, ''); } catch {}
+    const [workspace = '', id = ''] = qid.split('/');
+    return {
+      workspace,
+      id,
+      qid,
+      topic: qid,
+      api: qid ? '/api/' + qid : '',
+      subscribe: (handler) => window.__atelier.subscribe(qid, handler),
+    };
+  };
+
   connect();
 })();
 
@@ -281,22 +304,36 @@ function App() {
   const [loaded, setLoaded] = useState({});            // qid → load entry
   const [chromeEntry, setChromeEntry] = useState(null); // load entry for chrome
 
-  // Canonicalize URL: if no workspace in the path, redirect to the first
-  // non-empty workspace (or first listed if all are empty). If any module
-  // declares `meta.primary: true`, land on that module instead of the
-  // workspace home — prefer one in the chosen defaultWs, fall back to any.
   const defaultWs = (wsList.find((w) => (w.modules || []).length > 0) || wsList[0])?.id || null;
+
+  // The selected workspace is STICKY and per-tab (sessionStorage). Clicking a
+  // global module keeps you in it; only entering a workspace module (here or by
+  // opening one of its URLs directly) or the picker changes it. Different tabs
+  // hold different workspaces. Init priority: a non-global workspace in the URL
+  // (you directly opened one of its modules) → the tab's stored choice → default.
+  const wsIds = new Set(wsList.map((w) => w.id));
+  const [selectedWs, setSelectedWs] = useState(() => {
+    if (urlState.ws && urlState.ws !== 'global' && wsIds.has(urlState.ws)) return urlState.ws;
+    try { const s = sessionStorage.getItem('atelier:ws'); if (s && wsIds.has(s)) return s; } catch {}
+    return defaultWs;
+  });
   useEffect(() => {
-    if (urlState.ws || !defaultWs) return;
-    const primary = allModules.find((m) => m.workspace === defaultWs && m.meta?.primary)
+    try { if (selectedWs) sessionStorage.setItem('atelier:ws', selectedWs); } catch {}
+  }, [selectedWs]);
+
+  // Canonicalize URL: with no workspace in the path, land on the selected
+  // workspace — its `meta.primary` module if any, else its home.
+  useEffect(() => {
+    if (urlState.ws || !selectedWs) return;
+    const primary = allModules.find((m) => m.workspace === selectedWs && m.meta?.primary)
                  || allModules.find((m) => m.meta?.primary);
     const target = primary
       ? buildUrl(primary.workspace, primary.id)
-      : buildUrl(defaultWs, null);
+      : buildUrl(selectedWs, null);
     window.history.replaceState(null, '', target);
     setUrlState(parseUrl());
-  }, [urlState.ws, defaultWs]);
-  const effectiveWorkspace = urlState.ws || defaultWs;
+  }, [urlState.ws, selectedWs]);
+  const effectiveWorkspace = selectedWs;
 
   // Load the chrome bundle.
   useEffect(() => {
@@ -391,12 +428,16 @@ function App() {
   function navigateByQid(qid) {
     const [ws, id] = qid.split('/');
     if (!ws) return;
+    // Entering a workspace module sets the workspace context; global modules
+    // are shared and leave the selected workspace untouched.
+    if (ws !== 'global') setSelectedWs(ws);
     const target = id ? buildUrl(ws, id) : buildUrl(ws, null);
     if (qid && dirtyRef.current.has(qid)) { window.location.assign(target); return; }
     navigateTo(target);
   }
 
   function pickWorkspace(ws) {
+    setSelectedWs(ws);
     const curId = urlState.id;
     const preserve = curId && allModules.some((m) => m.workspace === ws && m.id === curId)
       ? curId : null;

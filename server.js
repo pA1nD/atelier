@@ -160,7 +160,7 @@ function createRouter() {
       r.paramNames.forEach((n, i) => { params[n] = decodeURIComponent(m[i + 1]); });
       req.params = params;
       req.query = Object.fromEntries(url.searchParams.entries());
-      req.json = () => readJsonBody(req);
+      req.json = () => bodyOf(req);
       res.json = (data, status = 200) => {
         res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(data));
@@ -223,6 +223,14 @@ function readJsonBody(req) {
     });
     req.on('error', reject);
   });
+}
+
+// Memoize the parsed body on the request. A request stream can only be
+// consumed once, but two trusted readers may want it: the auth module's
+// `authorize` hook (payload-level checks) and the module's own handler. Both
+// go through `bodyOf`, so the stream is read once and they share the result.
+function bodyOf(req) {
+  return (req.__bodyPromise ??= readJsonBody(req));
 }
 
 // ------------------------------------------------------------------------
@@ -1559,7 +1567,12 @@ const wss = new WebSocketServer({ noServer: true });
 // client receives a module's frames iff it can see that module. Computed once
 // per connection (see the upgrade handler) so the per-frame check stays O(1) —
 // it runs for every client on every broadcast.
-function allowedTopics(user) {
+// The set of modules a user may reach — `<ws>/<id>` for every module in their
+// workspaces view. The single source of truth for the module boundary: the
+// HTTP presence gate (the `/api/<ws>/<id>` lane) and the WS ACL both gate on
+// this, so "can see in the rail", "can call its API", and "receives its
+// frames" are the one decision the auth module made in `user.workspaces`.
+function userModuleSet(user) {
   const set = new Set();
   for (const ws of user?.workspaces || []) {
     for (const m of ws.modules || []) set.add(`${ws.id}/${m.id}`);
@@ -1567,7 +1580,27 @@ function allowedTopics(user) {
   return set;
 }
 
+function allowedTopics(user) {
+  const set = userModuleSet(user);
+  // Module-level topics only. Per-module sub-room topics (`<ws>/<id>/<room>`)
+  // would be added here once the auth module returns per-module `rooms` — see
+  // the WS pillar in docs/AUTH.md. The per-frame check stays exact-match.
+  return set;
+}
+
+const warnedHardcodedTopics = new Set();   // dedupe the dev warning below
 function wsBroadcastFromModule(qid, event) {
+  // A module's WS topic is ALWAYS its qualifiedId (`<ws>/<id>`, workspace-aware) —
+  // the shell stamps it (topic comes last, can't be overridden). If a module
+  // passes its own `topic`, it's ignored; warn once so the hardcoded value
+  // (which would break when the module moves workspaces) gets caught in dev.
+  if (event && event.topic && event.topic !== qid) {
+    const key = `${qid} ${event.topic}`;
+    if (!warnedHardcodedTopics.has(key)) {
+      warnedHardcodedTopics.add(key);
+      console.warn(`  ! ${qid} broadcast with topic '${event.topic}' — ignored. WS topics are always your qualifiedId ('${qid}'); subscribe via window.__atelier.self(import.meta.url) so it stays workspace-aware.`);
+    }
+  }
   if (wsClients.size === 0) return;
   const frame = JSON.stringify({ ...event, topic: qid });
   for (const ws of wsClients) {
@@ -1819,7 +1852,8 @@ const server = http.createServer(async (req, res) => {
   // server. The auth module's `authenticate()` whitelists its own bundle
   // path (e.g. `/modules/global/auth/...`) by returning a synthetic guest
   // user for those paths — same pattern it uses for `/api/global/auth/login`.
-  const apiUser = await authenticateRequest(req, res, buildDefaultUser({ metaByQId: await getMetaByQId() }));
+  const metaByQId = await getMetaByQId();
+  const apiUser = await authenticateRequest(req, res, buildDefaultUser({ metaByQId }));
   if (!apiUser) return;                 // auth module owned the response
   req.user = apiUser;
 
@@ -1842,6 +1876,69 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.startsWith('/modules/')) {
     await serveAsset(req, res, url);
     return;
+  }
+
+  // Authorization for `/api/<ws>/<id>/…` — two TRUSTED layers in front of the
+  // (untrusted, possibly vibe-coded) module router. Enforcement never lives in
+  // the feature module; see the three pillars in docs/AUTH.md.
+  //
+  //   1. Presence (shell, mechanical) — the module boundary. The request's
+  //      module must be in the user's workspaces view (userModuleSet) — the
+  //      same set that draws the rail and gates WS frames. Closes the
+  //      cross-tenant hole where any authed user could call any module's API.
+  //   2. authorize (auth module, optional) — everything below the boundary:
+  //      read/write, payload inspection, sub-resource rules. The decision is
+  //      the trusted auth module's; the shell only enforces its verdict. The
+  //      module router runs ONLY after both pass.
+  //
+  // Exempt from both: (a) the configured auth module's OWN routes — you can't
+  // gate the gate (login must be reachable), and it governs its own surface
+  // through `authenticate`; (b) infrastructure modules — a chrome or any
+  // `hidden` module. Infra is excluded from `buildDefaultUser`, so it's in
+  // nobody's `user.workspaces` and the presence gate would 403 it for every
+  // user; but the chrome (and its API, e.g. /docs) is shell scaffolding every
+  // authed user loads, not tenant data. Ungated instances skip this whole
+  // block — `findAuthModule()` is null, so there's nothing to enforce.
+  if (url.pathname.startsWith('/api/')) {
+    const seg = url.pathname.split('/');            // ['', 'api', <ws>, <id>, …]
+    const reqQid = seg[2] && seg[3] ? `${seg[2]}/${seg[3]}` : null;
+    const auth = findAuthModule();
+    const authQid = auth?.m.qualifiedId;
+    const reqMeta = (reqQid && metaByQId.get(reqQid)) || {};
+    const isInfra = reqMeta.chrome === true || reqMeta.hidden === true;
+    if (reqQid && authQid && reqQid !== authQid && !isInfra) {
+      if (!userModuleSet(apiUser).has(reqQid)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forbidden' }));
+        return;
+      }
+      if (typeof auth.plug.authorize === 'function') {
+        req.json = () => bodyOf(req);   // memoized — the handler shares this parse
+        const modPath = url.pathname.slice(`/api/${reqQid}`.length) || '/';
+        try {
+          const ok = await auth.plug.authorize(req, apiUser, {
+            qualifiedId: reqQid,
+            method: req.method,
+            path: modPath,
+          });
+          if (!ok) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'forbidden' }));
+            return;
+          }
+        } catch (err) {
+          // A thrown authorize is a denial. It may carry a statusCode (e.g. a
+          // 413 from reading an oversized body) — honor it; default to 403.
+          const status = err.statusCode || 403;
+          if (!res.writableEnded) {
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message || 'forbidden' }));
+          }
+          if (status >= 500) console.error(`  ! ${auth.m.qualifiedId}.authorize threw:`, err);
+          return;
+        }
+      }
+    }
   }
 
   // API — `/api/<ws>/<id>/...`. Routes were registered with the same

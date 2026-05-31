@@ -2,6 +2,27 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.6.0
+
+**Multi-tenant HTTP access control + the `authorize` hook, workspace-aware module WebSockets, and a contract-accuracy pass toward a stable 1.0.** The HTTP API now enforces the same per-module boundary the WS ACL does, and the auth module can enforce *below* the boundary (read/write, payload) — completing the trusted-enforcement model across all three surfaces (frontend, HTTP, WS). Enforcement lives only in the shell and the trusted auth module; a feature module (which may be vibe-coded) is never the boundary. A contract audit found no breaking changes needed for 1.0 — the surface is additive-extensible; this release makes the docs match it.
+
+### Added
+- **HTTP presence gate** — every `/api/<ws>/<id>/…` request is checked against the user's `user.workspaces` (`userModuleSet`) before dispatch; not in it → `403`. Closes the cross-tenant hole where any authed user could call any module's API (the HTTP twin of 0.5.0's WS ACL). No-op on ungated instances; the configured auth module's own routes are exempt (you can't gate the gate).
+- **`authorize(req, user, target)` auth-slot hook (optional)** — runs after the presence gate and before the module router, with `target = { qualifiedId, method, path }` and a memoized `req.json()` (the module handler shares the same parse — a request body is read once). Falsy/throw → `403`; a thrown `statusCode` is honored (e.g. a `413` from an oversized body). This is the trusted home for below-module policy: read vs write, sub-resource rules, payload inspection.
+- **Infrastructure modules are exempt from the presence gate** — a chrome or any `hidden` module. Infra is excluded from `buildDefaultUser`, so it's in nobody's `user.workspaces`; without this, the active chrome's own API (e.g. its `/docs`) `403`'d for every authed user. Exempted alongside the auth module's own routes.
+- **`window.__atelier.self(import.meta.url)`** — workspace-aware frontend self-identity: `{ workspace, id, qid, topic, api, subscribe(cb) }`. A module subscribes to its own `<ws>/<id>` topic and builds its API path without ever hardcoding the workspace — the WS analog of how backend routes are workspace-scoped, so the same bundle is portable across workspaces. Backend `ctx.broadcast` still always stamps the topic with the module's qualifiedId; it now logs a dev-time warning if a module passes a hardcoded `topic`.
+
+### Changed
+- **`docs/AUTH.md`** now opens with the **three-pillars** mental model (frontend / HTTP / WS) and the **`authenticate` → presence → `authorize`** request lifecycle — what each hook is for and what happens between them.
+- **`allowedTopics` builds on a shared `userModuleSet`** — one source of truth for the module boundary across the rail (frontend), the HTTP presence gate, and the WS ACL.
+- **Sticky per-tab workspace (`client.jsx`)** — the selected workspace now persists per browser tab (`sessionStorage`). Clicking a **global** module keeps you in your current workspace instead of switching to `global`; only entering a workspace module (in the rail or via a direct URL) or the workspace picker changes it. Different tabs can hold different workspaces.
+
+### Tests
+- `test/http-acl.test.js` + an `http-acl` fixture (a gate exporting `authenticate` + `authorize`, plus feature modules + a `hidden` infra module): cross-tenant `403`, read-grant allows GET / denies POST, write-grant POST where the handler sees the body `authorize` already read, payload-level deny, auth-module-route exemption, infra-module exemption, and the ungated no-op. Suite now 58.
+
+### Docs (freeze-readiness)
+- `README.md` + `AUTH.md` made accurate + complete toward a 1.0 freeze: the full `meta` set (`icon`/`name`/`group`/`primary`/`hidden`/`chrome`/`color`), the `revalidateMs` config row, `user.logout` (chrome sign-out convention) + `modules[].access`, `ctx` documented as a closed set (no `cors`), and the workspace-aware WS pattern (use `self()`, never hardcode a topic). Removed stale carve-back references (Mission Control, agents-module examples, the Lucide `data-lucide` icon convention → now "the chrome renders `meta.icon`").
+
 ## 0.5.0
 
 **Multi-tenant WebSocket access control.** The shared WS now enforces per-module permissions, so one instance can safely host multiple tenants.

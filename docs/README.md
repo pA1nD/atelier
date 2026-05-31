@@ -61,7 +61,16 @@ export const meta = { icon: 'activity', name: 'Activity', group: 'marketing' };
 export default function Module() { ... }
 ```
 
-Supported keys: `icon` (lucide name — see [lucide.dev](https://lucide.dev/icons)), `name` (display name), `group` (rail section — modules with the same `group` render under a shared header; untagged modules live under the default "modules" section), `color` (reserved for future use). `meta` is optional; the rail falls back to `icon: 'square'` and `name: <dir>`.
+Supported keys:
+- `icon` — a rail-icon name the **active chrome** renders (catalyst maps lucide-style names like `kanban` / `shield-check` to its Heroicon set; the shell ships no icons).
+- `name` — display name (rail label).
+- `group` — rail section: modules with the same `group` render under a shared header; untagged modules live under the default "modules" section.
+- `primary` — boolean; the module the shell lands on at `/` for its workspace.
+- `hidden` — boolean; keep the module out of the rail and `defaultUser` (chromes set this on themselves).
+- `chrome` — boolean; marks a global-workspace module as the chrome (global-workspace only).
+- `color` — reserved for future use.
+
+`meta` is optional; the rail falls back to `icon: 'square'` and `name: <dir>`.
 
 Meta is parsed server-side at discovery time (esbuild-transform `frontend.jsx` → import via `data:` URL) and shipped in the HTML bootstrap, so grouping renders correctly on first paint — no flicker.
 
@@ -76,23 +85,21 @@ export default {
 };
 ```
 
-`ctx` exposes: `id`, `name`, `workspace`, `qualifiedId` (`'<workspace>/<id>'`), `label`, `port`, `baseUrl`, `dataDir`, `log`, `broadcast`, `module`. URLs you return in response bodies — for clients to follow — should be built off the module's mount point (`/api/${ctx.qualifiedId}/...`), not hardcoded.
+`ctx` exposes exactly: `id`, `name`, `workspace`, `qualifiedId` (`'<workspace>/<id>'`), `label`, `port`, `baseUrl`, `dataDir`, `log`, `broadcast`, `module` — and nothing else (no CORS or auth helpers; a module that needs CORS sets its own response headers). URLs you return in response bodies — for clients to follow — should be built off the module's mount point (`/api/${ctx.qualifiedId}/...`), not hardcoded.
 
-**Optional frontend self-reference** — every module's `frontend.jsx` derives its API base and WS topic from its own bundle URL. Paste this snippet near the top:
+**Frontend self-reference (workspace-aware, never hardcoded)** — a module's `frontend.jsx` must derive its API base and WS topic from where it's actually mounted, so the same bundle works in any workspace (`global` is just the default). Use the shell helper — pass it this bundle's `import.meta.url`:
 
 ```js
-// ROUTE = '<workspace>/<id>' — derived from this bundle's own URL.
-const ROUTE = (() => {
-  try {
-    return new URL('.', import.meta.url).pathname
-      .replace(/^\/modules\//, '').replace(/\/$/, '');
-  } catch { return ''; }
-})();
-const API = '/api/' + ROUTE;     // '/api/global/kanban' or '/api/<ws>/kanban'
-const TOPIC = ROUTE;             // 'global/kanban' or '<ws>/kanban'
+const self = window.__atelier.self(import.meta.url);
+// self.workspace 'global' | '<ws>'   self.id 'kanban'   self.qid '<ws>/kanban'
+// self.api  '/api/<ws>/kanban'        self.topic '<ws>/kanka' (the WS topic)
+
+self.subscribe((frame) => { … });        // listens on self.topic — workspace-aware
+const unsub = self.subscribe(handler);    // returns an unsubscribe fn
+fetch(self.api + '/items');               // hits /api/<ws>/kanban/items
 ```
 
-Use `${API}/foo` everywhere you'd otherwise hardcode `'/api/<your-name>/foo'`, and `TOPIC` for `window.__atelier.subscribe(TOPIC, …)`. Same bundle bytes work whether the module is mounted globally or in a workspace — the browser sets `import.meta.url` to the URL it fetched the bundle from. For cross-module calls, derive the workspace once (`const WS = ROUTE.split('/')[0]`) and reach peers as `/api/${WS}/<peer>/...`.
+This mirrors how backend routes are workspace-scoped: just as `router.get('/items')` becomes `/api/<ws>/<id>/items` without the module naming its workspace, `self.subscribe(...)` listens on `<ws>/<id>` without hardcoding it. **Never write a literal topic or `/api/<name>/...` path** — the workspace can change (the same module mounted under a different `$<ws>/`), and a hardcoded topic would silently miss its own frames. For cross-module calls, reach peers under the same workspace: `/api/${self.workspace}/<peer>/...`.
 
 **Optional skills** — `<module>/.claude/skills/<skill-name>/SKILL.md`. This is the same path Claude Code natively loads when the module directory is the workspace, so for dev just `cd <module> && claude` and the skill is live — no install step, no symlink. A skill is a markdown file with YAML frontmatter.
 
@@ -193,23 +200,25 @@ export default {
 };
 ```
 
-The shell tags every emitted event with the module's `qualifiedId` as `topic` — modules can only emit under their own identity. There is no global `broadcast`; misnaming someone else's topic isn't possible.
+The shell **always** stamps the emitted event's `topic` with the module's `qualifiedId` (`<ws>/<id>`, workspace-aware) — `ctx.broadcast` takes only the event payload; a module **cannot** choose or override the topic, so it can only emit under its own identity. (If a module passes a `topic` field it's ignored, and the shell logs a dev warning — don't hardcode it.) There is no global `broadcast`.
 
 #### Client side — `window.__atelier.subscribe(topic, handler)`
 
-Frontends subscribe to topics they care about. The canonical pattern uses `TOPIC` derived from the bundle URL:
+Frontends subscribe to their own module's topic via the workspace-aware `self` helper (above) — never a hardcoded string:
 
 ```js
-const unsub = window.__atelier.subscribe(TOPIC, (frame) => {
+const self = window.__atelier.self(import.meta.url);
+const unsub = self.subscribe((frame) => {       // listens on '<ws>/<id>'
   if (frame.type === 'run-finished') refresh();
 });
-// when no longer interested
-unsub();
+unsub();   // when no longer interested
 ```
+
+`self.subscribe(handler)` is just `window.__atelier.subscribe(self.topic, handler)` — use the low-level form directly only to listen on another known topic (e.g. the shell's `'shell'` topic).
 
 The shell owns the WebSocket. Multiple subscribers — across modules, across components — share the same connection. Auto-reconnect with exponential backoff is built in, so dev-server restarts recover transparently.
 
-For initial state on page mount (a new subscriber doesn't see what already happened before they connected), modules expose a normal HTTP snapshot endpoint and call it once. Mission Control's `/state` is a worked example.
+For initial state on page mount (a new subscriber doesn't see what already happened before they connected), a module exposes a normal HTTP snapshot endpoint (e.g. a `/state` GET) and calls it once on mount, then keeps in sync via the subscription.
 
 #### Per-module backend hot-swap (dev only)
 
@@ -224,7 +233,7 @@ The shell:
 
 **Routes are stripped automatically.** The shell tracks exactly which routes each module added (via a scoped router) and removes them on swap.
 
-**Closure state resets automatically.** A re-bundled import is a fresh module graph with its own closure, so module-level variables (e.g. kanban's in-memory cache, agents' `children` Map, a subscribers Set) re-initialize. No module code needed.
+**Closure state resets automatically.** A re-bundled import is a fresh module graph with its own closure, so module-level variables (e.g. an in-memory cache, a child-process `Map`, a subscribers Set) re-initialize. No module code needed.
 
 **Side effects need a teardown.** Anything a module registers *outside* its own closure — `fs.watch` handles, `setInterval` / `setTimeout`, `child_process.spawn`ed children, long-lived response objects — survives a re-import. The module must opt into cleaning them up by returning a function from `mountRoutes`. (Real-time clients that subscribe via the shared WS are managed by the shell — modules don't need to clean those up.)
 
@@ -386,8 +395,8 @@ Ambient only — no shared UI library, no imports:
 
 - **React** on `window.React` (UMD). Modules destructure hooks when they need them: `const { useState } = React`.
 - **Tailwind** classes from whichever chrome is mounted (tokens come from the active chrome's `styles.css`). Modules use `className=` freely.
-- **Lucide icons** via the DOM convention `<i data-lucide="kanban-square" className="w-3.5 h-3.5" />`. The chrome's MutationObserver turns them into SVGs.
-- **`window.__atelier.subscribe(topic, handler)`** — shared WS multiplex. For cross-module work this is the surface (plus backend `ctx.module(id)` slots and `@atelier/kit`); there is no frontend method-call registry.
+- **Rail icons** are named by a module's `meta.icon` (a string) and rendered by the **active chrome** — the shell ships none. (Catalyst maps the name to a Heroicon; another chrome may use a different set.)
+- **`window.__atelier.subscribe(topic, handler)`** + **`window.__atelier.self(import.meta.url)`** — the shared WS multiplex. `self` returns your module's workspace-aware identity (`{ workspace, id, qid, topic, api, subscribe }`); prefer `self.subscribe(cb)` over a hardcoded topic. For cross-module work this plus backend `ctx.module(id)` slots and `@atelier/kit` is the surface; there is no frontend method-call registry.
 
 That's it. A module is React + Tailwind + the browser, plus a thin WS subscribe primitive.
 
@@ -423,6 +432,7 @@ All optional; resolved **defaults ← config ← environment** (env wins, so a P
 | `chrome` | _(election)_ | `ATELIER_CHROME` | path/id of the chrome module; overrides alphabetical election among installed chromes |
 | `hotReload` | `true` | `ATELIER_HOT_RELOAD` | file watchers + backend hot-swap; set `false` when deployed |
 | `auth` | `false` | `ATELIER_AUTH` | path/id of the auth module, or `false` to run ungated (see [AUTH.md](./AUTH.md)) |
+| `revalidateMs` | `30000` | `ATELIER_REVALIDATE_MS` | how often live WebSocket sockets re-run `authenticate` (only when `auth` is set) — so logout/permission changes propagate without a reconnect; see [AUTH.md](./AUTH.md) |
 | `label` | `null` | `ATELIER_LABEL` | optional instance name a chrome may display |
 | `modules` | _(all run)_ | — | the module filter below |
 

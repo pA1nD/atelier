@@ -1,8 +1,85 @@
 # Authentication
 
-Atelier is ungated by default. Authentication is opt-in: name a module in the `auth` setting and the shell gates every request through it; leave `auth` unset (the default) and the shell doesn't gate. The auth module owns all policy — identity, session, workspace membership, per-document ACLs, the login and denied UI. The shell only does dispatch.
+Atelier is ungated by default. Authentication is opt-in: name a module in the `auth` setting and the shell gates every request through it; leave `auth` unset (the default) and the shell doesn't gate. The auth module owns all policy — identity, session, workspace membership, per-document ACLs, the login and denied UI. The shell enforces only the **module boundary** (who may see, call, and receive each module); the auth module owns everything finer.
 
 For the workspace model itself (URL shape, `$<ws>/` folders, the synthetic `global` workspace, rail composition, picker behavior), see [README.md](./README.md). This document covers the *auth* layer that lives on top of it.
+
+## Where auth sits: the single trusted layer
+
+Before anything else, hold one picture in your head: **auth is the single trusted layer between the shell and the modules.** The shell ships zero policy and serves the same floor to everyone; the modules are untrusted features (any may be vibe-coded); and *everything bound for identity or a module passes through the auth module first.* It is the one place — the only place — where "who are you" and "may you" are decided.
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│ SHELL  ·  always on  ·  trusts nobody  ·  ships zero policy
+│   serves /assets so even the login UI can load · routes every
+│   request · runs the WS multiplex · hot-reloads
+│   enforces ONLY the mechanical module boundary (presence) —
+│   never "what may you do"
+└───────────────────────────────────────────────────────────────────┘
+                    │  every request for identity or a module
+                    ▼
+╔═══════════════════════════════════════════════════════════════════╗
+║ AUTH MODULE  ·  the SINGLE TRUSTED GATE  ·  all policy lives here
+║   authenticate → who are you?      (null → handleUnauth owns response)
+║   authorize    → may you do this?  (read / write · payload)
+║   nothing below runs until this layer says yes
+╚═══════════════════════════════════════════════════════════════════╝
+                    │  only what auth allowed
+                    ▼
+┌───────────────────────────────────────────────────────────────────┐
+│ MODULES  ·  UNTRUSTED features (may be vibe-coded)
+│   run only after the shell + auth let the request through
+│   a module's own permission check is a courtesy, never the boundary
+└───────────────────────────────────────────────────────────────────┘
+```
+
+- **The shell is transport, not policy.** It serves the public floor (`/assets/*`, the client bundle — so the login screen can even render), routes `/api/<ws>/<id>`, and runs the WS multiplex. The one decision it makes by itself is the *mechanical* module boundary (presence) — and only because that's the same `user.workspaces` data the auth module already produced.
+- **The auth module is the single trusted gate.** Every request headed for identity, a module API, a module asset, or the WS upgrade passes through `authenticate`; API requests additionally pass `authorize`. Policy lives nowhere else.
+- **Modules are untrusted.** They're the product, but they sit *below* the gate by design: a request reaches a module only after the gate allowed it, so a sloppy or vibe-coded module can't become a tenant-isolation hole.
+
+**Ungated instances** (the `auth: false` default) simply remove the middle band — there is no auth module, every request gets the full-access `defaultUser`, and nothing is gated. The trusted-layer picture above is what you get the moment you name an `auth` module.
+
+## The mental model: three pillars
+
+Auth touches three surfaces, and it pays to hold them apart. On each one the shell enforces only the **module boundary** — mechanical, dumb, trusted — and the trusted **auth module** owns everything below it. Feature modules are *never* trusted to enforce their own permissions: any module may be vibe-coded, so a check inside one is a courtesy, not a boundary. Real enforcement lives only in the shell and the auth module.
+
+| Pillar | Governs | Shell enforces (the module boundary) | Auth module owns (below the boundary) |
+| --- | --- | --- | --- |
+| **Frontend** | what you **see** | the rail + bootstrap are built from `user.workspaces` — you only see modules in your view | per-module UI hints (show/hide *within* a module) — display only, **untrusted** |
+| **HTTP** | what you can **call** | the presence gate: `/api/<ws>/<id>` is reachable only if that module is in `user.workspaces` | **`authorize`** — read/write, payload inspection, sub-resource rules |
+| **WS** | what you **receive** | the per-frame ACL: a module's frames reach you only if it's in `user.workspaces` | sub-room membership (`<ws>/<id>/<room>`) — e.g. who's in an admins-only room |
+
+The single structure behind all three is **`user.workspaces[].modules[]`** — what `authenticate` returns. The shell reads it to draw the rail (frontend), gate the API (HTTP), and gate frames (WS). Get that one list right and the module boundary holds on all three surfaces at once.
+
+> **What's wired today:** the module boundary on all three pillars, plus the HTTP **`authorize`** hook. `authorize` is the first *below-boundary* lever, and the template the other two follow — the decision lives in the trusted auth module; the shell only carries and enforces it. The below-boundary levers for the frontend (a per-module `permissions` object passed to the component) and WS (`rooms` sub-room membership) are designed but **not yet wired** — when they land, they'll be two optional fields on the per-module entry the auth module already returns, needing no breaking change.
+
+### The request lifecycle: `authenticate` → `authorize`
+
+A request to a module API passes through two distinct auth-module hooks, in order, with the shell's mechanical presence gate *between* them:
+
+```
+request
+   │
+   ▼
+authenticate(req, defaultUser)        ─ identity: who is this session?
+   │   └─ null ──▶ handleUnauth        (auth module owns the whole response: login / redirect / 401)
+   ▼  user   (cached as req.user / ws.user; user.workspaces = what you can see)
+presence gate   (shell, mechanical)   ─ boundary: is this module in user.workspaces?
+   │   └─ no ──▶ 403
+   ▼  yes
+authorize(req, user, target)          ─ permission: may you do THIS, here, with this payload?
+   │   └─ falsy / throw ──▶ 403        (auth module; OPTIONAL — omit it and presence alone gates)
+   ▼  ok
+module router                          ─ the untrusted module runs ONLY now
+```
+
+- **`authenticate(req, defaultUser)` — *who are you?*** Returns the `user` (whose `user.workspaces` is the access view) or `null`. `null` means *not signed in* → `handleUnauth` takes over the entire response. It runs on **every** surface — page, API, asset, and the WS upgrade — and its result is reused as `req.user` / `ws.user`. It must stay cheap (a session lookup): it's also re-run on every live WS socket each `revalidateMs`.
+
+- **presence — *may you see this module?*** Between the hooks, the shell matches the request's module (`<ws>/<id>`) against the set built from `user.workspaces` (`userModuleSet`). Not in it → `403`, the request dies here. This is the *same* decision the rail and the WS ACL make, it needs no auth-module code, and it runs whenever auth is configured. The configured auth module's own routes are exempt — you can't gate the gate.
+
+- **`authorize(req, user, target)` — *may you do this exact thing?*** Runs only for `/api/<ws>/<id>` requests that passed presence. `target = { qualifiedId, method, path }`, and `req.json()` is available — so the hook can decide on the verb (read vs write), the sub-path, or the **payload itself**. Return falsy (or throw) → `403`; the module router never runs. It's **optional**: omit it and presence alone gates (the right default for instances that don't need read/write yet).
+
+**Why two hooks, not one.** `authenticate` *can* see the request — so why not refuse there? Because folding authorization in overloads it on three axes: **outcome** — `authenticate`'s `null` means "log in" (a 401/takeover), but a below-module denial means "you're in, just not for this" (a 403, no redirect); **input** — payload checks need the parsed body, which `authenticate` never gets (it also runs on WS upgrades and assets, where there is no body); **lifecycle** — `authenticate`'s answer ("who you are") is cheap and reused across the bootstrap, the WS ACL, and the re-validation tick, whereas a per-request, per-payload verdict is none of those. Two hooks with clean contracts — *who are you* vs *may you do this* — beat one hook that has to branch on the surface it's running for.
 
 ## The auth module
 
@@ -16,16 +93,24 @@ With `auth: false` (or unset), **the shell does not gate anything**. Every reque
 
 ### The contract
 
-The auth module exports four things:
+The auth module's backend exports — `authenticate` is the only required one; the rest are optional:
 
 ```js
 // auth/backend.js
 export default {
-  // Per-request gate. Called for every request — page or API.
-  // Free-form: sees full URL, headers, body. May refuse based on session,
-  // URL pattern, role, individual document — anything.
-  // Returns the user object the shell uses for this request, or null.
+  // IDENTITY. Called for every request — page, API, asset, WS upgrade.
+  // Free-form: sees full URL + headers (cookies). May refuse based on session,
+  // URL pattern, role — anything. Returns the user object the shell uses for
+  // this request (user.workspaces = the access view), or null → handleUnauth.
   async authenticate(req, defaultUser) { ... },
+
+  // PERMISSION (optional). Runs only for /api/<ws>/<id> requests that passed
+  // the shell's presence gate, AFTER authenticate and BEFORE the module router.
+  // target = { qualifiedId, method, path }. `await req.json()` reads the body
+  // (memoized — the module handler gets the same parse). Return falsy or throw
+  // → 403, and the module never runs. This is where below-the-boundary policy
+  // lives: read vs write, sub-resource rules, payload inspection.
+  async authorize(req, user, target) { ... },
 
   // Owns the entire response when authenticate returned null.
   // Sets status (401/403/redirect/...), body, takeover render — whatever.
@@ -57,15 +142,20 @@ The shape the shell injects into every page bootstrap and sets as `req.user` on 
 
 ```js
 {
-  id,                // required; uniquely identifies this user
-  name?,             // display name
-  avatar?,           // url
-  workspaces?,       // [{ id, name?, modules: [{ id, meta }] }]
+  id,                // uniquely identifies this user — set it (the shell uses it for /_atelier/whoami)
+  name?,             // display name (chrome shows it; falls back to a local pref when absent)
+  avatar?,           // url (convention; no shell behavior)
+  workspaces?,       // [{ id, name?, modules: [{ id, meta?, access? }] }]  — see below
+  logout?,           // url the chrome POSTs to sign out (e.g. '/api/global/auth/logout');
+                     //   present → the chrome shows a "Sign out" item. Convention, not shell-read.
   // anything else the auth module wants modules or chrome to consume
 }
 ```
 
-Everything except `id` is optional. The chrome reads `user.workspaces` to populate the LeftRail and the picker. Modules read whatever fields they care about.
+What each consumer relies on:
+- **Shell** hard-depends only on `id` and `workspaces[].id` + `workspaces[].modules[].id` — that set is the security boundary (presence gate + WS ACL). `workspaces[].modules[].access` (`'read'`|`'write'`) is read by `authorize` (it's what the auth module carries; the shell passes it through).
+- **Chrome** reads `name`, `workspaces[].name`, `workspaces[].modules[].meta` (rail), and `logout` (sign-out).
+- Everything else is convention the auth module adds for modules/chrome; the shell ignores it.
 
 **`user.workspaces` is the ground truth** for "what does this user have access to." Each entry includes `modules` — the list of modules visible to this user in that workspace. The synthetic `global` workspace always appears at index 0 with whatever global modules the user can see; non-global workspaces follow in alphabetical order.
 
@@ -108,24 +198,38 @@ When `auth` is off (the default), the shell uses `defaultUser` as-is — the zer
 
 For page requests, the user object is injected into the bootstrap as `window.__ATELIER__.user`. The client renders the rail, topbar, and workspace picker from that object — no fetch, no API call. A single server-side string replace produces the rail.
 
-For API requests, `req.user` is set on the request the module receives.
+For `/api/<ws>/<id>/…` requests, after `req.user` is set the shell applies the module boundary before dispatching to the module: **(a)** the **presence gate** — the request's module must be in `user.workspaces` (else `403`); **(b)** the optional **`authorize`** hook — if the auth module exports it, the shell calls `authorize(req, user, { qualifiedId, method, path })` and a falsy/thrown result is a `403`. Only then does the module's router run. The configured auth module's own routes skip both. See the [request lifecycle](#the-request-lifecycle-authenticate--authorize) above.
 
 #### Auth runs before the index responds
 
 The shell's `serveIndex` calls `authenticateRequest` **first**, before any workspace inference, before any 302 canonicalization, before any cookie set. This means a logged-out visitor never sees workspace-membership info leak in headers or in the HTML — the unauth handler owns the response start to finish.
 
-#### Order of layers in the HTTP handler
+#### Gating at a glance — lanes & exemptions
 
-```
-/  or /index.html       → serveIndex (auth-first)
-/assets/*               → public shell assets (no auth) — needed for the takeover bundle to load
-/modules/<ws>/<id>/...  → AUTH-GATED module assets
-/_atelier/whoami        → AUTH-GATED identity probe
-/api/<ws>/<id>/...      → AUTH-GATED module API
-/<ws>/, /<ws>/<id>      → SPA fallback → serveIndex (auth-first)
-```
+Every request lane, what gates it, and the special cases — collected so none is a surprise. The shell enforces the module boundary; the auth module owns everything finer.
 
-The auth module's `authenticate` is expected to whitelist its own bundle path (`/modules/global/auth/...`) and its own login endpoints (`/api/global/auth/login`, etc.) so unauthenticated visitors can fetch them during the takeover render. This is module-side convention, not shell-enforced.
+| Lane | Gate | Special cases / exemptions |
+| --- | --- | --- |
+| `/assets/*` — shell JS/CSS | **none (public)** | Served pre-auth so the login takeover can load. |
+| `/` · `/<ws>/<id>` — page / bootstrap | `authenticate` (auth-first) | Unauth → `handleUnauth` owns the whole response. **The chrome isn't loaded pre-auth**, so the auth module ships its own takeover design. |
+| `/_atelier/whoami` | `authenticate` | `200` authed / `401` not — drives the connection banner. |
+| `/modules/<ws>/<id>/*` — bundles | `authenticate` **only** | **Not** presence-gated — bundles are code, not tenant data. This is why the chrome bundle (and every module bundle) loads for any authed user. |
+| `/api/<ws>/<id>/*` — module API | `authenticate` → **presence** → **`authorize`** | Exempt from presence + authorize: the **auth module's own routes** (can't gate the gate) and **chrome / `hidden` infra modules** (in nobody's `workspaces`, but shared scaffolding — e.g. the chrome's `/docs`). |
+| WS `/_atelier/ws` — frames | per-frame **ACL** (presence) | `'shell'` topic **always** reaches every client (hot-reload + shell events, never module data). Read and write both receive (level is an HTTP concern). **No `global` exception** — global modules are gated per-user. Sub-room / infra-topic ACL not yet wired. |
+| **ungated** — `auth: false` (default) | **none** | Every request gets the full-access `defaultUser` (`id: 'local'`); presence / authorize / ACL are all no-ops. |
+
+The auth module's `authenticate` is expected to whitelist its own bundle path (`/modules/global/auth/...`) and its own login endpoints (`/api/global/auth/login`, etc.) — by returning a synthetic guest for those paths — so unauthenticated visitors can fetch them during the takeover. This is module-side convention, not shell-enforced.
+
+#### HTTP authorization: presence gate + `authorize`
+
+`authenticate` answers "is there a user." It does **not**, on its own, stop an authed user from calling *another tenant's* module API — the request would otherwise dispatch straight to the module router, and the (untrusted) module would be the only thing between the caller and the data. So for every `/api/<ws>/<id>/…` request the shell adds two trusted layers in front of the module router (the HTTP twin of the WS ACL below):
+
+1. **Presence gate (shell, mechanical).** The request's module (`<ws>/<id>`) must be in `userModuleSet(user)` — the exact set built from `user.workspaces`, shared with the rail and the WS ACL. Not in it → `403`. This closes the cross-tenant hole with no auth-module code, and it's the *same* boundary on all three pillars.
+2. **`authorize` (auth module, optional).** If exported, it runs after presence and before dispatch, with `target = { qualifiedId, method, path }` and a memoized `req.json()` — so it can gate on verb (read/write), sub-path, or payload. Falsy/throw → `403`. A throw may carry `statusCode` (e.g. a `413` propagated from reading an oversized body); otherwise the shell sends `403`.
+
+Both layers exempt two things: (a) the configured **auth module's own** qualifiedId — you can't gate the gate (login must be reachable), and it governs its own surface through `authenticate`; and (b) **chrome / `hidden` infra modules** — they're excluded from `buildDefaultUser`, so they're in nobody's `user.workspaces` and the presence gate would `403` them for everyone, but the chrome (and its API, e.g. `/docs`) is shared scaffolding every authed user loads, not tenant data. With no auth module the user is the full-access `defaultUser`, so the presence gate is a no-op and `authorize` is never called.
+
+**Assets are *not* presence-gated.** `/modules/<ws>/<id>/…` stays auth-gated (logged-in only) but not restricted to your own modules: bundles are code shipped to the browser, not tenant data, and presence-gating them would block the (hidden, often un-railed) chrome bundle that every client must load. The tenant-data boundary is the API (`/api`) + WS frames; that's what these two layers and the WS ACL cover.
 
 ### WebSocket gating
 
@@ -249,33 +353,23 @@ A module's `backend.js` and `frontend.jsx` are identical whether the module live
 
 **Module (one explicit pattern, frontend-only):**
 
-The frontend bundle is shipped to the browser; the browser sets `import.meta.url` to the URL it loaded it from. The module derives its API base and WS topic from there:
+The frontend bundle is shipped to the browser; the browser sets `import.meta.url` to the URL it loaded it from. Pass that to the shell helper, which derives the module's workspace-aware identity:
 
 ```jsx
 // kanban/frontend.jsx — works at /modules/global/kanban/ and /modules/<ws>/kanban/.
-//
-// The shell extracts `meta` server-side at discovery by importing this file
-// from a `data:` URL. `new URL('.', dataUrl)` throws there, so the derivation
-// is wrapped in try/catch with an empty-string fallback. In the browser the
-// import URL is a real path and the math runs as designed.
-const ROUTE = (() => {
-  try {
-    return new URL('.', import.meta.url).pathname
-      .replace(/^\/modules\//, '').replace(/\/$/, '');
-  } catch { return ''; }
-})();
-const API = '/api/' + ROUTE;     // '/api/global/kanban' or '/api/<ws>/kanban'
-const TOPIC = ROUTE;             // 'global/kanban' or '<ws>/kanban'
+const self = window.__atelier.self(import.meta.url);
+// self.workspace · self.id · self.qid · self.api ('/api/<ws>/kanban') · self.topic ('<ws>/kanban')
 
-// Use them everywhere:
-fetch(`${API}/spaces`);
-window.__atelier.subscribe(TOPIC, (frame) => { /* … */ });
+fetch(`${self.api}/spaces`);
+self.subscribe((frame) => { /* … */ });        // listens on self.topic
 ```
 
-| `import.meta.url` (browser-set at load) | `ROUTE` | `API` | `TOPIC` |
+| `import.meta.url` (browser-set at load) | `self.qid` | `self.api` | `self.topic` |
 |---|---|---|---|
 | `…/modules/global/kanban/frontend.js` | `global/kanban` | `/api/global/kanban` | `global/kanban` |
 | `…/modules/bigcorp/kanban/frontend.js` | `bigcorp/kanban` | `/api/bigcorp/kanban` | `bigcorp/kanban` |
+
+`self()` just wraps `new URL('.', import.meta.url)` parsing — there's no shell magic, no injected identifier; the bundle reads its own URL. (Server-side, `meta` is extracted by importing the file from a `data:` URL where that parsing yields an empty id — harmless, since `self()` is only called in the browser.)
 
 Why this shape:
 
@@ -286,15 +380,15 @@ Why this shape:
 
 #### Cross-module calls
 
-A module that needs to call another module's API derives the workspace from `ROUTE` and addresses the peer in the same workspace:
+A module that needs to call another module's API uses its own workspace (from `self`) and addresses the peer in the same workspace:
 
 ```js
-const WS = ROUTE.split('/')[0];                // 'global' or '<workspace>'
-const AGENTS_API = `/api/${WS}/agents`;        // peers in the same workspace
-const AGENTS_TOPIC = `${WS}/agents`;
+const self = window.__atelier.self(import.meta.url);
+const SEARCH_API = `/api/${self.workspace}/search`;   // a peer in the same workspace
+const SEARCH_TOPIC = `${self.workspace}/search`;
 ```
 
-This means a workspace-scoped activity calls a workspace-scoped agents; a global activity calls a global agents. Cross-workspace calls (e.g. `bigcorp/activity` → `global/agents`) are an explicit policy choice the calling module makes — they're not automatic.
+This means a workspace-scoped module calls a workspace-scoped peer; a global module calls a global peer. Cross-workspace calls (e.g. `bigcorp/kanban` → `global/search`) are an explicit policy choice the calling module makes — they're not automatic.
 
 #### Checklist for making a module workspace-portable
 
@@ -312,8 +406,8 @@ Modules that follow this checklist work as both global modules AND inside any wo
 - **No helpers for the auth module.** No `serveTakeover`, no `isApiRequest`, no shared utility module. The auth module re-implements anything it needs — those handful of lines belong with the policy that uses them. Atelier is not a helper library; that is what modules are for.
 - **No event or hook for the rail.** The bootstrap is injected once per page load; hot-reload triggers full reload via the existing WS ping. Same mechanism as today.
 - **No 401-vs-403 convention enforced.** The auth module sets whatever status it wants in `handleUnauth`. Modules consuming gated APIs read the auth module's docs. (Exception: `/_atelier/whoami` must follow 200/401 so the connection banner can distinguish offline from unauthed.)
-- **No `Denied` component, no `meta.public` opt-out, no role/ACL system in the shell.** Everything beyond "is there a user?" lives in the auth module's data and code.
-- **No per-document/per-record ACL.** The WS ACL is per-*module* (driven by `user.workspaces[].modules`); filtering *which records within a module* a user may see is the module's own job, enforced in its handlers.
+- **No `Denied` component, no `meta.public` opt-out, no role/ACL system in the shell.** Everything beyond "is there a user?" and the mechanical module boundary (presence) lives in the auth module's data and code.
+- **No per-document/per-record ACL primitive.** The shell's gates are per-*module* (the presence gate and the WS ACL, both driven by `user.workspaces[].modules`). Going *finer* than the module — read vs write, which records within a module — is the **auth module's** job via the `authorize` hook (trusted, payload-aware), **not** the feature module's handlers: a feature module may be vibe-coded, so its own checks are a convenience, never the boundary.
 
 ### Summary of shell responsibilities
 
@@ -322,7 +416,7 @@ Modules that follow this checklist work as both global modules AND inside any wo
 3. **Scoped router per mount** — each module gets a sub-router rooted at `/api/<workspace>/<id>`; module source uses relative paths.
 4. **Auth slot** — the `auth` setting names the gating module (path or global id), or `false` (default) for ungated. A stray `authenticate` export does not gate; only the configured module does. Workspace modules aren't eligible.
 5. **`defaultUser` builder** — synthesized from discovery on every request.
-6. **Per-request dispatch** — call `authenticate(req, defaultUser)` when `auth` is configured; on null, call `handleUnauth`; otherwise set `req.user` and route.
+6. **Per-request dispatch + HTTP authorization** — call `authenticate(req, defaultUser)` when `auth` is configured; on null, call `handleUnauth`; otherwise set `req.user`. For `/api/<ws>/<id>/…` then enforce the module boundary before routing: the presence gate (module must be in `user.workspaces`) and, if exported, `authorize(req, user, target)` — either failing is a `403`. The auth module's own routes and chrome/`hidden` infra modules are exempt.
 7. **WebSocket gate + per-module ACL** — `/_atelier/ws` upgrades go through the same `authenticate` slot. On null, the shell writes a bare `401` and destroys the socket. On allow, `ws.user` is attached and a per-module topic ACL (`ws.allowed`) is precomputed from `user.workspaces`; the fan-out delivers a module's frames only to clients that can see it. Live sockets are re-validated on an interval (`revalidateMs`), so revocation and permission changes propagate without a reconnect.
 8. **`/_atelier/whoami` identity probe** — gated by the same `authenticate`; returns 200 JSON for authed users, 401 for unauthed. Drives the connection banner.
 9. **`client.jsx` takeover branch** — when `boot.takeover` is present, mount the auth bundle full-screen instead of `AppShell`.
