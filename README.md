@@ -1,10 +1,34 @@
-# Atelier
+<!-- Hero banner. Animated SVG (SMIL) — renders and animates on GitHub via <img>.
+     Hosted in github.com/pA1nD/pa1nd-media (not in this repo) to keep it lean. -->
+<p align="center">
+  <img src="https://raw.githubusercontent.com/pA1nD/pa1nd-media/main/atelier/banner-painter-animated.svg" alt="Atelier: a luminous painter creating agent helpers in a starlit seaside studio" width="100%" />
+</p>
+<!-- Static fallback if GitHub ever fails to animate the SVG:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/pA1nD/pa1nd-media/main/atelier/banner-painter.jpg" alt="Atelier: a luminous painter creating agent helpers in a starlit seaside studio" width="100%" />
+</p>
+-->
 
-The app shell + module runner. Atelier discovers sibling module directories, mounts their backends, serves their frontends, and renders whatever **chrome** (theme) you install around them — one runtime hosting many small modules.
 
-A module is just a directory with a `frontend.jsx` and/or a `backend.js`. The shell handles routing, bundling, hot reload, a shared real-time WebSocket, workspaces, and (optional) auth, so a module stays a file or two of React + a handful of route handlers.
+<h3 align="center">Become the creator.</h3>
 
-The shell ships **zero pixels and zero assumptions**: no default theme, no install step, no dev/prod notion. An instance is a folder you run.
+<p align="center">
+  A framework for agent-driven development. You command the agents that build;<br>
+  the shell turns each folder into a live, multi-tenant app — and stays the only boundary you trust.
+</p>
+
+---
+
+Atelier is an **app shell + module runner**. Point your agent at a folder — a `frontend.jsx` and/or a `backend.js` — and it becomes a routed, hot-reloading, real-time module. The shell handles routing, bundling, a shared real-time WebSocket, workspaces, and (optional) auth, so a module stays a file or two of React and a handful of route handlers.
+
+```
+myinstance/
+  atelier/            the shell — four files, ~3k lines
+  notes/              →  /global/notes      a module (a folder with a frontend.jsx)
+  $acme/board/        →  /acme/board         a workspace module
+```
+
+The whole shell is **four files (~3k lines)**, and your modules ship **zero dependencies of their own** — no React, no bundler, no WebSocket client to vendor. It ships **zero pixels and zero assumptions**: no default theme, no install step, no dev/prod notion. An instance is a folder you run.
 
 > **Platform.** Atelier runs anywhere Node 24+ does — there is no OS-specific install layer (you run it; your process manager / PaaS / reverse proxy is your concern).
 
@@ -66,6 +90,10 @@ Run it after any change to the shell (`server.js`, `build.js`, `discovery.js`, `
 ## Contributing
 
 The shell (`server.js`, `client.jsx`, `build.js`, `discovery.js`) is cross-cutting — changes there are their own task, separate from any single module. If a module needs something the shell doesn't provide, the convention is to name the gap and propose extending the shell rather than reaching around it. Keep the surface small.
+
+## The name
+
+An *atelier* is a painter's studio. The name comes from an old idea — God is the painter, we are the painting; the creator stands outside what's created. Atelier is where that inverts: you step into the painter's role, and the agents become your servants, the way we are to a creator we can't fully know. The studio is where the created learns to create.
 
 ## License
 
