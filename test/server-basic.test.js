@@ -4,6 +4,7 @@
 // reserved-prefix 404, and the WS multiplex round-trip.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
@@ -95,6 +96,21 @@ test('private-by-name asset guards deny backend.js + dotfiles', async () => {
 test('path traversal in module assets is denied', async () => {
   const r = await fetch(server.base + '/modules/global/alpha/..%2f..%2fpackage.json')
   assert.equal(r.status, 404)
+})
+
+test('a symlink escaping the module dir is denied (realpath containment)', async () => {
+  // Plant a symlink INSIDE the module pointing at a real file OUTSIDE it.
+  // Lexical path.resolve would pass it; the realpath re-check must reject it.
+  const link = path.join(FIXTURE, 'alpha', 'escape.txt')
+  const target = path.join(HERE, '..', 'server.js')   // real, outside the module
+  try { fs.unlinkSync(link) } catch {}
+  fs.symlinkSync(target, link)
+  try {
+    const r = await fetch(server.base + '/modules/global/alpha/escape.txt')
+    assert.equal(r.status, 404)
+  } finally {
+    fs.unlinkSync(link)
+  }
 })
 
 test('/_atelier/whoami returns identity JSON (no auth → local)', async () => {

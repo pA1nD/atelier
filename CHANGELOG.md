@@ -2,6 +2,21 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.6.1
+
+**Docs reorganized into four navigable pages + two non-breaking security fixes for the asset/API boundary.** A contract audit confirmed 0.6.0's surface needs no breaking changes for 1.0; this patch closes two boundary gaps it surfaced (fixed *before* any freeze, not after) and makes the docs both accurate and navigable.
+
+### Security
+- **Symlink-safe module asset serving** — the `/modules/<ws>/<id>/<rest>` containment check was lexical (`path.resolve`), which doesn't follow symlinks; a symlink planted inside a module dir could escape it and serve host files / another tenant's `data/` to any authed user. It now re-asserts containment against the real (symlink-resolved) path. Verified it still serves legit assets through symlinked module dirs (the symlinked-instance shape, e.g. a path-mounted chrome).
+- **A module can no longer self-exempt from the `/api` gate** — the infra-exemption keyed off the *target module's own* `meta.chrome`/`meta.hidden`, so a (possibly vibe-coded) module could remove its entire API from both the presence gate and `authorize` by declaring `hidden: true`. It now keys off the server-resolved active chrome (`resolveChromeQid`) only. The trusted layer stays unbypassable by module declaration — restoring the core invariant that a feature module is never the boundary.
+
+### Docs
+- Split the single docs page into four renderer pages — **Atelier**, **Modules**, **Workspaces**, **Auth** — each its own page in the docs viewer; added a consolidated **Folder & file conventions** table in Modules (every reserved name, prefix, and special file in one place) that the other pages point at instead of duplicating.
+- Accuracy pass against the code: a standalone unknown id is **fatal** (was "never fatal"); only config **path** misses warn (bare-name typos drop silently); `$<reserved>/` warns (was "silently skipped"); backend hot-reload fires on `.js` only; updated the gate-exemption wording to match the fix above; verified every cross-doc anchor resolves.
+
+### Tests
+- Added a symlink-escape guard (an asset can't escape its module dir via symlink) and a "hidden module can't self-exempt" regression; the `http-acl` `widget` fixture is now the active chrome. Suite now 60.
+
 ## 0.6.0
 
 **Multi-tenant HTTP access control + the `authorize` hook, workspace-aware module WebSockets, and a contract-accuracy pass toward a stable 1.0.** The HTTP API now enforces the same per-module boundary the WS ACL does, and the auth module can enforce *below* the boundary (read/write, payload) — completing the trusted-enforcement model across all three surfaces (frontend, HTTP, WS). Enforcement lives only in the shell and the trusted auth module; a feature module (which may be vibe-coded) is never the boundary. A contract audit found no breaking changes needed for 1.0 — the surface is additive-extensible; this release makes the docs match it.

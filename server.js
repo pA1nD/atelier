@@ -1253,26 +1253,39 @@ function resolveAssetSource(pathname) {
     // Final containment check — anything outside the module's dir is denied.
     if (!abs.startsWith(absRoot + path.sep) && abs !== absRoot) return null;
 
+    // Symlink-safe containment. `path.resolve` is purely lexical — it does NOT
+    // follow symlinks, so a symlink planted inside the module dir could point
+    // outside it (a module author could expose host files / another tenant's
+    // data to any authed user). Re-assert containment against the real,
+    // symlink-resolved path of whatever we're about to serve.
+    let realRoot;
+    try { realRoot = fs.realpathSync(absRoot); } catch { return null; }
+    const confined = (p) => {
+      let real;
+      try { real = fs.realpathSync(p); } catch { return false; }
+      return real === realRoot || real.startsWith(realRoot + path.sep);
+    };
+
     // CSS request → .css source if it exists (tailwind/oxide build).
     if (abs.endsWith('.css')) {
-      return fs.existsSync(abs) ? { kind: 'css', src: abs } : null;
+      return fs.existsSync(abs) && confined(abs) ? { kind: 'css', src: abs } : null;
     }
 
     // JS request → prefer JSX source if a sibling .jsx exists.
     if (abs.endsWith('.js')) {
       const jsxCandidate = abs.slice(0, -3) + '.jsx';
-      if (fs.existsSync(jsxCandidate)) return { kind: 'jsx', src: jsxCandidate };
-      if (fs.existsSync(abs)) return { kind: 'jsx', src: abs };  // raw .js — esbuild handles plain JS fine
+      if (fs.existsSync(jsxCandidate) && confined(jsxCandidate)) return { kind: 'jsx', src: jsxCandidate };
+      if (fs.existsSync(abs) && confined(abs)) return { kind: 'jsx', src: abs };  // raw .js — esbuild handles plain JS fine
       return null;
     }
 
     // .jsx URL — direct match (some imports may be explicit).
-    if (abs.endsWith('.jsx') && fs.existsSync(abs)) {
+    if (abs.endsWith('.jsx') && fs.existsSync(abs) && confined(abs)) {
       return { kind: 'jsx', src: abs };
     }
 
     // Other file types — serve raw with a content-type guess.
-    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile() && confined(abs)) {
       const ext = path.extname(abs).toLowerCase();
       return { kind: 'raw', src: abs, contentType: RAW_CONTENT_TYPES[ext] || 'application/octet-stream' };
     }
@@ -1893,19 +1906,21 @@ const server = http.createServer(async (req, res) => {
   //
   // Exempt from both: (a) the configured auth module's OWN routes — you can't
   // gate the gate (login must be reachable), and it governs its own surface
-  // through `authenticate`; (b) infrastructure modules — a chrome or any
-  // `hidden` module. Infra is excluded from `buildDefaultUser`, so it's in
-  // nobody's `user.workspaces` and the presence gate would 403 it for every
-  // user; but the chrome (and its API, e.g. /docs) is shell scaffolding every
-  // authed user loads, not tenant data. Ungated instances skip this whole
-  // block — `findAuthModule()` is null, so there's nothing to enforce.
+  // through `authenticate`; (b) the ONE active chrome — resolved server-side
+  // via `resolveChromeQid`, NEVER trusted from a module's self-declared `meta`.
+  // The chrome is excluded from `buildDefaultUser`, so it's in nobody's
+  // `user.workspaces` and the presence gate would 403 it for every user; but
+  // the chrome (and its API, e.g. /docs) is shell scaffolding every authed user
+  // loads, not tenant data. A feature module CANNOT self-exempt by exporting
+  // `meta.hidden`/`meta.chrome` — only the resolved chrome qid is waved through.
+  // Ungated instances skip this whole block — `findAuthModule()` is null, so
+  // there's nothing to enforce.
   if (url.pathname.startsWith('/api/')) {
     const seg = url.pathname.split('/');            // ['', 'api', <ws>, <id>, …]
     const reqQid = seg[2] && seg[3] ? `${seg[2]}/${seg[3]}` : null;
     const auth = findAuthModule();
     const authQid = auth?.m.qualifiedId;
-    const reqMeta = (reqQid && metaByQId.get(reqQid)) || {};
-    const isInfra = reqMeta.chrome === true || reqMeta.hidden === true;
+    const isInfra = reqQid != null && reqQid === resolveChromeQid(metaByQId);
     if (reqQid && authQid && reqQid !== authQid && !isInfra) {
       if (!userModuleSet(apiUser).has(reqQid)) {
         res.writeHead(403, { 'Content-Type': 'application/json' });

@@ -68,13 +68,21 @@ describe('HTTP presence gate + authorize (auth = gate)', () => {
     assert.equal((await r.json()).id, 'alice')
   })
 
-  test('infrastructure modules (chrome/hidden) are exempt from the presence gate', async () => {
-    // global/widget is `hidden` → in nobody's workspaces, so the presence gate
-    // would 403 it; but infra (a chrome, or its /docs API) must reach every
-    // authed user. alice has no widget grant, yet reaches it.
+  test('the active chrome is exempt from the presence gate', async () => {
+    // global/widget is the resolved chrome → in nobody's workspaces, so the
+    // presence gate would 403 it; but the chrome (and its API, e.g. /docs)
+    // must reach every authed user. alice has no widget grant, yet reaches it.
     const r = await fetch(`${server.base}/api/global/widget/ping`, as('alice'))
     assert.equal(r.status, 200)
     assert.equal((await r.json()).infra, true)
+  })
+
+  test('a `hidden` feature module CANNOT self-exempt — its API stays gated', async () => {
+    // global/rogue exports `meta.hidden` hoping to skip the gate like the
+    // chrome. The exemption is keyed off the server-resolved chrome, NOT
+    // self-declared meta, so rogue stays presence-gated for everyone.
+    assert.equal((await fetch(`${server.base}/api/global/rogue/ping`, as('alice'))).status, 403)
+    assert.equal((await fetch(`${server.base}/api/global/rogue/ping`, as('bob'))).status, 403)
   })
 
   test('unauthenticated → handleUnauth owns the 401', async () => {
