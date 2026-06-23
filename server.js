@@ -1294,10 +1294,12 @@ function resolveAssetSource(pathname) {
   return null;
 }
 
-// Recursively walk a directory and collect every .jsx/.js file path.
-// Skips node_modules / data / dotfiles. Used for chrome modules whose
-// Tailwind classes live across many sibling component files (catalyst-
-// style kits), not just frontend.jsx.
+// Recursively collect a module's client-reachable .jsx/.js file paths for the
+// CSS class scan. Skips exactly what the asset server refuses to serve, so the
+// scanner sees only source that can render in the browser: node_modules / data
+// dirs, backend.js (server-only), and [._-]-prefixed names (private by
+// convention — mirrors resolveAssetSource). A module's Tailwind classes may
+// live across many sibling files, not just frontend.jsx.
 function walkJsxFiles(dir) {
   const out = [];
   const skip = new Set(['node_modules', 'data']);
@@ -1305,33 +1307,28 @@ function walkJsxFiles(dir) {
     let names;
     try { names = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const ent of names) {
-      if (ent.name.startsWith('.') || skip.has(ent.name)) continue;
+      if (/^[._-]/.test(ent.name) || skip.has(ent.name)) continue;
       const p = path.join(d, ent.name);
-      if (ent.isDirectory()) walk(p);
-      else if (/\.(jsx|js)$/.test(ent.name)) out.push(p);
+      if (ent.isDirectory()) { walk(p); continue; }
+      if (ent.name === 'backend.js') continue;          // server-only, never rendered
+      if (/\.(jsx|js)$/.test(ent.name)) out.push(p);
     }
   };
   walk(dir);
   return out;
 }
 
-// Every JSX source feeds class names into the CSS scan. For chrome modules
-// (detected by sync meta extraction over cached metas), recursively scan
-// every .jsx in the chrome dir — kits like catalyst put each component in
-// its own file and the scanner needs to see all of them.
+// Every client-reachable source file feeds class names into the CSS scan. A
+// module (or the chrome) may split its UI across sibling files, so we walk each
+// module's dir recursively rather than reading frontend.jsx alone — a class
+// anywhere in a module's client source gets generated. walkJsxFiles skips
+// server-only / private files. Chrome and non-chrome modules are scanned
+// identically; the scan no longer needs each module's meta.
 function cssScanSources() {
   const out = [path.join(HOST_DIR, 'client.jsx')];
   for (const m of getModules()) {
     if (!m.hasFrontend) continue;
-    // Use cached meta (sync) — getMetaByQId fills it on every serveIndex,
-    // and metaCache survives across requests.
-    const cached = metaCache.get(m.qualifiedId);
-    const meta = cached?.meta || {};
-    if (meta.chrome === true) {
-      out.push(...walkJsxFiles(m.dir));
-    } else {
-      out.push(path.join(m.dir, 'frontend.jsx'));
-    }
+    out.push(...walkJsxFiles(m.dir));
   }
   return out;
 }
@@ -1963,12 +1960,16 @@ const server = http.createServer(async (req, res) => {
   // SPA fallback. Workspace + id is in the URL:
   //   /<ws>/                — workspace home
   //   /<ws>/<id>            — module page
-  // Both serve the same index.html; the client parses the URL on render.
+  //   /<ws>/<id>/<sub…>     — module sub-route (the module owns everything after
+  //                           ws+id; surfaced client-side via __atelier.useRoute)
+  // All serve the same index.html; the client parses the URL on render.
   //
   // Reserved prefixes (/api/, /assets/, /modules/, /_atelier/) must NOT fall
   // through here — an unmatched API route should 404 cleanly instead of
   // serving HTML. The router and asset handler above already claim the happy
-  // paths; the explicit prefix check catches the mismatched ones.
+  // paths; the explicit prefix check catches the mismatched ones. Module assets
+  // live under /modules/ and /api/, never under /<ws>/<id>/…, so the deep-path
+  // match below can't shadow an asset.
   const isReservedPrefix =
     url.pathname.startsWith('/api/') ||
     url.pathname.startsWith('/assets/') ||
@@ -1976,7 +1977,7 @@ const server = http.createServer(async (req, res) => {
     url.pathname.startsWith('/_atelier/');
   if (req.method === 'GET'
       && !isReservedPrefix
-      && /^\/[a-zA-Z0-9][a-zA-Z0-9_-]*(?:\/(?:[a-zA-Z0-9][a-zA-Z0-9_-]*)?)?\/?$/
+      && /^\/[a-zA-Z0-9][a-zA-Z0-9_-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9_-]*(?:\/.*)?)?\/?$/
         .test(url.pathname)) {
     await serveIndex(req, res);
     return;

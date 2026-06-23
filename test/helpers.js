@@ -6,7 +6,7 @@
 // `<fixture>/atelier` so ROOT resolves to the fixture dir — modules are
 // discovered there, while HOST_DIR (where server.js lives) still serves the
 // shell assets + builtin chrome. PORT is a free ephemeral port so tests never
-// collide with a running dev (5172) or prod (1844) instance.
+// collide with a running instance (default 1844).
 import { spawn } from 'node:child_process'
 import net from 'node:net'
 import path from 'node:path'

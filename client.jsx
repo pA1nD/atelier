@@ -9,7 +9,8 @@
  *   • Establishes the shared WebSocket multiplex (window.__atelier.subscribe)
  *   • Resolves which chrome module is active (server tells us via
  *     window.__ATELIER__.chromeQid) and dynamic-imports its bundle
- *   • Owns URL routing (`/<workspace>/<id>`)
+ *   • Owns URL routing (`/<workspace>/<id>`) and exposes the per-module
+ *     sub-route below it to modules (window.__atelier.useRoute → /<ws>/<id>/<rest>)
  *   • Loads each accessible module's bundle (parallel) and tracks state
  *   • Renders the chrome component with active-module state
  *   • Handles takeover boot (auth handed off) by rendering the auth bundle
@@ -171,24 +172,67 @@ const { useState, useEffect, useRef } = React;
  *                       workspace's home.
  *   /<ws>/             workspace home — no module selected.
  *   /<ws>/<id>         module page.
+ *   /<ws>/<id>/<rest…> module sub-route — the shell owns ws+id; `rest` is the
+ *                       active module's own space, surfaced via
+ *                       window.__atelier.useRoute() (below).
  * ========================================================================= */
 function parseUrl() {
   const p = window.location.pathname;
   const m = p.match(
-    /^\/([a-zA-Z0-9][a-zA-Z0-9_-]*)(?:\/([a-zA-Z0-9][a-zA-Z0-9_-]*))?\/?$/
+    /^\/([a-zA-Z0-9][a-zA-Z0-9_-]*)(?:\/([a-zA-Z0-9][a-zA-Z0-9_-]*)(?:\/(.*))?)?\/?$/
   );
-  if (!m) return { ws: null, id: null };
+  if (!m) return { ws: null, id: null, rest: '' };
   return {
     ws: decodeURIComponent(m[1]),
     id: m[2] ? decodeURIComponent(m[2]) : null,
+    rest: m[3] ? decodeURIComponent(m[3].replace(/\/+$/, '')) : '',
   };
 }
 
-function buildUrl(ws, id) {
+function buildUrl(ws, id, rest) {
   if (!ws) return '/';
   if (!id) return `/${encodeURIComponent(ws)}/`;
-  return `/${encodeURIComponent(ws)}/${encodeURIComponent(id)}`;
+  const base = `/${encodeURIComponent(ws)}/${encodeURIComponent(id)}`;
+  const sub = rest ? String(rest).replace(/^\/+|\/+$/g, '') : '';
+  return sub ? `${base}/${sub}` : base;
 }
+
+/* Module sub-routing API — exposed on window.__atelier so modules reach it the
+ * same way they reach `subscribe`/`self` (the chrome stays uninvolved). A module
+ * reads and drives its own subpath with:
+ *
+ *   const { path, navigate } = window.__atelier.useRoute()
+ *     path                      — subpath after /<ws>/<id> ('' at the module root)
+ *     navigate(sub, {replace})  — push (or replace) /<ws>/<id>/<sub>
+ *
+ * Back/forward, deep-links, and navigate() all re-render the calling module with
+ * the new `path` — no history.* calls or hashchange juggling in the module. The
+ * topic/qid a module subscribes on is derived from its bundle URL, not the page
+ * path, so sub-routing never affects its WebSocket subscription. */
+window.__atelier.navigate = (sub, opts) => {
+  const { ws, id } = parseUrl();
+  if (!ws || !id) return;                 // not inside a module — nothing to route
+  const target = buildUrl(ws, id, sub || '');
+  if (target !== window.location.pathname) {
+    window.history[opts && opts.replace ? 'replaceState' : 'pushState'](null, '', target);
+  }
+  window.dispatchEvent(new CustomEvent('atelier:route'));
+};
+
+window.__atelier.useRoute = () => {
+  const R = window.React;
+  const [, bump] = R.useState(0);
+  R.useEffect(() => {
+    const on = () => bump((n) => n + 1);
+    window.addEventListener('popstate', on);
+    window.addEventListener('atelier:route', on);
+    return () => {
+      window.removeEventListener('popstate', on);
+      window.removeEventListener('atelier:route', on);
+    };
+  }, []);
+  return { path: parseUrl().rest, navigate: window.__atelier.navigate };
+};
 
 /* =========================================================================
  * Module bundle loader.
@@ -304,36 +348,27 @@ function App() {
   const [loaded, setLoaded] = useState({});            // qid → load entry
   const [chromeEntry, setChromeEntry] = useState(null); // load entry for chrome
 
+  // The current workspace is derived purely from the URL — there is no separate
+  // sticky state and no sessionStorage. Navigating anywhere (rail click, picker,
+  // or a pasted URL) switches workspace because it switches the URL. `global` is
+  // a normal workspace here, not a shared baseline. `defaultWs` is only used to
+  // decide where a bare `/` lands: the first workspace with modules — and since
+  // the server orders `global` first, that's `global` whenever it has any.
   const defaultWs = (wsList.find((w) => (w.modules || []).length > 0) || wsList[0])?.id || null;
 
-  // The selected workspace is STICKY and per-tab (sessionStorage). Clicking a
-  // global module keeps you in it; only entering a workspace module (here or by
-  // opening one of its URLs directly) or the picker changes it. Different tabs
-  // hold different workspaces. Init priority: a non-global workspace in the URL
-  // (you directly opened one of its modules) → the tab's stored choice → default.
-  const wsIds = new Set(wsList.map((w) => w.id));
-  const [selectedWs, setSelectedWs] = useState(() => {
-    if (urlState.ws && urlState.ws !== 'global' && wsIds.has(urlState.ws)) return urlState.ws;
-    try { const s = sessionStorage.getItem('atelier:ws'); if (s && wsIds.has(s)) return s; } catch {}
-    return defaultWs;
-  });
-  useEffect(() => {
-    try { if (selectedWs) sessionStorage.setItem('atelier:ws', selectedWs); } catch {}
-  }, [selectedWs]);
-
-  // Canonicalize URL: with no workspace in the path, land on the selected
+  // Canonicalize URL: with no workspace in the path (`/`), land on the default
   // workspace — its `meta.primary` module if any, else its home.
   useEffect(() => {
-    if (urlState.ws || !selectedWs) return;
-    const primary = allModules.find((m) => m.workspace === selectedWs && m.meta?.primary)
+    if (urlState.ws || !defaultWs) return;
+    const primary = allModules.find((m) => m.workspace === defaultWs && m.meta?.primary)
                  || allModules.find((m) => m.meta?.primary);
     const target = primary
       ? buildUrl(primary.workspace, primary.id)
-      : buildUrl(selectedWs, null);
+      : buildUrl(defaultWs, null);
     window.history.replaceState(null, '', target);
     setUrlState(parseUrl());
-  }, [urlState.ws, selectedWs]);
-  const effectiveWorkspace = selectedWs;
+  }, [urlState.ws]);
+  const effectiveWorkspace = urlState.ws || defaultWs;
 
   // Load the chrome bundle.
   useEffect(() => {
@@ -362,11 +397,18 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // popstate → re-parse URL.
+  // popstate / programmatic sub-route nav → re-parse URL. `atelier:route` is
+  // fired by window.__atelier.navigate; ws+id are unchanged on a sub-route nav,
+  // so activeMod stays the same and the module re-renders without remounting
+  // (stable element identity → its WS subscriptions persist).
   useEffect(() => {
     const onPop = () => setUrlState(parseUrl());
     window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    window.addEventListener('atelier:route', onPop);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('atelier:route', onPop);
+    };
   }, []);
 
   // Resolve active module from URL.
@@ -375,11 +417,21 @@ function App() {
     : null;
   const activeQid = activeMod?.qid || null;
 
-  // URL points at a non-existent (ws, id) → tidy back to workspace home or root.
+  // URL points somewhere that doesn't exist → tidy back to a real place.
+  //   • /<ws>/<id> with no such module → workspace home (if the ws exists) else root.
+  //   • /<ws>/ for a workspace that doesn't exist → root.
+  // Root ('/') and a real workspace home are left alone. Redirecting to '/'
+  // lets the canonicalization effect above land on the default (global)
+  // workspace's primary module or home.
   useEffect(() => {
-    if (urlState.id === null) return;
-    if (activeMod) return;
     const wsExists = wsList.some((w) => w.id === urlState.ws);
+    if (urlState.id === null) {
+      if (!urlState.ws || wsExists) return;
+      window.history.replaceState(null, '', '/');
+      setUrlState(parseUrl());
+      return;
+    }
+    if (activeMod) return;
     const target = wsExists ? buildUrl(urlState.ws, null) : '/';
     window.history.replaceState(null, '', target);
     setUrlState(parseUrl());
@@ -428,20 +480,27 @@ function App() {
   function navigateByQid(qid) {
     const [ws, id] = qid.split('/');
     if (!ws) return;
-    // Entering a workspace module sets the workspace context; global modules
-    // are shared and leave the selected workspace untouched.
-    if (ws !== 'global') setSelectedWs(ws);
+    // Workspace follows the URL: navigating to any module — global or not —
+    // switches into that module's workspace.
     const target = id ? buildUrl(ws, id) : buildUrl(ws, null);
     if (qid && dirtyRef.current.has(qid)) { window.location.assign(target); return; }
     navigateTo(target);
   }
 
   function pickWorkspace(ws) {
-    setSelectedWs(ws);
     const curId = urlState.id;
     const preserve = curId && allModules.some((m) => m.workspace === ws && m.id === curId)
       ? curId : null;
-    window.location.assign(buildUrl(ws, preserve));
+    // Same SPA path as switching modules — every workspace's bundles are already
+    // loaded client-side and the rail/active module derive from the URL, so no
+    // full reload is needed. Hard-load only if the preserved module was marked
+    // dirty by hot reload (mirrors navigateByQid).
+    const target = buildUrl(ws, preserve);
+    if (preserve && dirtyRef.current.has(`${ws}/${preserve}`)) {
+      window.location.assign(target);
+      return;
+    }
+    navigateTo(target);
   }
 
   // Chrome resolution: wait for chrome bundle; render fallback on missing/failed.

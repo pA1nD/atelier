@@ -48,11 +48,11 @@ Symmetry. Every module has the same identity shape (`<ws>/<id>`), URL pattern, a
 
 ## Rail & picker
 
-**Rail composition.** The left rail in a workspace shows that workspace's modules **plus** the global modules — so a workspace tab still has the affordances global modules provide. When a workspace module shares its id with a global one, the workspace version wins. From inside `global`, the rail shows just global's modules. (Which modules a given *user* sees is the auth module's call — see [AUTH.md](./AUTH.md); the rail is drawn from `user.workspaces`.)
+**Rail composition.** The left rail shows **only the current workspace's own modules**. `global` is a normal workspace, not a shared baseline — its modules appear in the rail only when you're in `global`, not in every other workspace. (Which modules a given *user* sees is the auth module's call — see [AUTH.md](./AUTH.md); the rail is drawn from `user.workspaces`.)
 
-**The selected workspace is sticky, per tab.** Clicking a *global* module keeps you in your current workspace (global modules are shared, viewable from anywhere) — it doesn't snap you to `global`. The workspace changes only when you enter a *workspace* module (via the rail or by opening one of its URLs directly) or use the picker. The choice persists per browser tab (`sessionStorage`), so different tabs can hold different workspaces.
+**The current workspace is derived from the URL — nothing is persisted.** It is whatever `<ws>` the address bar holds; there is no sticky per-tab choice and no `sessionStorage`. Navigating anywhere switches workspace because it switches the URL: clicking a module in the rail, picking a workspace, or opening a `/<ws>/<id>` URL all move you into that module's workspace — `global` included. A bare `/` lands on the **default workspace**: the first one that has modules, which is `global` whenever it has any (the server lists `global` first).
 
-**The picker** (top of the LeftRail) lists every non-`global` workspace the user can access. With zero `$`-workspaces it hides entirely. Picking a workspace navigates to `/<new-ws>/<preserved-id>` (or `/<new-ws>/` if the current module doesn't exist there) — a full page reload so caches, bundles, and the WS reconnect cleanly.
+**The picker** (top of the LeftRail) lists every workspace the user can access that has at least one visible module — `global` included. Picking a workspace navigates to `/<new-ws>/<preserved-id>` (or `/<new-ws>/` if the current module doesn't exist there) via an in-page (SPA) transition — every workspace's bundles are already loaded client-side and the rail and active module both derive from the URL, so no full reload is needed and the WebSocket stays connected. It hard-reloads only when the preserved module was marked dirty by hot reload (mirrors a rail click).
 
 ## Naming rules
 

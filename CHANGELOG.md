@@ -2,6 +2,26 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.7.0
+
+**Per-module URL sub-routing (`useRoute`) + the workspace context is now derived purely from the URL.** Modules get a real, deep-linkable subpath below `/<ws>/<id>` without touching `history.*`; in exchange, the sticky per-tab workspace from 0.6.0 is gone — the address bar is the single source of truth for which workspace you're in. One additive API, one behavior change to know about (the rail no longer carries global modules into every workspace).
+
+### ⚠️ Behavior change — workspace selection & rail composition
+- **The current workspace is derived from the URL; the sticky per-tab choice (`sessionStorage('atelier:ws')`) introduced in 0.6.0 is removed.** Navigating anywhere switches workspace because it switches the URL. Clicking a **global** module now enters the `global` workspace instead of staying in your current one (the 0.6.0 "stay put" behavior is reverted).
+- **The rail shows only the current workspace's own modules.** `global` is now a normal workspace, not a shared baseline — its modules appear in the rail only when you're in `global`, no longer alongside every workspace's modules. **Upgrade note for multi-workspace instances:** a global module (global search, settings, etc.) that you relied on being present in *every* workspace's rail will no longer appear in non-`global` rails. No module API changed and nothing a module hardcoded breaks — but the on-screen rail composition does. (Rail rendering itself lives in the chrome; the shell change is the workspace derivation + what it hands the chrome.)
+- **The workspace picker now navigates in-page (SPA `pushState`)** instead of forcing a full page reload — every workspace's bundles are already loaded client-side and the rail/active module derive from the URL, so the WebSocket stays connected. It hard-reloads only when the preserved module was marked dirty by hot reload (mirrors a rail click).
+
+### Added
+- **`window.__atelier.useRoute()` → `{ path, navigate }`** — per-module URL sub-routing. The shell owns exactly two segments (`/<ws>/<id>`); everything after is the module's own free-form space. `path` is the subpath (`''` at the module root); `navigate(sub, { replace })` pushes/replaces `/<ws>/<id>/<sub>`. Back/forward, deep-links, refresh, and `navigate()` all re-render the module with the new `path` — **no remount**, so component state, effects, and WebSocket subscriptions survive (a module's WS topic is its qid, never the route). Opt-in; `location.hash`/`?query` still work. Exposed on `window.__atelier` the same way as `self`/`subscribe`, so the chrome stays uninvolved. Documented in MODULES.md → **Frontend routing**.
+- **Deep-path SPA fallback** — the server now serves `index.html` for `/<ws>/<id>/<rest…>`, so a `useRoute` deep-link or refresh lands the module with its subpath intact. Can't shadow assets: module assets live under `/modules/` and `/api/`, never under `/<ws>/<id>/…`.
+
+### Changed
+- **CSS class scan walks every module's directory, not just chrome modules.** A non-chrome module that splits its UI across sibling files (not just `frontend.jsx`) now gets Tailwind classes generated from all of them — previously only the chrome was walked and a feature module's non-`frontend.jsx` classes were silently dropped. `walkJsxFiles` now also skips `backend.js` (server-only) and `[._-]`-prefixed names, mirroring exactly what the asset server refuses to serve, so the scanner only sees client-reachable source. The scan no longer needs each module's `meta`.
+
+### Docs
+- New **Frontend routing** section in MODULES.md (the `useRoute` contract, deep-link/no-remount guarantees, the "shell owns `/<ws>/<id>`" boundary); `meta.icon` clarified (name a string, don't import an icon library); sidecar pattern notes (public-sidecar child-process isolation, origin-nonce technique) added as examples-not-rules.
+- WORKSPACES.md rail & picker section rewritten to the URL-derived model above.
+
 ## 0.6.1
 
 **Docs reorganized into four navigable pages + two non-breaking security fixes for the asset/API boundary.** A contract audit confirmed 0.6.0's surface needs no breaking changes for 1.0; this patch closes two boundary gaps it surfaced (fixed *before* any freeze, not after) and makes the docs both accurate and navigable.

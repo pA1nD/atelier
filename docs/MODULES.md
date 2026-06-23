@@ -44,7 +44,7 @@ export default function Module() { ... }
 ```
 
 Supported keys:
-- `icon` — a rail-icon name the **active chrome** renders (catalyst maps lucide-style names like `kanban` / `shield-check` to its Heroicon set; the shell ships no icons).
+- `icon` — a rail-icon *name* (a string) the **active chrome** renders; the shell ships no icons. Don't `import` an icon library in a module — module frontends are transformed per-file, not bundled, so only `react` / `react-dom` / `@atelier/kit` resolve; just name the icon and let the chrome draw it. The catalyst chrome renders any [lucide](https://lucide.dev/icons) name (e.g. `chef-hat`, `layout-dashboard`, `shield-check`); an unknown name falls back to a square.
 - `name` — display name (rail label).
 - `group` — rail section: modules with the same `group` render under a shared header; untagged modules live under the default "modules" section.
 - `primary` — boolean; the module the shell lands on at `/` for its workspace.
@@ -205,8 +205,44 @@ No shared UI library to import, no build config:
 - **Tailwind** classes from whichever chrome is mounted (tokens from the active chrome's `styles.css`); use `className=` freely.
 - **Rail icon** named by `meta.icon`, rendered by the active chrome (the shell ships none).
 - **`window.__atelier.self(import.meta.url)`** → `{ workspace, id, qid, topic, api, subscribe }`, and **`window.__atelier.subscribe(topic, handler)`** — the WS multiplex. Plus backend `ctx.module(id)` slots and `@atelier/kit`. There is no frontend method-call registry.
+- **`window.__atelier.useRoute()`** → `{ path, navigate }` — the module's own URL sub-route (everything after `/<ws>/<id>`). See [Frontend routing](#frontend-routing).
 
-That's it. A module is React + Tailwind + the browser, plus a thin WS primitive.
+That's it. A module is React + Tailwind + the browser, plus thin WS + routing primitives.
+
+---
+
+## Frontend routing
+
+The shell owns exactly two path segments — `/<workspace>/<id>` — and **everything after them is the module's own space**. A module reads and drives that subpath with one hook:
+
+```jsx
+const { path, navigate } = window.__atelier.useRoute();
+//  path                       → subpath after /<ws>/<id>, no leading slash
+//                               '' at the module root; e.g. on /vault/drive/a/b → 'a/b'
+//  navigate('a/b')            → pushState  /vault/drive/a/b
+//  navigate('a/b', {replace:true})
+//  navigate('')               → back to the module root /vault/drive
+```
+
+Back/forward, deep-links, and your own `navigate()` calls **all re-render the module with the new `path`** — there are no `history.*` calls, no `hashchange` listeners, and no event-suppression to get right. The URL is the single source of truth; mirror it into render and you're done:
+
+```jsx
+export default function Module() {
+  const { path, navigate } = window.__atelier.useRoute();
+  if (!path) return <Index onOpen={(id) => navigate(`item/${id}`)} />;
+  const [, id] = path.split('/');               // 'item/<id>'
+  return <Detail id={id} onClose={() => navigate('')} />;
+}
+```
+
+What you can rely on:
+
+- **`path` is free-form.** The shell never parses or validates it — `a/b/c`, `item/42`, `settings`, whatever your module means. Slash-separated is just a convention you choose.
+- **Deep-links and refresh work.** Loading `/<ws>/<id>/a/b` directly serves the SPA and your module mounts with `path === 'a/b'`.
+- **No remount on sub-nav.** A subpath change re-renders the module in place (same `ws`+`id` → stable identity), so component state, effects, and **WebSocket subscriptions survive** — `self.subscribe`'s topic is your qid, never the route. Switching module or workspace (a different `ws`/`id`) remounts as usual and resets the subpath.
+- **The shell owns `/<ws>/<id>`.** A module routes *within* its own subtree; it can't claim a top-level path or another module's space. To send the user to a different module, that's a chrome affordance (the rail / `navigate(qid)` the chrome receives), not `useRoute`.
+
+`useRoute` is opt-in: a module that keeps its sub-view state in memory and never touches the URL is perfectly fine. `location.hash` and `?query` still work too — but `useRoute` is the supported way to get deep-linkable, back/forward-correct sub-views.
 
 ---
 
@@ -263,6 +299,14 @@ A sidecar sits **outside** the shell's three pillars (frontend rail / HTTP prese
 - **Bind to `127.0.0.1`**, not `0.0.0.0`. Let the **operator's reverse proxy / tunnel** (nginx, cloudflared, …) map a public hostname to the port — the shell doesn't proxy to it. (`sites` is fronted by a cloudflared tunnel → `DOCS_PORT`.)
 - **Enforce your own auth** on anything non-public. The shell can't help — a sidecar that needs to know who's calling must carry its own scheme (`sites` uses signed per-document tokens: `/d/<id>/<token>/<user>/…`). Treat it like any service you put on the internet.
 - **Pick the port from a module-specific env var** with a sensible default (`MYMOD_PORT`), and document it. Avoiding collisions across the shell port and other sidecars is the operator's job.
+
+### Patterns from the shipped modules — examples, not rules
+
+Atelier has no opinion past the points above. The rest is just how the shipped modules *happen* to solve recurring sidecar problems — borrow or ignore freely; none of it is part of the contract.
+
+- **For a *public* sidecar, consider a separate child process (a suggestion, for security).** A sidecar can run in-process — `sites`' docs server is a plain `http.createServer` in the module's own process — or as a spawned child — `dashboard` runs its MCP server via `spawn` (tracked + torn down per the [hot-reload rules](#hot-reload-dev)). For a surface facing the open internet we lean toward the **child-process** shape: a crash or compromise on the public listener can't reach the shell's process, other modules' in-memory state, or their file handles. The cost is IPC (a port, or files as the channel) instead of shared closure state — weigh isolation vs. simplicity per surface.
+
+- **Telling whether the public hostname really lands on *this* instance (one author's technique).** When a tunnel/proxy can point a hostname at more than one machine — e.g. while migrating between hosts — a `200` from the public URL does **not** prove *your* sidecar answered it; another machine's tunnel can serve the same name. One way the author's modules handle this: each public sidecar stamps a **per-process random nonce** on every response (an `x-atelier-origin` header), and a status probe fetches the public URL *and* `127.0.0.1:<port>` and compares — equal ⇒ this instance is the live origin, different/absent ⇒ it's served elsewhere. This is illustrative only (it's how the cloudflared-tunnel status across `devops` / `sites` / `dashboard` is kept honest) — **not** an atelier feature, header, or requirement. It's an ordinary thing you can do on top of a plain `http` sidecar; pick your own header, or a different approach entirely.
 
 ---
 
