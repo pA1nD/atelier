@@ -42,6 +42,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
 import { WebSocketServer } from 'ws';
 import { getJsx, getJsxBundle, getCss } from './build.js';
+import { resolveModuleChrome, missingChrome } from './chrome-resolve.js';
 import {
   loadConfig, loadModuleConfig, shouldIncludeModule, collectConfigPaths, resolvePathEntry,
   CONFIG_FILENAME,
@@ -49,10 +50,19 @@ import {
 } from './discovery.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
-// PWD is the shell's logical cwd (works when atelier/ is shared/symlinked
-// across instances); HOST_DIR is the fallback when PWD is unset. ROOT is the
-// instance folder — atelier/'s parent — where modules are discovered.
-const ROOT = path.resolve(process.env.PWD || HOST_DIR, '..');
+// ROOT is the instance folder where modules are discovered. Resolved three ways,
+// in order:
+//   1. ATELIER_ROOT, if set — the instance folder itself. Explicit; for managed
+//      launchers (launchd/systemd/PaaS/Docker) that don't reliably set PWD.
+//   2. else atelier/'s parent, derived from PWD — the shell's *logical* cwd,
+//      which preserves the symlink path when atelier/ is shared across instances
+//      (process.cwd() would resolve the symlink to the shared shell location).
+//   3. else atelier/'s parent, derived from HOST_DIR — last-resort fallback when
+//      PWD is unset (then ROOT collapses to the shared shell's own parent, which
+//      is only correct for a non-symlinked checkout — hence prefer ATELIER_ROOT).
+const ROOT = process.env.ATELIER_ROOT
+  ? path.resolve(process.env.ATELIER_ROOT)
+  : path.resolve(process.env.PWD || HOST_DIR, '..');
 
 const [, , requestedId] = process.argv;
 const MODE = requestedId ? 'standalone' : 'host';
@@ -74,9 +84,15 @@ const toBool = (v) => v === true || v === 'true' || v === '1' || v === 'on';
 
 const PORT = Number(envOr('PORT', 'port', 1844));
 const BASE_URL = String(envOr('BASE_URL', 'baseUrl', `http://localhost:${PORT}`));
+// Frontend build mode. Universal concept → the bare `NODE_ENV` env var (like
+// `PORT`/`BASE_URL`), `env` in the config. 'development' (default, matching the
+// convention that unset NODE_ENV means dev) ships React + bundled-library dev
+// warnings, unminified; 'production' optimizes. Independent of `hotReload`.
+const NODE_ENV = String(envOr('NODE_ENV', 'env', 'development'));
+const PROD_BUILD = NODE_ENV === 'production';
 const HOT_RELOAD = toBool(envOr('ATELIER_HOT_RELOAD', 'hotReload', true));
 const LABEL = envOr('ATELIER_LABEL', 'label', null);      // optional instance name
-const CHROME = envOr('ATELIER_CHROME', 'chrome', null);   // chrome module path/name, or null
+const DEFAULT_CHROME = envOr('ATELIER_DEFAULT_CHROME', 'defaultChrome', null);   // default chrome module path/id, or null
 const AUTH = (() => {                                     // auth module path/name, or false (ungated)
   const v = envOr('ATELIER_AUTH', 'auth', false);
   return (v === false || v == null || v === 'false' || v === 'off' || v === '') ? false : v;
@@ -84,8 +100,9 @@ const AUTH = (() => {                                     // auth module path/na
 const REVALIDATE_MS = Number(envOr('ATELIER_REVALIDATE_MS', 'revalidateMs', 30000)); // WS session re-check interval
 
 // Publish the resolved port/baseUrl so modules (and processes they spawn) read
-// the same values. NODE_ENV is intentionally NOT set — atelier has no
-// environment concept; libraries that want one read their own.
+// the same values. atelier reads NODE_ENV only as the frontend build-mode `env`
+// setting (above); it does NOT re-assign process.env.NODE_ENV for spawned child
+// processes — a library that wants one reads its own.
 process.env.PORT = String(PORT);
 process.env.BASE_URL = BASE_URL;
 
@@ -311,10 +328,11 @@ function readModuleAt(dir, name, workspace) {
 const warnedReservedWs = new Set();   // dedupe `$<reserved>/` warnings
 
 // The shell ships NO chrome of its own — zero visual assumptions. A chrome is
-// any global-workspace module exporting `meta = { chrome: true }`; it's
+// any global-workspace module exporting `meta = { isChrome: true }`; it's
 // discovered and mounted like any other module (the user's config typically
-// path-mounts one). resolveChromeQid picks one; with none installed the client
-// renders an "add a chrome" screen.
+// path-mounts one). One is the default (`resolveDefaultChromeQid`); a module
+// may pin another via `meta.chrome`. With none installed the client renders an
+// "add a chrome" screen.
 
 function discoverModules() {
   const out = [];
@@ -453,11 +471,13 @@ function stubReactOnce() {
   reactStubbed = true;
 }
 
-// Static fallback for meta extraction — used when dynamic-import fails
-// (chrome modules with bare-specifier imports like `@headlessui/react` that
-// Node can't resolve from a data URL). Atelier's convention is that `meta`
-// is a top-level object literal, so a brace-balanced scan + Function-eval
-// suffices. Handles inline (`meta = {...}` on one line) and multi-line.
+// Static meta extraction — the PRIMARY path. `meta` is a top-level object
+// literal by convention, so a brace-balanced scan + Function-eval reads it
+// straight from source, WITHOUT running the module (so a frontend's top-level
+// code never executes in Node, and chromes — whose bare-specifier imports
+// can't resolve from a data URL — work too). Handles inline (`meta = {...}`
+// on one line) and multi-line. Returns {} if `meta` isn't a resolvable
+// literal (computed/spread/imported) → caller falls back to executing it.
 function extractMetaStatically(src) {
   const re = /export\s+const\s+meta\s*=\s*\{/.exec(src);
   if (!re) return {};
@@ -486,8 +506,17 @@ function extractMetaStatically(src) {
 }
 
 async function readMeta(src) {
-  stubReactOnce();
   const code = fs.readFileSync(src, 'utf8');
+  // Static-first: read the literal `meta` from source without running the
+  // module. This is the path for ~every module (their `meta` is a literal),
+  // so a frontend's top-level code does NOT execute in Node at discovery.
+  const stat = extractMetaStatically(code);
+  if (Object.keys(stat).length) return stat;
+  // Fallback — `meta` is computed/spread/imported and couldn't be parsed
+  // statically: transform + import the module to evaluate it. Top-level code
+  // runs here, so keep frontend top-level side-effect-free (browser globals
+  // like `document` are undefined in Node — see MODULES.md).
+  stubReactOnce();
   try {
     const out = await esbuildTransform(code, {
       loader: 'jsx',
@@ -500,10 +529,7 @@ async function readMeta(src) {
     const mod = await import(url);
     return mod.meta || {};
   } catch {
-    // Bundled chromes import bare specifiers (e.g. `@headlessui/react`)
-    // that Node can't resolve from a data URL. Fall back to static
-    // extraction of the literal — works for any flat object meta.
-    return extractMetaStatically(code);
+    return {};
   }
 }
 
@@ -525,182 +551,6 @@ async function getModuleMeta(m) {
   }
 }
 
-// ------------------------------------------------------------------------
-// README frontmatter — optional per-module declarations.
-//
-// A module *may* have a README.md, and that README *may* start with a YAML
-// frontmatter block (`---\n…\n---\n`). Both are optional. Currently the
-// only declaration we read is `atelier.requires`, a list of other module
-// ids this module needs. Missing dependencies log a warning at mount time
-// — purely informational, never fatal. Other declarations are preserved
-// on the parsed object for future use.
-//
-// We intentionally don't pull in a YAML library: the surface we accept is
-// small (see parseYamlSubset below) and a tiny indent-based parser keeps
-// the shell dep-free.
-// ------------------------------------------------------------------------
-
-const readmeCache    = new Map();   // moduleId → { frontmatter, mtimeMs }
-const warnedRequires = new Set();   // dedupe `<module>→<missing>` pairs
-
-/**
- * Strip a single matched pair of leading/trailing single or double quotes.
- * Mixed quotes (`"foo'`) and unbalanced quotes are left as-is — we treat
- * frontmatter as authored by humans, not generated, so the surface is small.
- */
-function stripFrontmatterQuotes(value) {
-  if (value.length < 2) return value;
-  const first = value[0];
-  const last  = value[value.length - 1];
-  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-/**
- * Parse the supported subset of YAML used in module README frontmatter:
- *
- *   • Top-level mappings:      `key: value`
- *   • Nested mappings:         indent under a key with no inline value
- *   • Sequences of scalars:    `- item` lines, indented under a key
- *   • Sequences of mappings:   `-` on its own line, followed by an indented
- *                              block (the inline form `- key: value` is NOT
- *                              recognized as a mapping — it parses as the
- *                              literal string `"key: value"`)
- *   • Single-quoted strings:   `'foo'`     → foo
- *   • Double-quoted strings:   `"foo"`     → foo
- *   • Comments:                lines starting with `#` (after indentation)
- *
- * NOT supported (silently treated as plain strings or skipped): flow-style
- * `[a, b]` / `{k: v}`, multiline scalars (`|`, `>`), anchors (`&`, `*`),
- * tags (`!!str`), escape sequences inside quotes, type coercion (`true` /
- * `42` come out as the strings `"true"` / `"42"`). If a module needs any
- * of those it should use plain strings — or we add a real YAML dep when
- * the cost stops being worth it.
- *
- * Indentation is space-only (tabs are treated as content). Empty lines are
- * ignored. The parser is single-pass and recursive on indent depth.
- */
-function parseYamlSubset(text) {
-  // Tokenize: keep only lines with content, recording each line's indent
-  // depth and the trimmed-left content. Comments and blanks are dropped.
-  const lines = [];
-  for (const raw of text.split('\n')) {
-    const trimmed = raw.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const indent = raw.match(/^ */)[0].length;
-    lines.push({ indent, content: raw.slice(indent) });
-  }
-
-  let pos = 0;
-
-  // Look ahead from `pos` to find the indent of the next line, falling back
-  // to `floor + 2` when we're at EOF. Used to start a child block when a
-  // key/list-item has no inline value.
-  function nextIndentOr(floor) {
-    return pos < lines.length ? lines[pos].indent : floor + 2;
-  }
-
-  // Parse a contiguous run of lines whose indent ≥ minIndent. Returns an
-  // array (if the first line at minIndent is a list item), an object (if
-  // it's a `key: value` mapping), or {} for an empty block.
-  function parseBlock(minIndent) {
-    let collection = null;   // null until we know whether we're array or object
-
-    while (pos < lines.length) {
-      const line = lines[pos];
-      if (line.indent < minIndent) break;
-
-      // List item: `- foo` or `-` (with a child block on following lines).
-      if (line.content.startsWith('- ') || line.content === '-') {
-        if (collection === null) collection = [];
-        const inline = line.content === '-' ? '' : line.content.slice(2).trim();
-        pos++;
-        if (inline === '') {
-          collection.push(parseBlock(nextIndentOr(line.indent)));
-        } else {
-          collection.push(stripFrontmatterQuotes(inline));
-        }
-        continue;
-      }
-
-      // Mapping: `key: value` or `key:` (with a child block on following lines).
-      const match = line.content.match(/^([^:]+):\s*(.*)$/);
-      if (!match) { pos++; continue; }    // unrecognized line — skip rather than throw
-      if (collection === null) collection = {};
-      const key   = match[1].trim();
-      const value = match[2].trim();
-      pos++;
-
-      if (value === '') {
-        // Child block only if it's actually indented past this line; otherwise
-        // we have an empty-string value (e.g. trailing `key:` at end of file).
-        const childIndent = nextIndentOr(line.indent);
-        collection[key] = childIndent > line.indent ? parseBlock(childIndent) : '';
-      } else {
-        collection[key] = stripFrontmatterQuotes(value);
-      }
-    }
-
-    return collection === null ? {} : collection;
-  }
-
-  return parseBlock(0);
-}
-
-/**
- * Extract the YAML frontmatter block from a markdown document. Recognized
- * shape: the file starts with a `---` line, followed by zero or more YAML
- * lines, followed by a closing `---` line. Returns `{}` for documents that
- * don't open with `---` or don't have a closing fence, and for malformed
- * frontmatter (parse errors are swallowed — frontmatter is purely advisory).
- */
-function extractFrontmatter(text) {
-  if (!/^---\r?\n/.test(text)) return {};
-  const afterOpen = text.replace(/^---\r?\n/, '');
-  const closeAt   = afterOpen.search(/\r?\n---(\r?\n|$)/);
-  if (closeAt < 0) return {};
-  try { return parseYamlSubset(afterOpen.slice(0, closeAt)); }
-  catch { return {}; }
-}
-
-function getModuleReadme(m) {
-  const src = path.join(m.dir, 'README.md');
-  let mtimeMs;
-  try { mtimeMs = fs.statSync(src).mtimeMs; }
-  catch { return {}; }                     // no README — fine
-  const cached = readmeCache.get(m.qualifiedId);
-  if (cached && cached.mtimeMs === mtimeMs) return cached.frontmatter;
-  let text;
-  try { text = fs.readFileSync(src, 'utf8'); }
-  catch { return {}; }
-  const frontmatter = extractFrontmatter(text);
-  readmeCache.set(m.qualifiedId, { frontmatter, mtimeMs });
-  return frontmatter;
-}
-
-function checkRequires() {
-  const mods = getModules();
-  // requires can name either a global module ('kanban') or a workspace one
-  // ('bigcorp/posts'). The set holds qualified ids; bare ids match the
-  // global module of that name.
-  const idSet = new Set(mods.map((x) => x.qualifiedId));
-  for (const m of mods) {
-    const fm = getModuleReadme(m);
-    const requires = fm.atelier?.requires;
-    if (!Array.isArray(requires)) continue;
-    for (const req of requires) {
-      if (typeof req !== 'string') continue;
-      if (idSet.has(req)) continue;
-      const pair = `${m.qualifiedId}→${req}`;
-      if (warnedRequires.has(pair)) continue;
-      warnedRequires.add(pair);
-      console.warn(`  ! ${m.qualifiedId} requires '${req}' (declared in README.md frontmatter) but it isn't installed`);
-    }
-  }
-}
-
 // Validate standalone target exists at boot (fail fast if typo).
 if (MODE === 'standalone') {
   const all = discoverModules();
@@ -714,12 +564,11 @@ if (MODE === 'standalone') {
   }
 }
 
-console.log(`\n  Atelier · ${MODE}`);
+console.log(`\n  Atelier · ${MODE}  ·  ${ROOT}  ·  env=${NODE_ENV}`);
 for (const m of getModules()) {
   console.log(`    • ${m.qualifiedId}${m.hasBackend ? '' : ' (frontend-only)'}`);
 }
 if (getModules().length === 0) console.log(`    (no modules yet)`);
-checkRequires();
 
 // ------------------------------------------------------------------------
 // Backend mounting — lazy, per-module, hot-swappable in dev.
@@ -883,14 +732,49 @@ function mountPlug(m, plug) {
   }
 }
 
+// Backends that failed to (re)load, keyed by qualifiedId. The failure is
+// ISOLATED: only the broken module's own `/api` lane returns 500, and only its
+// frontend gets the overlay — every other module, the chrome, and the shell
+// keep running normally. Cleared on a clean (re)load. Streamed to open clients
+// over the 'shell' WS topic, and seeded into the bootstrap for fresh loads.
+const backendErrors = new Map();   // qid → { message }
+
+// Turn a raw load error into an actionable one. The classic trap: a backend is
+// hot-loaded from a `data:` URL, so a static `import x from 'pkg'` can't resolve
+// a node_modules dependency — name the fix (`createRequire`) right in the message.
+function enrichBackendError(err) {
+  let msg = err?.message || String(err);
+  // The data: URL a backend is loaded from is a huge base64 blob — collapse it
+  // so the actionable part of the message isn't buried.
+  msg = msg.replace(/data:text\/javascript;base64,[A-Za-z0-9+/=]+/g, 'the backend bundle');
+  const spec = /resolve module specifier ["']([^"']+)["']/.exec(msg);
+  if (spec) {
+    const pkg = spec[1];
+    msg += `\n\nA backend is hot-loaded from a data: URL, so a static \`import … from '${pkg}'\` can't resolve a node_modules dependency. Load it at runtime instead:\n  import { createRequire } from 'node:module';\n  const require = createRequire(import.meta.url);\n  const dep = require('${pkg}');`;
+  }
+  return msg;
+}
+function setBackendError(qid, message) {
+  if (backendErrors.get(qid)?.message === message) return false;  // debounce identical repeats (e.g. a rogue timer)
+  backendErrors.set(qid, { message });
+  wsBroadcastBackendError(qid, message);
+  return true;
+}
+function clearBackendError(qid) {
+  if (backendErrors.delete(qid)) wsBroadcastBackendError(qid, null);
+}
+
 async function mountBackend(m) {
   watchBackend(m);  // always watch so a broken file can be fixed-and-reloaded
   let plug;
   try { plug = await importBackend(m); }
   catch (err) {
-    console.error(`  ! Failed to mount ${m.qualifiedId}: ${err.message}`);
+    const message = enrichBackendError(err);
+    console.error(`  ! ${m.qualifiedId}: backend failed to load — ${message}`);
+    setBackendError(m.qualifiedId, message);
     return;
   }
+  clearBackendError(m.qualifiedId);
   if (mountPlug(m, plug)) console.log(`  + mounted ${m.qualifiedId} backend`);
 }
 
@@ -898,9 +782,12 @@ async function reloadBackend(m) {
   let plug;
   try { plug = await importBackend(m); }
   catch (err) {
-    console.error(`  ! ${m.qualifiedId}: reload failed, keeping current version — ${err.message}`);
+    const message = enrichBackendError(err);
+    console.error(`  ! ${m.qualifiedId}: reload failed, keeping current version — ${message}`);
+    setBackendError(m.qualifiedId, message);
     return;
   }
+  clearBackendError(m.qualifiedId);
   const prev = mountedBackends.get(m.qualifiedId);
   if (prev) {
     try { prev.teardown?.(); } catch (err) { console.warn(`  ! ${m.qualifiedId}.teardown: ${err.message}`); }
@@ -932,6 +819,7 @@ async function unmountBackend(id, reason = 'removed') {
   attemptedBackends.delete(id);
   lastReloadMtime.delete(id);
   metaCache.delete(id);
+  clearBackendError(id);
   const pending = pendingReloads.get(id);
   if (pending) { clearTimeout(pending); pendingReloads.delete(id); }
   console.log(`  - unmounted ${id} backend (${reason})`);
@@ -1020,7 +908,6 @@ async function mountPendingBackends() {
     attemptedBackends.add(m.qualifiedId);
     await mountBackend(m);
   }
-  checkRequires();
 }
 
 await mountPendingBackends();
@@ -1067,17 +954,26 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 process.on('exit', () => teardownAllBackends('exit'));
 
 // ------------------------------------------------------------------------
-// Crash banners
+// Uncaught error handling — isolate module faults, crash on shell faults
 //
-// We deliberately do NOT swallow uncaughtException / unhandledRejection —
-// hiding bugs grows them. But the default Node output buries the cause
-// under teardown noise, so when scrolling the log after a crash you can't
-// tell at a glance which module killed the server.
+// A module's backend is untrusted code sharing this process. When it throws
+// OUTSIDE a request — a rogue setInterval, an event handler, an unhandled
+// rejection in a background task — the error reaches the process, not a
+// response. We attribute it (locateModuleFromStack handles disk frames AND the
+// data:-URL backend bundles via their inline source map):
+//   • a MODULE fault → surface it via that module's backend-error overlay/500
+//     and KEEP THE SHELL ALIVE, so every other module + connected user survives.
+//     (Surfaced louder than the old crash banner, which only reached the
+//     launchd log — see setBackendError / the overlay.)
+//   • an un-attributable fault → a SHELL bug (our code): print a highly-visible
+//     banner naming what we can, then exit(1), so it can't hide and grow.
 //
-// These handlers print a single highly-visible banner identifying the
-// fault before letting Node exit normally. The banner names the originating
-// module by parsing the first frame of the stack that lives under the
-// project root (skipping node:internal frames).
+// Limits — in-process isolation is not a sandbox: a synchronous infinite loop,
+// `process.exit()`, or OOM in a module still take the shell down (those need
+// true process isolation, which the shared-runtime design intentionally trades
+// away). And after an uncaughtException Node considers the process state
+// undefined — for a shared multi-tenant runtime, staying up + surfacing loudly
+// beats killing everyone for one module's bug.
 // ------------------------------------------------------------------------
 
 function locateModuleFromStack(stack) {
@@ -1085,7 +981,7 @@ function locateModuleFromStack(stack) {
 
   // 1) Direct project file frames. Lazy so the path stops at the first
   // `:digit` rather than gobbling further. Allows spaces inside the path
-  // (the project lives under "X002 - Atelier").
+  // (a project may live under a directory whose name contains spaces).
   for (const line of stack.split('\n')) {
     for (const m of line.matchAll(/(\/[^()\n]+?):(\d+)(?::\d+)?/g)) {
       const file = m[1];
@@ -1124,6 +1020,24 @@ function locateModuleFromStack(stack) {
   return null;
 }
 
+// Resolve the qualifiedId of the module a fault came from, by matching the
+// located file against discovered module dirs (then by a path segment that is a
+// module id, then by global id). Best-effort — used to surface a module's
+// uncaught error via its own backend-error overlay/500. Null when it can't be
+// pinned to a specific module.
+function moduleQidFromStack(stack, loc = locateModuleFromStack(stack)) {
+  if (!loc) return null;
+  const mods = getModules();
+  const abs = path.resolve(ROOT, loc.file);
+  const byDir = mods.find((m) => abs === m.dir || abs.startsWith(m.dir + path.sep));
+  if (byDir) return byDir.qualifiedId;
+  const segs = loc.file.split('/');
+  const bySeg = mods.find((m) => segs.includes(m.id));
+  if (bySeg) return bySeg.qualifiedId;
+  const byId = mods.find((m) => m.id === loc.moduleId && m.workspace === GLOBAL_WORKSPACE);
+  return byId ? byId.qualifiedId : null;
+}
+
 function printCrashBanner(kind, err) {
   const stack = err && err.stack ? err.stack : String(err);
   const loc = locateModuleFromStack(stack);
@@ -1144,21 +1058,32 @@ function printCrashBanner(kind, err) {
   );
 }
 
-process.on('uncaughtException', (err) => {
-  printCrashBanner('uncaughtException', err);
-  // Let Node's own crash path run (teardown via 'exit' handler, exit code 1).
-  // Re-throwing inside the handler would loop; setting exitCode + exit is
-  // the documented way to preserve the failure signal.
+function handleUncaught(kind, err) {
+  const stack = err && err.stack ? err.stack : String(err);
+  const loc = locateModuleFromStack(stack);
+  if (loc) {
+    // A module's own code threw outside a request → isolate it: keep the shell +
+    // every other module alive, and surface it where the author looks (the
+    // overlay + the module's /api 500), not buried in the log.
+    const qid = moduleQidFromStack(stack, loc);
+    const message = `Uncaught ${kind} in this module's backend, outside a request handler:\n${stack}`;
+    if (qid) {
+      if (setBackendError(qid, message)) console.error(`  ! ${qid}: ${kind} — isolated, shell kept alive`);
+    } else {
+      console.error(`  ! ${loc.moduleId}: ${kind} — isolated, shell kept alive (couldn't map it to a module for the overlay)`);
+    }
+    return;  // ← do NOT exit; the shared runtime survives
+  }
+  // No project frame → a shell/runtime bug: nothing to isolate it to. Crash
+  // loudly with the banner + exit, as before — hiding a SHELL bug grows it.
+  printCrashBanner(kind, err);
   process.exitCode = 1;
   process.exit(1);
-});
+}
 
-process.on('unhandledRejection', (reason) => {
-  const err = reason instanceof Error ? reason : new Error(String(reason));
-  printCrashBanner('unhandledRejection', err);
-  process.exitCode = 1;
-  process.exit(1);
-});
+process.on('uncaughtException', (err) => handleUncaught('uncaughtException', err));
+process.on('unhandledRejection', (reason) =>
+  handleUncaught('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason))));
 
 // ------------------------------------------------------------------------
 // URL → source path mapping
@@ -1196,11 +1121,33 @@ const RAW_CONTENT_TYPES = {
 };
 
 function resolveAssetSource(pathname) {
-  // /assets/<name>.js  → atelier/<name>.jsx
+  // Vendored third-party runtime (React/ReactDOM UMD) — served from
+  // node_modules so a checkout boots offline with the version pinned in
+  // package.json, not fetched from a CDN at runtime. index.html loads these
+  // as the ambient `window.React` / `window.ReactDOM` the shims alias to.
+  // Dev vs prod by the `env` setting: 'development' ships the unminified build
+  // with React's warnings (invalid hooks, missing keys, readable errors);
+  // 'production' ships the minified build.
+  const VENDOR = {
+    '/assets/react.js':     PROD_BUILD ? 'react/umd/react.production.min.js'     : 'react/umd/react.development.js',
+    '/assets/react-dom.js': PROD_BUILD ? 'react-dom/umd/react-dom.production.min.js' : 'react-dom/umd/react-dom.development.js',
+  };
+  if (VENDOR[pathname]) {
+    const src = path.join(HOST_DIR, 'node_modules', VENDOR[pathname]);
+    return fs.existsSync(src)
+      ? { kind: 'raw', src, contentType: 'text/javascript; charset=utf-8' }
+      : null;
+  }
+  // /assets/<name>.js  → atelier/<name>.jsx (preferred), else atelier/<name>.js.
+  // The `.js` fallback lets the shell ship plain shared ES modules (e.g.
+  // chrome-resolve.js) that both the server and the browser client import.
   let m = /^\/assets\/([a-z0-9-]+)\.js$/.exec(pathname);
   if (m) {
-    const src = path.join(HOST_DIR, m[1] + '.jsx');
-    return fs.existsSync(src) ? { kind: 'jsx', src } : null;
+    const jsx = path.join(HOST_DIR, m[1] + '.jsx');
+    if (fs.existsSync(jsx)) return { kind: 'jsx', src: jsx };
+    const js = path.join(HOST_DIR, m[1] + '.js');
+    if (fs.existsSync(js)) return { kind: 'jsx', src: js };
+    return null;
   }
   // /assets/<name>.css → atelier/<name>.css
   m = /^\/assets\/([a-z0-9-]+)\.css$/.exec(pathname);
@@ -1390,7 +1337,7 @@ function buildDefaultUser({ metaByQId } = {}) {
     // Chrome modules and other `hidden` modules don't appear in the rail —
     // they're addressable (assets, bundle imports) but the client treats
     // them as infrastructure, not rail entries.
-    if (meta.chrome === true || meta.hidden === true) continue;
+    if (meta.isChrome === true || meta.hidden === true) continue;
     const entry = { id: m.id, meta };
     if (!wsMap.has(m.workspace)) wsMap.set(m.workspace, []);
     wsMap.get(m.workspace).push(entry);
@@ -1456,24 +1403,62 @@ async function getMetaByQId() {
 
 // Resolve which module owns the `chrome` slot. If the `chrome` setting names a
 // module (path or id) that's a mounted chrome, it wins; otherwise the first
-// global-workspace module declaring `meta.chrome` (alphabetical by qualifiedId
+// global-workspace module declaring `meta.isChrome` (alphabetical by qualifiedId
 // for determinism). The shell ships no chrome of its own; with none installed
 // this returns null and the client renders an "add a chrome" screen.
 //
 // The shell's client.jsx dynamic-imports `/modules/<chromeQid>/frontend.js`
 // and renders its `chrome` named export as the root component.
-function resolveChromeQid(metaByQId) {
-  const chromes = [...metaByQId.entries()]
-    .filter(([qid, meta]) => meta?.chrome === true && qid.split('/')[0] === GLOBAL_WORKSPACE)
+// Every mounted chrome qid (global modules declaring `meta.isChrome`), sorted
+// alphabetically. This is the set a module may pick from via `meta.chrome`, and
+// the set the asset/API layer treats as infrastructure.
+function chromeQids(metaByQId) {
+  return [...metaByQId.entries()]
+    .filter(([qid, meta]) => meta?.isChrome === true && qid.split('/')[0] === GLOBAL_WORKSPACE)
     .map(([qid]) => qid)
     .sort((a, b) => a.localeCompare(b));
-  if (CHROME) {
-    const wantId = path.basename(String(CHROME));
-    const hit = chromes.find((qid) => qid === CHROME || qid === `${GLOBAL_WORKSPACE}/${wantId}`);
+}
+
+// The instance DEFAULT chrome: the `chrome` setting if it names a mounted
+// chrome, else the alphabetically-first mounted chrome, else null. Used
+// whenever a module doesn't pin one — i.e. today's single-chrome behavior.
+function resolveDefaultChromeQid(metaByQId) {
+  const chromes = chromeQids(metaByQId);
+  if (DEFAULT_CHROME) {
+    const wantId = path.basename(String(DEFAULT_CHROME));
+    const hit = chromes.find((qid) => qid === DEFAULT_CHROME || qid === `${GLOBAL_WORKSPACE}/${wantId}`);
     if (hit) return hit;
-    console.warn(`  ! config chrome '${CHROME}' is not a mounted chrome module — falling back to discovery`);
+    console.warn(`  ! config defaultChrome '${DEFAULT_CHROME}' is not a mounted chrome module — falling back to discovery`);
   }
   return chromes[0] || null;
+}
+
+// Resolve the chrome for a specific requested module. A module may pin its
+// chrome with `meta.chrome: '<chromeId>'`; it's honored only when that names a
+// mounted chrome, otherwise (and for a null/unknown module — a workspace home
+// or cold `/`) it falls back to the default. Purely additive: with no
+// `meta.chrome` anywhere this returns the default for every URL, exactly as the
+// single-chrome shell did.
+function resolveChromeForQid(metaByQId, requestedQid) {
+  const def = resolveDefaultChromeQid(metaByQId);
+  const chrome = requestedQid ? metaByQId.get(requestedQid)?.chrome : null;
+  const available = chromeQids(metaByQId);
+  const missing = missingChrome(chrome, available);   // shared logic — matches the client
+  if (missing) {
+    // Not installed → render in the default chrome purely as a host frame; the
+    // client shows a "chrome not installed" error (no silent fallback).
+    console.warn(`  ! module '${requestedQid}' pins chrome '${missing}', which is not a mounted chrome — the page will show a "chrome not installed" error`);
+    return def;
+  }
+  return resolveModuleChrome(chrome, available, def);
+}
+
+// Extract `<ws>/<id>` from a document URL so the initial page boots in that
+// module's chrome. Null for `/`, a workspace home, or any non-module path.
+function requestedQidFromUrl(reqUrl) {
+  const p = (reqUrl || '/').split('?')[0];
+  const m = p.match(/^\/([a-zA-Z0-9][a-zA-Z0-9_-]*)\/([a-zA-Z0-9][a-zA-Z0-9_-]*)/);
+  return m ? `${decodeURIComponent(m[1])}/${decodeURIComponent(m[2])}` : null;
 }
 
 // Build the per-request import map. A chrome MAY publish a `kit.js`
@@ -1496,7 +1481,7 @@ async function serveIndex(req, res) {
   // Auth runs FIRST. A logged-out visitor must NEVER see workspace info
   // leak in the bootstrap — the unauth handler owns the response and
   // renders its takeover.
-  const template = fs.readFileSync(path.join(HOST_DIR, 'index.html'), 'utf8');
+  const template = getPinnedIndexHtml();
   const metaByQId = await getMetaByQId();
 
   const defaultUser = buildDefaultUser({ metaByQId });
@@ -1506,12 +1491,25 @@ async function serveIndex(req, res) {
   // Workspace identity now lives in the URL path (`/<ws>/<id>`). No
   // canonicalization, no cookie — the client parses the URL on every
   // render and the picker writes a new URL on switch.
-  const chromeQid = resolveChromeQid(metaByQId);
+  // Resolve the chrome for THIS document from the requested module (its
+  // `meta.chrome` → the default). The client gets the default + available set
+  // too, so it can decide SPA vs full-load when navigating across chromes.
+  const requestedQid = requestedQidFromUrl(req.url);
+  const defaultChromeQid = resolveDefaultChromeQid(metaByQId);
+  const chromeQid = resolveChromeForQid(metaByQId, requestedQid);
   const bootstrap = {
     mode: MODE,
     label: LABEL,
     user,
     chromeQid,
+    defaultChromeQid,
+    chromes: chromeQids(metaByQId),
+    // Seed only the backend errors this user can see — same per-module ACL as the
+    // live WS frames, so a page load never carries another tenant's error/stack.
+    backendErrors: (() => {
+      const visible = allowedTopics(user);
+      return [...backendErrors].filter(([qid]) => visible.has(qid)).map(([qid, v]) => ({ qid, message: v.message }));
+    })(),
   };
   const importMap = buildImportMap(chromeQid);
   const importMapTag = importMap
@@ -1629,6 +1627,23 @@ function wsBroadcastShell(event) {
   const frame = JSON.stringify({ ...event, topic: 'shell' });
   for (const ws of wsClients) {
     if (ws.readyState !== 1) continue;
+    try { ws.send(frame); } catch { /* drop */ }
+  }
+}
+
+// Backend-error frames carry module-specific detail (the error message + a stack
+// that can include the operator's server paths), so — unlike other shell events
+// — they must respect the per-module ACL: a client only learns a module's
+// backend broke if its user can see that module. Without this, a backend failure
+// in one tenant's module would leak its error + stack to every connected client.
+// The frame stays on the `shell` topic (where the client routes backend-error);
+// only delivery is gated, exactly like a module frame (no-op without auth).
+function wsBroadcastBackendError(qid, message) {
+  if (wsClients.size === 0) return;
+  const frame = JSON.stringify({ type: 'backend-error', qid, message, topic: 'shell' });
+  for (const ws of wsClients) {
+    if (ws.readyState !== 1) continue;
+    if (ws.allowed && !ws.allowed.has(qid)) continue;
     try { ws.send(frame); } catch { /* drop */ }
   }
 }
@@ -1787,7 +1802,7 @@ async function chromeBundleRootFor(srcPath) {
   for (const m of getModules()) {
     if (!m.hasFrontend) continue;
     const meta = metaByQId.get(m.qualifiedId) || {};
-    if (meta.chrome !== true) continue;
+    if (meta.isChrome !== true) continue;
     if (srcPath === path.join(m.dir, 'frontend.jsx')) return m.dir;
     if (srcPath === path.join(m.dir, 'kit.js'))       return m.dir;
     if (srcPath === path.join(m.dir, 'kit.jsx'))      return m.dir;
@@ -1798,6 +1813,27 @@ async function chromeBundleRootFor(srcPath) {
 // Shared asset response — used by both shell-asset (public) and module-asset
 // (auth-gated) paths. Resolves source via resolveAssetSource and writes the
 // appropriate compiled or raw response.
+// Shell-owned assets (`/assets/*`, i.e. the compiled `client.js`) are PINNED to
+// the running process: built once and served unchanged until the next restart,
+// so the server and the client bundle it ships can never drift apart. Editing a
+// shell source file therefore has no effect until an explicit restart — by
+// design; core-infra changes should be deliberate. (Module and chrome bundles
+// under `/modules/*` are NOT pinned — they hot-reload, which is the whole point
+// of a module.) This closes the "old server + freshly-recompiled client" skew.
+const _pinnedShellAssets = new Map();
+function getPinnedShellJsx(src) {
+  if (!_pinnedShellAssets.has(src)) _pinnedShellAssets.set(src, getJsx(src));
+  return _pinnedShellAssets.get(src);
+}
+
+// The shell's index.html template is pinned the same way — read once and held
+// for the process, so the bootstrap HTML can't drift from the running server.
+let _pinnedIndexHtml = null;
+function getPinnedIndexHtml() {
+  if (_pinnedIndexHtml == null) _pinnedIndexHtml = fs.readFileSync(path.join(HOST_DIR, 'index.html'), 'utf8');
+  return _pinnedIndexHtml;
+}
+
 async function serveAsset(req, res, url) {
   const asset = resolveAssetSource(url.pathname);
   if (!asset) {
@@ -1811,8 +1847,10 @@ async function serveAsset(req, res, url) {
     if (asset.kind === 'jsx') {
       const bundleRoot = await chromeBundleRootFor(asset.src);
       const built = bundleRoot
-        ? await getJsxBundle(asset.src, bundleRoot)
-        : await getJsx(asset.src);
+        ? await getJsxBundle(asset.src, bundleRoot, NODE_ENV)     // chrome bundle — hot-reloads (a module)
+        : url.pathname.startsWith('/assets/')
+          ? await getPinnedShellJsx(asset.src)                    // shell asset (client.js) — pinned to the process
+          : await getJsx(asset.src);                             // module frontend — hot-reloads
       headers['Content-Type'] = built.contentType;
       body = built.content;
     } else if (asset.kind === 'css') {
@@ -1903,13 +1941,15 @@ const server = http.createServer(async (req, res) => {
   //
   // Exempt from both: (a) the configured auth module's OWN routes — you can't
   // gate the gate (login must be reachable), and it governs its own surface
-  // through `authenticate`; (b) the ONE active chrome — resolved server-side
-  // via `resolveChromeQid`, NEVER trusted from a module's self-declared `meta`.
-  // The chrome is excluded from `buildDefaultUser`, so it's in nobody's
-  // `user.workspaces` and the presence gate would 403 it for every user; but
-  // the chrome (and its API, e.g. /docs) is shell scaffolding every authed user
-  // loads, not tenant data. A feature module CANNOT self-exempt by exporting
-  // `meta.hidden`/`meta.chrome` — only the resolved chrome qid is waved through.
+  // through `authenticate`; (b) any mounted chrome — the available-chrome set
+  // (`chromeQids`), resolved server-side from discovery. Chromes are excluded
+  // from `buildDefaultUser`, so they're in nobody's `user.workspaces` and the
+  // presence gate would 403 them for every user; but a chrome (and its own API,
+  // e.g. a help/docs endpoint) is shell scaffolding any authed user may load,
+  // not tenant data — and with `meta.chrome` a non-default chrome is reachable too.
+  // The set is operator-controlled (only mounted `meta.isChrome` modules qualify);
+  // a feature module can't widen its own API surface beyond becoming a chrome,
+  // which removes it from every rail and workspace.
   // Ungated instances skip this whole block — `findAuthModule()` is null, so
   // there's nothing to enforce.
   if (url.pathname.startsWith('/api/')) {
@@ -1917,7 +1957,7 @@ const server = http.createServer(async (req, res) => {
     const reqQid = seg[2] && seg[3] ? `${seg[2]}/${seg[3]}` : null;
     const auth = findAuthModule();
     const authQid = auth?.m.qualifiedId;
-    const isInfra = reqQid != null && reqQid === resolveChromeQid(metaByQId);
+    const isInfra = reqQid != null && chromeQids(metaByQId).includes(reqQid);
     if (reqQid && authQid && reqQid !== authQid && !isInfra) {
       if (!userModuleSet(apiUser).has(reqQid)) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -1950,6 +1990,16 @@ const server = http.createServer(async (req, res) => {
           return;
         }
       }
+    }
+
+    // A backend that failed to (re)load → a clear 500 on ITS OWN api lane only.
+    // Scoped to reqQid, so a broken backend never takes the rest of the instance
+    // down — other modules' APIs are untouched. Same actionable message the
+    // overlay shows. (`reqQid` null for `/api/` with no <ws>/<id> → skipped.)
+    if (reqQid && backendErrors.has(reqQid)) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'backend failed to load', module: reqQid, message: backendErrors.get(reqQid).message }));
+      return;
     }
   }
 

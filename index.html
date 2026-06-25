@@ -8,7 +8,7 @@
   <!-- The shell ships zero pixels and makes zero visual assumptions. All
        visual identity — fonts, colors, rail, topbar, banner, favicon,
        theme-color, icon set — lives in a chrome-slot module (any global
-       module exporting `meta = { chrome: true }`). There is no default chrome.
+       module exporting `meta = { isChrome: true }`). There is no default chrome.
        client.jsx dynamic-imports the active chrome and renders it as the root;
        with none installed it renders a plain "add a chrome" screen.
 
@@ -28,9 +28,10 @@
   <!-- React + ReactDOM are the only ambient runtime the shell provides —
        modules are React components sharing this one instance. Every visual
        dependency (icon libraries, fonts, …) belongs to the chrome, which
-       injects its own. -->
-  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
-  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+       injects its own. Served by the shell from node_modules (version pinned
+       in package.json), so a checkout boots offline — no CDN at runtime. -->
+  <script src="/assets/react.js"></script>
+  <script src="/assets/react-dom.js"></script>
 
   <!-- Injected by atelier/server.js per request:
        window.__ATELIER__ = { mode, user, chromeQid, ... }

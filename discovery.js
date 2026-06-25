@@ -50,8 +50,7 @@ export const workspaceName = (dirName) =>
  * <workspace>/atelier.config.json.
  *
  * Shape:
- *   { "modules": [...] }                            // both envs
- *   { "modules": { "dev": [...], "prod": [...] } }  // either key optional
+ *   { "modules": [...] }   // a flat array (one folder = one instance)
  *
  * Top-level entries are EITHER global-module entries or workspace objects.
  *

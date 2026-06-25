@@ -2,6 +2,43 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.8.0
+
+**Multiple chromes per instance, plus a loud-failure / fault-isolation pass.** An instance can now run more than one chrome at once — each module renders inside the chrome it names (a breaking chrome-key rename comes with it). Alongside that, the shell stops failing silent or crashing on a module's mistakes: a backend that won't load, a chrome that throws while rendering, and a module's uncaught async error now each surface *in place* — attributed and isolated — instead of a silent no-op or a whole-shell crash.
+
+### Added
+- **Per-module chrome (`meta.chrome`)** — a module renders inside the chrome named by `meta.chrome: '<chromeId>'`, else the instance default. The available chromes come from discovery (every mounted `meta.isChrome` module); the default is the `defaultChrome` setting, else the alphabetically-first mounted chrome. A module pinning a chrome that isn't installed shows a clear **"chrome not installed" error — no silent fallback**. Crossing modules on different chromes is a full page reload (a chrome's `styles.css` + `@atelier/kit` import map are baked per document); navigating within one chrome stays an SPA transition. **With no `meta.chrome` anywhere, behavior is byte-identical to a single-chrome instance.** Shared resolution logic lives in `chrome-resolve.js` (imported by the server, the client, and the tests, so the document's chrome and the client's reload decision can't drift). The `/api` presence-gate and asset infra-exemptions now cover **every** mounted `meta.isChrome` module (via `chromeQids`), not just the single active chrome as in 0.6.1 — required because any module may now pin any mounted chrome, and still operator-controlled (a module can't self-exempt without becoming a chrome, which removes it from every rail).
+
+### ⚠️ Renamed (breaking)
+- **Config setting `chrome` → `defaultChrome`** (env `ATELIER_CHROME` → `ATELIER_DEFAULT_CHROME`).
+- **`meta.chrome` (boolean, "this module *is* a chrome") → `meta.isChrome`.**
+- **`meta.theme` (string, "which chrome this module renders in") → `meta.chrome`.**
+
+### Migration
+- In `atelier.config.json`, rename the `chrome` setting → `defaultChrome`.
+- In each chrome module, rename `meta.chrome: true` → `meta.isChrome: true`.
+- In each themed module, rename `meta.theme: '<id>'` → `meta.chrome: '<id>'`.
+- **A chrome that filters its rail on a module's `meta.chrome` must now read `meta.isChrome`** — the bare `meta.chrome` is now the per-module chrome pin (a truthy string), so the old check would hide every themed module from the rail.
+
+### Changed
+- **A backend that fails to (re)load now fails *loud*, not silent.** Previously a hot-reload failure was logged to stderr and the old/no backend was silently kept — so an agent editing a backend saw "nothing changed" and had to dig through the launchd log or the shell source to find out why (the most common surprise across past sessions). Now the failure surfaces where the work actually happens: the module's own `/api/<ws>/<id>/*` returns a **`500` carrying the error + the actionable fix** (e.g. *"a node_modules dep can't resolve from the `data:` URL a backend is loaded from — use `createRequire(import.meta.url)('pkg')`"*), and the error is **streamed to the frontend** as a centered, Next.js-style error overlay (streamed live over the WebSocket + seeded into the bootstrap). The overlay is scoped to the **active module** and **auto-clears** the instant the backend reloads cleanly — never dismissed by hand. **Isolated:** keyed by qualifiedId, so only the broken module is affected — viewing any other module's page, the chrome, and the shell keep running normally. The error frame and the bootstrap seed are **delivered under the same per-module ACL as a module's WS frames**, so in an auth-gated multi-tenant instance a backend error — its message and stack — reaches only users who can see that module, never another tenant.
+- **A chrome render error no longer blanks the whole client.** The chrome is the React root, so a throw in its render used to crash everything (a blank page) *and* take down the WS/hot-reload listener, so a fix couldn't auto-recover. A shell-level error boundary now contains it: a centered "Chrome Error" overlay shows the error, the rest of the client stays mounted, and **editing the chrome auto-reloads to recover** — no manual reload. (A *module's* render error was already caught by the chrome's own boundary.)
+- **A module's uncaught async error no longer crashes the shell.** A backend that throws *outside* a request — a rogue `setInterval`, an unhandled rejection in a background task — used to take the whole shell down (deliberately, with an attributing crash banner). It's now **attributed to the module and isolated**: surfaced via that module's `500` + overlay, while the shell and every other module + connected user stay alive. A genuinely *shell-level* fault (no module in the stack) still crashes loudly. Limits: a synchronous infinite loop, `process.exit()`, or OOM in a module are still fatal — in-process isolation isn't a sandbox. Documented under **Error handling** in MODULES.md.
+- **Explicit instance root via `ATELIER_ROOT`.** The folder modules are discovered in is still inferred from `PWD` by default (unchanged), but a managed launcher (launchd/systemd/Docker/PaaS) that doesn't reliably set `PWD` can now set `ATELIER_ROOT=/path/to/instance` to name it explicitly. The resolved root is printed at startup (`Atelier · <mode> · <root> · env=<env>`) so a misconfigured launch is obvious instead of silently discovering the wrong folder.
+- **React/ReactDOM are vendored, not CDN-loaded.** They're now `dependencies` in `package.json` (pinned `18.3.1`) and served by the shell from `node_modules` at `/assets/react.js` + `/assets/react-dom.js`, instead of `index.html` fetching them from `unpkg.com`. A fresh checkout boots offline, with no third-party runtime dependency. The ambient `window.React` / shim architecture is unchanged.
+- **`env` setting (`NODE_ENV`) — frontend build mode + dev warnings.** `development` (the default, matching an unset `NODE_ENV`) serves the unminified React UMD and defines the bundle's `process.env.NODE_ENV=development`, so **React + bundled-library dev warnings show while you develop** (invalid hooks, missing keys, readable errors); `production` **minifies the chrome bundle** (dropping the large inline source map), strips bundled-library dev branches via the `process.env.NODE_ENV` define, and serves the minified React UMD. It's the bare `NODE_ENV` (like `PORT`/`BASE_URL`), `env` in the config, and **independent of `hotReload`** (two separate knobs). This *deliberately re-introduces atelier reading `NODE_ENV`*, which 0.4.0 had removed — but scoped narrowly to the frontend build, not a sweeping dev/prod mode.
+- **A JS `import` of CSS now fails the bundle loudly** with an actionable error, instead of being silently dropped. Chrome styles ship via `styles.css` + the render-blocking `<link>`, never a JS `import`.
+- **`meta` is read statically, without running `frontend.jsx`.** Discovery now parses the top-level `meta` object literal from source rather than transform-and-importing the module first; the import path remains only as a fallback for a computed/spread `meta`. A frontend's top-level code no longer executes in Node at discovery (and it's faster).
+
+### Removed
+- **The undocumented `atelier.requires` README-frontmatter feature** (and its hand-rolled YAML-subset parser) — it only ever logged an advisory warning, no module used it, and nothing was documented.
+
+### Tests
+- Five new suites cover the release's server-observable surface: multi-chrome resolution + election (`server-multichrome`, `chrome-resolve`), backend load-failure `500` + bootstrap seed (`backend-error`), module uncaught-async isolation (`crash-isolation`), the dev/prod React UMD swap + loud `.css`-import error (`bundle`), and `ATELIER_ROOT` precedence (`root`). Suite now 83.
+
+### Docs
+- MODULES.md gains a **Per-module chrome — `meta.chrome`** section and an **Error handling** section (the failure surfaces and how each is isolated); docs/README.md's settings table adds the `env`, `defaultChrome` (`ATELIER_DEFAULT_CHROME`), and `ATELIER_ROOT` rows and lists `chrome-resolve.js` among the shell files.
+
 ## 0.7.0
 
 **Per-module URL sub-routing (`useRoute`) + the workspace context is now derived purely from the URL.** Modules get a real, deep-linkable subpath below `/<ws>/<id>` without touching `history.*`; in exchange, the sticky per-tab workspace from 0.6.0 is gone — the address bar is the single source of truth for which workspace you're in. One additive API, one behavior change to know about (the rail no longer carries global modules into every workspace).
@@ -56,7 +93,7 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 - `test/http-acl.test.js` + an `http-acl` fixture (a gate exporting `authenticate` + `authorize`, plus feature modules + a `hidden` infra module): cross-tenant `403`, read-grant allows GET / denies POST, write-grant POST where the handler sees the body `authorize` already read, payload-level deny, auth-module-route exemption, infra-module exemption, and the ungated no-op. Suite now 58.
 
 ### Docs (freeze-readiness)
-- `README.md` + `AUTH.md` made accurate + complete toward a 1.0 freeze: the full `meta` set (`icon`/`name`/`group`/`primary`/`hidden`/`chrome`/`color`), the `revalidateMs` config row, `user.logout` (chrome sign-out convention) + `modules[].access`, `ctx` documented as a closed set (no `cors`), and the workspace-aware WS pattern (use `self()`, never hardcode a topic). Removed stale carve-back references (Mission Control, agents-module examples, the Lucide `data-lucide` icon convention → now "the chrome renders `meta.icon`").
+- `README.md` + `AUTH.md` made accurate + complete toward a 1.0 freeze: the full `meta` set (`icon`/`name`/`group`/`primary`/`hidden`/`chrome`/`color`), the `revalidateMs` config row, `user.logout` (chrome sign-out convention) + `modules[].access`, `ctx` documented as a closed set (no `cors`), and the workspace-aware WS pattern (use `self()`, never hardcode a topic). Removed stale carve-back references (the Lucide `data-lucide` icon convention → now "the chrome renders `meta.icon`").
 
 ## 0.5.0
 
@@ -79,7 +116,7 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 ### Removed
 
 - **The install CLI is gone.** No more `npm run atelier -- install/update/uninstall/status`, no launchd plist, no `/etc/hosts` wiring, no `~/.atelier/` deploy, no rsync. **An instance is just a folder you run** (`npm run dev`, or `node atelier/server.js`). Run two instances as two folders (or one folder with different startup config). `atelier.js` was split into **`build.js`** (the esbuild/Tailwind pipeline) and **`discovery.js`** (discovery rules + config parsing); the install half was deleted. This also drops atelier's only macOS-specific coupling — it now runs anywhere Node does.
-- **No default theme.** The shell ships zero pixels and zero visual assumptions. `atelier/builtin-chrome/` was removed; the gruvbox skin lives on as a standalone, opt-in chrome (`gruvbox-chrome/`, peer of `catalyst-chrome`). With no chrome installed the client renders a plain "add a chrome" screen. `index.html` no longer ships a favicon, theme-color, background color, or the Lucide icon library — each chrome injects its own (both shipped chromes now do via an `ensureLucide` IIFE).
+- **No default theme.** The shell ships zero pixels and zero visual assumptions. The former built-in chrome was removed; a skin now lives as a standalone, opt-in chrome you install. With no chrome installed the client renders a plain "add a chrome" screen. `index.html` no longer ships a favicon, theme-color, background color, or the Lucide icon library — each chrome injects its own (e.g. via an `ensureLucide` IIFE).
 - **The dev/prod concept is gone.** Atelier no longer reads or sets `NODE_ENV` and has no environment notion. The config's `{ "modules": { "dev": [...], "prod": [...] } }` object form is removed — `modules` is now a flat array.
 - **The frontend cross-module registry is gone.** `window.__atelier.callModule` / `registerModule` / `unregisterModule` / `hasModule` were removed (they existed for an agentic topbar system no longer present). The real cross-module surfaces remain: the WS multiplex (`window.__atelier.subscribe` / `ctx.broadcast`), backend slots (`ctx.module`), and `@atelier/kit`.
 
@@ -106,7 +143,7 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 - Flatten `{ "modules": { "dev": [...], "prod": [...] } }` to `{ "modules": [...] }` per instance folder.
 - If you relied on auto-detected auth, add `"auth": "<your-auth-module>"`.
 - If a module read `ctx.env`, read `ctx.label` (or drop it).
-- A custom chrome must inject its own icon library (the shell no longer ships Lucide) — see `ensureLucide` in either shipped chrome.
+- A custom chrome must inject its own icon library (the shell no longer ships Lucide) — see the `ensureLucide` pattern in a chrome's `frontend.jsx`.
 - A characterization test suite now ships at `atelier/test/` (`npm test`, zero new deps). Run it after any shell change.
 
 ## 0.3.0
@@ -115,7 +152,7 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 
 ### What changed
 
-- **New slot: `chrome`.** First global-workspace module whose `meta.chrome === true` wins (mirrors the auth-slot pattern). Custom chromes beat the builtin; among customs, alphabetical by qualifiedId. Fallback is `global/atelier-chrome` (the builtin).
+- **New slot: `chrome`.** First global-workspace module whose `meta.chrome === true` wins (mirrors the auth-slot pattern). Custom chromes beat the builtin; among customs, alphabetical by qualifiedId. Fallback is `global/builtin-chrome` (the builtin).
 - **`atelier/builtin-chrome/`** is the default skin — a real module folder shipped with the shell. `frontend.jsx` exports `chrome(props)` and `meta = { chrome: true, hidden: true }`. `styles.css` carries all Tailwind tokens, fonts, base styles, keyframes. Copy the folder to write a custom skin.
 - **Server resolves `chromeQid` per request** and injects it into the bootstrap (`window.__ATELIER__.chromeQid`). The shell's `client.jsx` dynamic-imports the chrome bundle and renders its `chrome` named export as the root component.
 - **Shell ships zero visual bytes.** `atelier/styles.css` is gone (moved into the builtin). `index.html` keeps only a one-line inline `<style>` (`html,body{margin:0;background:#1d2021}`) to prevent a white flash before the chrome's CSS lands. `client.jsx` shrunk to a router + bundle loader + error fallback (no Icon, Spinner, TopBar, LeftRail, etc.).
@@ -225,7 +262,6 @@ The only architectural change is at the shell level. v2 modules continue to work
 - **Workspace modules don't deploy yet.** `npm run atelier -- install` / `update` only ships root-folder modules. `$<ws>/<mod>/` directories are silently skipped by the deploy CLI. The runtime supports workspace modules; the deploy CLI does not. As an interim, use path-config entries (`{ "path": "/path/to/mod", "id": "name" }`) which mount to a flat `~/.atelier/<id>/` destination regardless of source workspace.
 - **No per-frame WebSocket ACL filtering.** Every connected client receives every broadcast they subscribe to. Topics are workspace-qualified so cross-workspace leakage isn't possible by accident, but per-user filtering within one workspace would need an auth-module-driven policy push.
 - **WS connections survive session invalidation.** `authenticate` runs at upgrade only; an admin force-logout doesn't disconnect existing sockets. The next HTTP request gets 401, so any user action hits the takeover, but idle WS streams continue.
-- **Chrome extension `vendor/atelier-downloads-bridge/`** (under `mission-control`) still has hardcoded v1 URL paths. Out-of-band fix when the extension is next updated.
 
 ### Files removed / cleaned up
 
@@ -235,7 +271,7 @@ The only architectural change is at the shell level. v2 modules continue to work
 
 ### Migration metrics for this rewrite
 
-42 modules migrated. 213 backend route prefixes stripped, 177 frontend literal API URLs rewritten, 34 ROUTE/API/TOPIC blocks inserted, 225 doc URL references swept. 37/42 modules verified booting + responding to a safe read-only endpoint under both global and workspace mounts; the 5 non-200 results were env-config (browser-use needs `BROWSER_USE_API_KEY`), auth-module exclusion, dep-resolution (studio's esbuild reach), and an auth-required surface (tables wants a writer identity).
+42 modules migrated. 213 backend route prefixes stripped, 177 frontend literal API URLs rewritten, 34 ROUTE/API/TOPIC blocks inserted, 225 doc URL references swept. 37/42 modules verified booting + responding to a safe read-only endpoint under both global and workspace mounts; the 5 non-200 results were env-config, auth-module exclusion, dep-resolution, and an auth-required surface.
 
 ## 0.1.0 and earlier
 

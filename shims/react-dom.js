@@ -1,4 +1,4 @@
-// ReactDOM shim — same idea as ./react.js. Headless UI and friends use
+// ReactDOM shim — same idea as ./react.js. Many UI libraries use
 // `import { createPortal } from 'react-dom'`; aliasing 'react-dom' to this
 // file routes them to the global UMD ReactDOM.
 const RD = (typeof window !== 'undefined' && window.ReactDOM) || globalThis.ReactDOM;

@@ -93,19 +93,22 @@ function maxMtimeRecursive(rootDir) {
 
 // Bundle a JSX entry plus its full first-party dep graph via esbuild (instead
 // of the per-file transform). Used for chrome modules that bring real npm
-// dependencies (Headless UI, motion, heroicons, etc.). React + ReactDOM are
+// dependencies (a component library, an animation lib, an icon set, etc.).
+// React + ReactDOM are
 // externalized: aliased to ./shims/{react,react-dom}.js, which re-export
 // `window.React` / `window.ReactDOM` so the chrome shares the same React
 // instance as the shell. Returns the same shape as getJsx so the asset
 // response path is unified.
-export async function getJsxBundle(srcPath, absWorkingDir) {
+export async function getJsxBundle(srcPath, absWorkingDir, nodeEnv = 'development') {
   // Bundle invalidates when ANY file inside absWorkingDir changes (modulo
-  // node_modules/dotfiles). Catalyst-style kits live in side-by-side .jsx
-  // files; editing one must rebuild the bundle.
+  // node_modules/dotfiles). A chrome's kit may live in side-by-side .jsx
+  // component files; editing one must rebuild the bundle. `nodeEnv` is part of
+  // the key so a dev↔prod switch never serves a stale bundle.
   const mtime = maxMtimeRecursive(absWorkingDir);
-  const cacheKey = srcPath + '::bundle';
+  const cacheKey = srcPath + '::bundle::' + nodeEnv;
   const cached = cache.get(cacheKey);
   if (cached && cached.mtimeMs === mtime) return cached;
+  const prod = nodeEnv === 'production';
   const result = await esbuildBuild({
     entryPoints: [srcPath],
     absWorkingDir,
@@ -113,20 +116,36 @@ export async function getJsxBundle(srcPath, absWorkingDir) {
     format: 'esm',
     platform: 'browser',
     write: false,
-    sourcemap: 'inline',
+    // Production minifies and drops the (large, source-revealing) inline source
+    // map; development keeps both off for a readable, debuggable bundle.
+    minify: prod,
+    sourcemap: prod ? false : 'inline',
     target: ['es2020'],
-    loader: { '.jsx': 'jsx', '.js': 'jsx', '.css': 'empty', '.svg': 'dataurl', '.png': 'dataurl' },
+    loader: { '.jsx': 'jsx', '.js': 'jsx', '.svg': 'dataurl', '.png': 'dataurl' },
     // Automatic JSX runtime — some chrome files use JSX without importing
     // React directly. The runtime import resolves via the alias below.
     jsx: 'automatic',
-    // Most UI libs check `process.env.NODE_ENV`; define it so they tree-shake
-    // correctly and don't crash on `process` undefined.
+    // Bundled npm libs check `process.env.NODE_ENV` (dev warnings + tree-shaking)
+    // and read `process.env`; the browser has no `process`, so define both. The
+    // NODE_ENV value follows the `env` setting ('development' by default).
     define: {
-      'process.env.NODE_ENV': JSON.stringify('production'),
+      'process.env.NODE_ENV': JSON.stringify(nodeEnv),
       'process.env': '{}',
     },
+    // CSS imports aren't bundled — chrome styles ship via `styles.css` + the
+    // render-blocking <link>, not a JS `import`. Fail LOUD (an actionable build
+    // error → a 500 on the bundle the author sees) rather than silently dropping
+    // the import with an `empty` loader.
+    plugins: [{
+      name: 'atelier-no-css-import',
+      setup(build) {
+        build.onLoad({ filter: /\.css$/ }, (args) => ({
+          errors: [{ text: `CSS imports aren't bundled in atelier — \`import\` of "${path.basename(args.path)}" is not supported. Put chrome styles in styles.css (served via <link>), not a JS import.` }],
+        }));
+      },
+    }],
     // Route bare `react` / `react-dom` imports (including transitive ones from
-    // Headless UI / motion / heroicons) to atelier's shim files. Works for
+    // a bundled UI library) to atelier's shim files. Works for
     // both direct and transitive imports.
     alias: {
       'react': path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'shims/react.js'),

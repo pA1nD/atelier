@@ -1,5 +1,5 @@
 // Characterizes chrome-slot resolution now that the shell ships no builtin:
-// a discovered meta.chrome module wins the slot, its bundle serves, and it's
+// a discovered meta.isChrome module wins the slot, its bundle serves, and it's
 // kept out of the rail. (The no-chrome path is covered in server-basic.)
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,7 +14,7 @@ let server
 before(async () => { server = await startServer(FIXTURE) })
 after(async () => { await server?.stop() })
 
-test('a discovered meta.chrome module wins the chrome slot', async () => {
+test('a discovered meta.isChrome module wins the chrome slot', async () => {
   const html = await (await fetch(server.base + '/')).text()
   assert.match(html, /"chromeQid":"global\/skin"/)
 })

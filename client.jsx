@@ -1,7 +1,7 @@
 /* atelier client — shell-side router + bundle loader.
  *
  * Compiled by esbuild, served at /assets/client.js, loaded as an ES module
- * after React + ReactDOM (UMD from CDN — see index.html). The chrome
+ * after React + ReactDOM (UMD served by the shell — see index.html). The chrome
  * (rail, topbar, banner, layout, fonts, tokens — everything visual) lives
  * in a separate `chrome`-slot module. The shell ships no default chrome.
  *
@@ -21,6 +21,8 @@
  *     plaintext error fallbacks below (chrome bundle missing/failed). If
  *     you see those, something is genuinely broken.
  * ========================================================================= */
+
+import { resolveModuleChrome, missingChrome } from './chrome-resolve.js';
 
 const { useState, useEffect, useRef } = React;
 
@@ -305,7 +307,7 @@ function Takeover() {
   if (state.kind === 'loading') return null;
   if (state.kind === 'error') {
     return React.createElement('pre',
-      { style: { padding: 24, color: '#fb4934', fontFamily: 'ui-monospace, monospace' } },
+      { style: { padding: 24, colorScheme: 'light dark', fontFamily: 'ui-monospace, monospace' } },
       'atelier: takeover failed\n' + state.message);
   }
   const { Component } = state;
@@ -323,7 +325,7 @@ function ChromeMissingFallback({ qid, err }) {
     : `atelier — no chrome installed.\n\n`
       + `The shell ships no theme. Add a chrome module: a folder with a\n`
       + `frontend.jsx exporting\n\n`
-      + `    export const meta = { chrome: true, hidden: true }\n`
+      + `    export const meta = { isChrome: true, hidden: true }\n`
       + `    export function chrome(props) { /* render the shell UI */ }\n\n`
       + `Discover it as a global module, or name it in atelier.config.json.`;
   return React.createElement('pre',
@@ -334,6 +336,89 @@ function ChromeMissingFallback({ qid, err }) {
 /* =========================================================================
  * App boot
  * ========================================================================= */
+// Dev overlay for a backend that failed to (re)load — a centered, Next.js-style
+// error modal scoped to the ACTIVE module (the one whose page you're on, so it
+// never blocks an unrelated module's page). Streamed live over the 'shell' WS
+// topic and seeded from the bootstrap. NOT dismissible — it clears itself the
+// moment the backend reloads cleanly (the shell broadcasts a clear). Neutral
+// pixels, no chrome tokens. The module's /api returns the same error.
+function BackendErrorOverlay({ error }) {
+  if (!error) return null;
+  const mono = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  return React.createElement('div', {
+    style: {
+      position: 'fixed', inset: 0, zIndex: 2147483647,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+      background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(2px)',
+      colorScheme: 'dark', font: `13px/1.6 ${mono}`,
+    },
+  },
+    React.createElement('div', {
+      style: {
+        width: 'min(820px, 100%)', maxHeight: '85vh', overflow: 'auto',
+        background: '#0a0a0a', color: '#ededed',
+        border: '1px solid #2a2a2a', borderRadius: 12,
+        boxShadow: '0 24px 70px rgba(0,0,0,0.6)',
+      },
+    },
+      React.createElement('div', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '14px 20px', borderBottom: '1px solid #2a2a2a',
+        },
+      },
+        React.createElement('span', {
+          style: {
+            padding: '2px 8px', borderRadius: 6, fontWeight: 600, fontSize: 11,
+            background: 'rgba(248,113,113,0.12)', color: '#f87171',
+            border: '1px solid rgba(248,113,113,0.4)',
+            textTransform: 'uppercase', letterSpacing: '.05em',
+          },
+        }, 'Backend Error'),
+        React.createElement('span', { style: { color: '#a1a1a1' } }, error.qid),
+      ),
+      React.createElement('pre', {
+        style: { margin: 0, padding: '18px 20px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+      }, error.message),
+      React.createElement('div', {
+        style: { padding: '10px 20px', borderTop: '1px solid #2a2a2a', color: '#7a7a7a', fontSize: 12 },
+      }, 'Clears automatically when the backend reloads cleanly.'),
+    ),
+  );
+}
+
+// The chrome is the React root. A throw in its render used to crash the whole
+// client — blank page, and the WS/hot-reload listener (in App's effect) died
+// with it, so a fix couldn't auto-recover. This boundary contains the crash to
+// the chrome subtree: the rest of the client (incl. that listener) stays
+// mounted, the error is shown, and a chrome edit reloads to recover. (A
+// *module's* render error is already caught by the chrome's own boundary.)
+class ChromeErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error('[atelier] chrome render error:', err, info?.componentStack || ''); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    const mono = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+    const msg = (this.state.err && (this.state.err.stack || this.state.err.message)) || String(this.state.err);
+    return React.createElement('div', {
+      style: { position: 'fixed', inset: 0, zIndex: 2147483647, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(2px)', colorScheme: 'dark', font: `13px/1.6 ${mono}` },
+    },
+      React.createElement('div', { style: { width: 'min(820px, 100%)', maxHeight: '85vh', overflow: 'auto', background: '#0a0a0a', color: '#ededed', border: '1px solid #2a2a2a', borderRadius: 12, boxShadow: '0 24px 70px rgba(0,0,0,0.6)' } },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: '1px solid #2a2a2a' } },
+          React.createElement('span', { style: { padding: '2px 8px', borderRadius: 6, fontWeight: 600, fontSize: 11, background: 'rgba(248,113,113,0.12)', color: '#f87171', border: '1px solid rgba(248,113,113,0.4)', textTransform: 'uppercase', letterSpacing: '.05em' } }, 'Chrome Error'),
+          React.createElement('span', { style: { color: '#a1a1a1' } }, this.props.qid || ''),
+        ),
+        React.createElement('pre', { style: { margin: 0, padding: '18px 20px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, msg),
+        React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 20px', borderTop: '1px solid #2a2a2a', color: '#7a7a7a', fontSize: 12 } },
+          React.createElement('span', null, 'The chrome crashed while rendering — fix it and the page reloads automatically.'),
+          React.createElement('button', { onClick: () => window.location.reload(), style: { background: '#ededed', color: '#0a0a0a', border: 'none', borderRadius: 6, padding: '4px 10px', fontWeight: 600, cursor: 'pointer', font: 'inherit' } }, 'Reload'),
+        ),
+      ),
+    );
+  }
+}
+
 function App() {
   // Auth module's handleUnauth took over → render only its bundle, no chrome.
   if (window.__ATELIER__?.takeover) return React.createElement(Takeover);
@@ -343,10 +428,19 @@ function App() {
   const allModules = flattenUserModules(user);
   const wsList = user.workspaces || [];
   const chromeQid = boot.chromeQid || null;
+  // Multi-chrome: a module may pin its chrome via `meta.chrome`; the shell
+  // resolves it server-side (this document already booted in `chromeQid`). The
+  // client mirrors that resolution ONLY to decide SPA push vs full reload — a
+  // chrome can't swap inside a live document (its styles + import map are baked
+  // at load). Defaults make this inert: with no `meta.chrome` anywhere, every
+  // module resolves to `defaultChromeQid` and navigation stays SPA, as before.
+  const defaultChromeQid = boot.defaultChromeQid || boot.chromeQid || null;
+  const availableChromes = boot.chromes || [];
 
   const [urlState, setUrlState] = useState(parseUrl);
   const [loaded, setLoaded] = useState({});            // qid → load entry
   const [chromeEntry, setChromeEntry] = useState(null); // load entry for chrome
+  const [backendErrors, setBackendErrors] = useState(() => boot.backendErrors || []);
 
   // The current workspace is derived purely from the URL — there is no separate
   // sticky state and no sessionStorage. Navigating anywhere (rail click, picker,
@@ -365,6 +459,12 @@ function App() {
     const target = primary
       ? buildUrl(primary.workspace, primary.id)
       : buildUrl(defaultWs, null);
+    // If the landing module needs a different chrome, load it as a fresh
+    // document so it boots in the right one (rare: only a primary that pins a chrome).
+    if (requiredChromeForQid(primary ? primary.qid : null) !== chromeQid) {
+      window.location.replace(target);
+      return;
+    }
     window.history.replaceState(null, '', target);
     setUrlState(parseUrl());
   }, [urlState.ws]);
@@ -447,6 +547,14 @@ function App() {
   const dirtyRef = useRef(new Set());
   useEffect(() => {
     const unsub = window.__atelier?.subscribe?.('shell', (frame) => {
+      if (frame.type === 'backend-error') {
+        setBackendErrors((prev) => {
+          const next = prev.filter((e) => e.qid !== frame.qid);
+          if (frame.message) next.push({ qid: frame.qid, message: frame.message });
+          return next;
+        });
+        return;
+      }
       if (frame.type !== 'reload') return;
       const id = frame.moduleId;
       if (id === 'shell' || id === activeQidRef.current || id === chromeQid) {
@@ -468,6 +576,29 @@ function App() {
     return () => { try { unsub?.(); } catch {} };
   }, [chromeQid]);
 
+  // Which chrome a target module needs (meta.chrome → default). Used only to
+  // pick SPA vs full-load; a different chrome means a fresh document. Shared
+  // logic (chrome-resolve.js) so it always matches the server's resolution.
+  function chromeForMeta(meta) {
+    return resolveModuleChrome(meta?.chrome, availableChromes, defaultChromeQid);
+  }
+  function requiredChromeForQid(qid) {
+    const [ws, id] = (qid || '').split('/');
+    if (!ws || !id) return defaultChromeQid;          // workspace home / none → default
+    const m = allModules.find((x) => x.qid === qid);
+    return chromeForMeta((loaded[qid]?.meta) || m?.meta || {});
+  }
+  // If a module pins a chrome (meta.chrome) that ISN'T installed, return that
+  // chrome's name so we render a clear error instead of silently using the
+  // default. Null when no chrome is pinned, or the pinned chrome is present.
+  function pinnedChromeMissing(qid) {
+    const [ws, id] = (qid || '').split('/');
+    if (!ws || !id) return null;
+    const m = allModules.find((x) => x.qid === qid);
+    const chrome = ((loaded[qid]?.meta) || m?.meta || {}).chrome;
+    return missingChrome(chrome, availableChromes);
+  }
+
   function navigateTo(target) {
     const here = window.location.pathname + window.location.search;
     if (here !== target) {
@@ -483,7 +614,9 @@ function App() {
     // Workspace follows the URL: navigating to any module — global or not —
     // switches into that module's workspace.
     const target = id ? buildUrl(ws, id) : buildUrl(ws, null);
-    if (qid && dirtyRef.current.has(qid)) { window.location.assign(target); return; }
+    // A different chrome can't swap inside this document → load a fresh one.
+    const crossesChrome = requiredChromeForQid(id ? qid : null) !== chromeQid;
+    if (crossesChrome || (qid && dirtyRef.current.has(qid))) { window.location.assign(target); return; }
     navigateTo(target);
   }
 
@@ -494,9 +627,11 @@ function App() {
     // Same SPA path as switching modules — every workspace's bundles are already
     // loaded client-side and the rail/active module derive from the URL, so no
     // full reload is needed. Hard-load only if the preserved module was marked
-    // dirty by hot reload (mirrors navigateByQid).
+    // dirty by hot reload, or if the destination needs a different chrome.
     const target = buildUrl(ws, preserve);
-    if (preserve && dirtyRef.current.has(`${ws}/${preserve}`)) {
+    const targetQid = preserve ? `${ws}/${preserve}` : null;
+    const crossesChrome = requiredChromeForQid(targetQid) !== chromeQid;
+    if (crossesChrome || (preserve && dirtyRef.current.has(`${ws}/${preserve}`))) {
       window.location.assign(target);
       return;
     }
@@ -516,9 +651,21 @@ function App() {
 
   // Compose active-module state for chrome.
   const entry = activeMod ? loaded[activeMod.qid] : null;
+  const missingChromeName = activeMod ? pinnedChromeMissing(activeMod.qid) : null;
   let active;
   if (!activeMod) {
     active = { kind: 'none' };
+  } else if (missingChromeName) {
+    // A module that pins an uninstalled chrome is an error, not a fallback.
+    active = {
+      kind: 'error',
+      qid: activeMod.qid,
+      err: new Error(
+        `This module is pinned to the "${missingChromeName}" chrome via meta.chrome, ` +
+        `but that chrome isn't installed on this instance. Install it (mount the ` +
+        `chrome module), or remove meta.chrome to use the default chrome.`
+      ),
+    };
   } else if (!entry) {
     active = { kind: 'loading', qid: activeMod.qid };
   } else if (entry.status === 'error') {
@@ -530,18 +677,24 @@ function App() {
     active = { kind: 'ready', qid: activeMod.qid, element: React.createElement(M) };
   }
 
-  return React.createElement(Chrome, {
-    boot,
-    user,
-    modules: allModules,
-    workspaces: wsList,
-    workspace: effectiveWorkspace || '',
-    activeQid,
-    active,
-    loadedModules: loaded,
-    navigate: navigateByQid,
-    pickWorkspace,
-  });
+  return React.createElement(React.Fragment, null,
+    React.createElement(ChromeErrorBoundary, { qid: chromeQid },
+      React.createElement(Chrome, {
+        boot,
+        user,
+        modules: allModules,
+        workspaces: wsList,
+        workspace: effectiveWorkspace || '',
+        activeQid,
+        active,
+        loadedModules: loaded,
+        navigate: navigateByQid,
+        pickWorkspace,
+      })),
+    React.createElement(BackendErrorOverlay, {
+      error: backendErrors.find((e) => e.qid === activeQid) || null,
+    }),
+  );
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));

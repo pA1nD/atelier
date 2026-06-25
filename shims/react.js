@@ -1,7 +1,7 @@
 // React shim — re-exports the global React (UMD on window) so bundled
 // chromes (esbuild bundles with alias: { react: <this file> }) share the
 // same React instance as the shell. Multiple React instances break
-// Headless UI's hooks and Suspense, so this alignment matters.
+// a UI library's hooks and Suspense, so this alignment matters.
 const R = (typeof window !== 'undefined' && window.React) || globalThis.React;
 if (!R) throw new Error('atelier/shims/react.js: window.React not loaded yet');
 export default R;

@@ -23,12 +23,12 @@ Atelier is an **app shell + module runner**. Point your agent at a folder — a 
 
 ```
 myinstance/
-  atelier/            the shell — four files, ~3k lines
+  atelier/            the shell — five files, ~3k lines
   notes/              →  /global/notes      a module (a folder with a frontend.jsx)
   $acme/board/        →  /acme/board         a workspace module
 ```
 
-The whole shell is **four files (~3k lines)**, and your modules ship **zero dependencies of their own** — no React, no bundler, no WebSocket client to vendor. It ships **zero pixels and zero assumptions**: no default theme, no install step, no dev/prod notion. An instance is a folder you run.
+The whole shell is **five files (~3k lines)**, and your modules ship **zero dependencies of their own** — no React, no bundler, no WebSocket client to vendor. It ships **zero pixels and zero assumptions**: no default theme, no install step, no dev/prod notion. An instance is a folder you run.
 
 > **Platform.** Atelier runs anywhere Node 24+ does — there is no OS-specific install layer (you run it; your process manager / PaaS / reverse proxy is your concern).
 
@@ -41,7 +41,7 @@ npm run dev          # http://localhost:1844 (override with PORT=…), hot reloa
 
 The folder you run from **is** the instance. Its [`atelier.config.json`](docs/README.md#configuration--discovery) is the source of truth (which modules run, which chrome, port, auth, …); environment variables override it at startup. Want a second instance? Run a second folder — or the same folder with different startup config (e.g. a different `PORT` and `auth`).
 
-You'll see an "add a chrome" screen until you install a chrome module — the shell has no built-in theme. Point your config's `chrome` at one (a folder exporting `meta = { chrome: true }` and a `chrome` function); `catalyst-chrome` and `gruvbox-chrome` are two you can copy.
+You'll see an "add a chrome" screen until you install a chrome module — the shell ships no chrome and has no built-in theme. Write or install one (a global-workspace folder exporting `meta = { isChrome: true, hidden: true }` and a `chrome` function) and point your config's `defaultChrome` at it. See [Modules → the chrome](docs/MODULES.md#special-module-the-chrome).
 
 ## Write a module
 
@@ -71,7 +71,7 @@ The full contract — `ctx`, the real-time WebSocket, `ctx.module(id)` slots, ho
 
 ## Documentation
 
-Four pages (also browsable in-app via the chrome's Documentation viewer, in this order):
+Four pages (a chrome may also surface these in-app), in this order:
 
 - **[docs/README.md](docs/README.md)** — **Atelier**: running an instance, what lives in `atelier/`, and `atelier.config.json`.
 - **[docs/MODULES.md](docs/MODULES.md)** — **Modules**: module shape, `ctx`, real-time (`self`/`broadcast`), hot-reload, cross-module slots, sidecar servers — plus the special modules (the **chrome** + `@atelier/kit`).
@@ -85,11 +85,11 @@ Four pages (also browsable in-app via the chrome's Documentation viewer, in this
 npm test             # node:test characterization suite (zero extra deps)
 ```
 
-Run it after any change to the shell (`server.js`, `build.js`, `discovery.js`, `client.jsx`).
+Run it after any change to the shell (`server.js`, `build.js`, `discovery.js`, `client.jsx`, `chrome-resolve.js`).
 
 ## Contributing
 
-The shell (`server.js`, `client.jsx`, `build.js`, `discovery.js`) is cross-cutting — changes there are their own task, separate from any single module. If a module needs something the shell doesn't provide, the convention is to name the gap and propose extending the shell rather than reaching around it. Keep the surface small.
+The shell (`server.js`, `client.jsx`, `build.js`, `discovery.js`, `chrome-resolve.js`) is cross-cutting — changes there are their own task, separate from any single module. If a module needs something the shell doesn't provide, the convention is to name the gap and propose extending the shell rather than reaching around it. Keep the surface small.
 
 ## The name
 

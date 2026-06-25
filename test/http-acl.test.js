@@ -77,6 +77,18 @@ describe('HTTP presence gate + authorize (auth = gate)', () => {
     assert.equal((await r.json()).infra, true)
   })
 
+  test('multi-chrome: a NON-default mounted chrome\'s API is also exempt', async () => {
+    // `widget` wins the election (alphabetical) and is the resolved default;
+    // `widget2` is a second mounted chrome, in nobody's workspaces. The
+    // exemption covers the whole chrome SET (any module could pin widget2 via
+    // meta.chrome), so alice — who has no grant for it — still reaches its API.
+    const boot = await (await fetch(`${server.base}/`, as('alice'))).text()
+    assert.match(boot, /"chromeQid":"global\/widget"/)   // widget2 is NOT the default
+    const r = await fetch(`${server.base}/api/global/widget2/ping`, as('alice'))
+    assert.equal(r.status, 200)
+    assert.equal((await r.json()).chrome, 'widget2')
+  })
+
   test('a `hidden` feature module CANNOT self-exempt — its API stays gated', async () => {
     // global/rogue exports `meta.hidden` hoping to skip the gate like the
     // chrome. The exemption is keyed off the server-resolved chrome, NOT
