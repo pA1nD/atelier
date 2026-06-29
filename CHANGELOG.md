@@ -2,6 +2,20 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.9.0
+
+**Hot-swap module reloads — edits land in place instead of full-reloading.** A reload frame for a known module now re-imports just that module's bundle and merges it into the live tree; the chrome, the WebSocket, the React runtime, and every other module stay mounted. No loading bar, no viewport jump. Full reloads are reserved for when a fresh document is genuinely needed (a chrome's component/JS, a shell/discovery change, a brand-new module the bootstrap never saw).
+
+### Added
+- **Module hot-swap** — a reload frame for a known module re-imports its frontend bundle (cache-busted) in the background and swaps it into the live React tree instead of `window.location.reload()`. Only the changed module's subtree (its body, plus any slot it contributes to the chrome) remounts; everything else persists. The module's local React state resets on the swap — exactly what a full reload did, now scoped to the one module. State-preserving Fast Refresh is intentionally **not** implemented (it would need react-refresh machinery in the build; the shell keeps its zero-config per-file transform).
+- **Multi-file modules** — the hot-swap version (`?v=N`) propagates from the entry onto the module's own **relative** imports, so editing a sibling file (`./helper.js`, `./sections/*.jsx`) re-fetches the whole module graph, not just the entry. ES module specifiers are URL-keyed and a relative import drops the base's query, so without this an edited sibling was served from the browser's stale module cache. Bare specifiers (`react`, `@atelier/kit`) carry no leading dot and are left alone — the shared chrome kit isn't needlessly re-fetched. **Cold loads carry no `?v` and are byte-identical to before.**
+- **Stylesheet refresh on swap** — a swap re-fetches the active chrome's `styles.css` (FOUC-free: the new sheet loads alongside the old, the old drops only once the new is live) so a Tailwind utility class the edit newly introduced is generated and applied without a reload.
+- **Chrome CSS-only edits hot-swap** — editing only a chrome's `styles.css` refreshes the stylesheet in place (no reload, no viewport jump) — smooth theme / token / color tweaks. The reload frame carries `cssOnly`, set true iff **every** file changed in the 150ms debounce window was a `.css`; a single component file clears it. A chrome's component / `.jsx` / `kit` edit still full-reloads (its styles + `@atelier/kit` import map are baked into the document at load).
+
+### Notes
+- **No module-authoring contract change** — module shape, `ctx`, `window.__atelier`, URLs, and config schema are all unchanged. This is a hot-reload / dev-experience release.
+- Shell files don't hot-reload — **restart instances to pick this up.**
+
 ## 0.8.0
 
 **Multiple chromes per instance, plus a loud-failure / fault-isolation pass.** An instance can now run more than one chrome at once — each module renders inside the chrome it names (a breaking chrome-key rename comes with it). Alongside that, the shell stops failing silent or crashing on a module's mistakes: a backend that won't load, a chrome that throws while rendering, and a module's uncaught async error now each surface *in place* — attributed and isolated — instead of a silent no-op or a whole-shell crash.

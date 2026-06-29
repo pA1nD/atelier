@@ -26,8 +26,9 @@
  * Hot reload: /_atelier/ws is a shared multiplexed WebSocket. fs.watch
  * (recursive) fires on any change under the project root and the server
  * broadcasts a `{ topic: 'shell', type: 'reload', moduleId }` frame — the
- * client full-reloads when the active module / shell changed, otherwise
- * marks the module dirty and reloads on next navigation. Module topics
+ * client hot-swaps a known module in place (re-imports just its bundle and
+ * merges it into the live tree) and full-reloads only for a chrome/shell
+ * change or a brand-new module. Module topics
  * are qualified ids; subscribers filter client-side.
  *
  * Discovery is per-request so new folders appear without restart. Backends
@@ -1684,14 +1685,24 @@ if (AUTH) {
 // Hot reload — fs.watch → WS broadcast (topic: 'shell')
 // ------------------------------------------------------------------------
 
-const dirtyIds = new Set();
+const dirtyIds = new Map();   // moduleId → { cssOnly } accumulated over the debounce window
 let reloadTimer = null;
 
 // Per-module reload events let the client choose whether to full-reload
-// (active module / shell / unknown) or mark dirty for next navigation.
+// (chrome / shell / unknown module) or hot-swap the module's bundle in place.
 // 'shell' is the catch-all for top-level files.
-function broadcastReload(moduleId) {
-  dirtyIds.add(moduleId);
+//
+// `opts.cssFile` marks THIS change as a stylesheet (.css) edit. The active
+// chrome can't hot-swap its component/JS (styles + import map are baked into
+// the document at load) — but if its whole window of changes was css-only, the
+// client refreshes the stylesheet in place instead of full-reloading (smooth
+// theme/token tweaks). A single non-css file in the window (a .jsx/.js
+// component) clears the flag, so a real component edit still full-reloads.
+function broadcastReload(moduleId, opts = {}) {
+  const cssFile = !!opts.cssFile;
+  const cur = dirtyIds.get(moduleId);
+  if (cur) cur.cssOnly = cur.cssOnly && cssFile;
+  else dirtyIds.set(moduleId, { cssOnly: cssFile });
   // Shell-level events (config edits, new workspace dirs) can introduce
   // new path-mounted modules whose dirs live outside ROOT. The boot-time
   // watchOffRootModules pass missed those; re-run it here so the next
@@ -1701,7 +1712,7 @@ function broadcastReload(moduleId) {
   }
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
-    for (const id of dirtyIds) wsBroadcastShell({ type: 'reload', moduleId: id });
+    for (const [id, st] of dirtyIds) wsBroadcastShell({ type: 'reload', moduleId: id, cssOnly: st.cssOnly });
     dirtyIds.clear();
   }, 150);
 }
@@ -1741,7 +1752,7 @@ function watchOffRootModules() {
         if (!filename) return;
         const segs = filename.split(path.sep);
         if (segs.some((s) => s === 'node_modules' || s === 'data' || s.startsWith('.'))) return;
-        broadcastReload(m.qualifiedId);
+        broadcastReload(m.qualifiedId, { cssFile: filename.endsWith('.css') });
       });
       offRootWatched.add(m.qualifiedId);
     } catch (err) {
@@ -1784,7 +1795,7 @@ if (HOT_RELOAD) fs.watch(ROOT, { recursive: true }, (event, filename) => {
   // exists, will trigger a real reload.
   const mod = getModules().find((m) => m.qualifiedId === qualifiedId);
   if (!mod || !mod.hasFrontend) return;
-  broadcastReload(qualifiedId);
+  broadcastReload(qualifiedId, { cssFile: filename.endsWith('.css') });
 });
 
 // If `srcPath` is a bundle-entry of a chrome module, return that module's
@@ -1834,6 +1845,26 @@ function getPinnedIndexHtml() {
   return _pinnedIndexHtml;
 }
 
+// Append `?v=<v>` to a module's own RELATIVE import specifiers (`./x`, `../x`)
+// so a hot-swap re-import busts the module's WHOLE file graph, not just its
+// entry. ES module specifiers are URL-keyed and a relative import resolves
+// against the importer's URL with the query dropped — so `frontend.js?v=5`
+// importing `./helper.js` still resolves to the query-less, browser-cached
+// `helper.js`. Without this, editing any sibling of a multi-file module is
+// served from the browser's stale module cache and the change never shows
+// (you'd have to full-reload). Bare specifiers (`react`, `@atelier/kit`) and
+// absolute URLs carry no leading dot, so they're left alone — the shared
+// chrome kit isn't needlessly re-fetched on every module edit. The version
+// propagates transitively: each re-fetched sibling is itself served with
+// `?v`, so its own relative imports get rewritten too.
+function versionRelativeImports(code, v) {
+  const tag = `?v=${v}`;
+  return String(code)
+    .replace(/(\bfrom\s*)(["'])(\.{1,2}\/[^"'?]*)(\2)/g,        (_, a, q, p) => `${a}${q}${p}${tag}${q}`)
+    .replace(/(\bimport\s*\(\s*)(["'])(\.{1,2}\/[^"'?]*)(\2)/g, (_, a, q, p) => `${a}${q}${p}${tag}${q}`)
+    .replace(/(\bimport\s+)(["'])(\.{1,2}\/[^"'?]*)(\2)/g,      (_, a, q, p) => `${a}${q}${p}${tag}${q}`);
+}
+
 async function serveAsset(req, res, url) {
   const asset = resolveAssetSource(url.pathname);
   if (!asset) {
@@ -1846,13 +1877,19 @@ async function serveAsset(req, res, url) {
     let body;
     if (asset.kind === 'jsx') {
       const bundleRoot = await chromeBundleRootFor(asset.src);
+      const isModuleFrontend = !bundleRoot && !url.pathname.startsWith('/assets/');
       const built = bundleRoot
         ? await getJsxBundle(asset.src, bundleRoot, NODE_ENV)     // chrome bundle — hot-reloads (a module)
         : url.pathname.startsWith('/assets/')
           ? await getPinnedShellJsx(asset.src)                    // shell asset (client.js) — pinned to the process
           : await getJsx(asset.src);                             // module frontend — hot-reloads
       headers['Content-Type'] = built.contentType;
-      body = built.content;
+      // Hot-swap path only: a `?v=N` on a module frontend request means the
+      // client is re-importing a changed module — propagate that version onto
+      // its relative imports so a multi-file module's siblings re-fetch too.
+      // Cold loads carry no `?v`, so this is inert for normal serving.
+      const v = isModuleFrontend && url.searchParams.get('v');
+      body = (v && /^\d+$/.test(v)) ? versionRelativeImports(built.content, v) : built.content;
     } else if (asset.kind === 'css') {
       const built = await getCss(asset.src, cssScanSources(), HOST_DIR);
       headers['Content-Type'] = built.contentType;

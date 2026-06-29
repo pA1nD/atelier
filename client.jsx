@@ -246,8 +246,13 @@ window.__atelier.useRoute = () => {
  * TopBarCenter → topbar slot claimer; chrome → chrome slot claimer; meta →
  * icon/name/group).
  * ========================================================================= */
-async function loadModuleBundle(qid) {
-  const url = `/modules/${qid}/frontend.js`;
+async function loadModuleBundle(qid, bust) {
+  // `bust` (a monotonic token) is appended only when re-importing a changed
+  // bundle for hot reload: ES module specifiers are URL-keyed, so a fresh
+  // query string is what makes the browser fetch + evaluate the new code
+  // instead of handing back the cached module. The first (cold) load passes
+  // no token — distinct from every later `?v=N`.
+  const url = `/modules/${qid}/frontend.js${bust ? `?v=${bust}` : ''}`;
   try {
     const mod = await import(url);
     const Module = typeof mod.default === 'function' ? mod.default : null;
@@ -265,6 +270,30 @@ async function loadModuleBundle(qid) {
     console.error(`[atelier] failed to load bundle '${qid}':`, err);
     return { status: 'error', err };
   }
+}
+
+// Hot reload re-imports a module's JS, but the chrome's Tailwind stylesheet is
+// a static <link> baked into the document at load. A class the edited module
+// *newly* introduces isn't generated into the served CSS until that <link> is
+// re-fetched — which a hot-swap, unlike a full reload, never does on its own.
+// So re-point the link at a cache-busted URL: the server rebuilds the CSS,
+// scanning the module's fresh source, and the class appears. FOUC-free — the
+// new sheet loads alongside the old one and the old is dropped only once the
+// new is live, so styles never blink off mid-swap. No-op if the chrome ships
+// no styles.css (no link to refresh).
+let _cssBust = 0;
+function refreshChromeStyles() {
+  const cur = typeof document !== 'undefined' && document.getElementById('atelier-chrome-styles');
+  if (!cur) return;
+  const base = (cur.getAttribute('href') || '').split('?')[0];
+  if (!base) return;
+  const next = cur.cloneNode(false);
+  next.setAttribute('href', `${base}?v=${++_cssBust}`);
+  const drop = () => { try { cur.remove(); } catch {} };
+  next.addEventListener('load', drop);
+  next.addEventListener('error', drop);   // a rebuild that 500s shouldn't strand two links
+  cur.removeAttribute('id');               // the replacement owns the id from here
+  cur.parentNode.insertBefore(next, cur.nextSibling);
 }
 
 function flattenUserModules(user) {
@@ -537,14 +566,25 @@ function App() {
     setUrlState(parseUrl());
   }, [activeQid, activeMod, urlState.ws, urlState.id, wsList.length]);
 
-  // Hot reload — module-aware. Active module / chrome / shell / ambient
-  // module / unknown id → full reload. Other modules → mark dirty; next
-  // navigation does a full page load.
-  const activeQidRef = useRef(null);
-  activeQidRef.current = activeQid;
-  const loadedRef = useRef(loaded);
-  loadedRef.current = loaded;
-  const dirtyRef = useRef(new Set());
+  // Hot reload — module-aware. A chrome or shell change can't swap inside a
+  // live document (the chrome's styles + import map are baked at load; a
+  // shell / discovery change needs a fresh bootstrap), and a brand-new module
+  // the bootstrap never saw needs discovery to re-run to appear — those still
+  // full-reload. Every *known* module hot-swaps instead: re-import just its
+  // frontend bundle (cache-busted) in the background and merge the new version
+  // into the live tree. The chrome, the WebSocket, the React runtime, and
+  // every other module stay mounted — only the changed module's subtree (its
+  // body, plus any slot it contributes to the chrome) re-renders with the new
+  // code. No full-page load, no loading bar, no flash. (backend.js edits
+  // hot-swap server-side and never send a reload frame, so they don't arrive
+  // here.)
+  //
+  // Trade-off: a swap brings in a new component identity, so React remounts
+  // that module's subtree and its local state resets — exactly what the old
+  // full reload did, now scoped to the one module. Preserving state across an
+  // edit would need react-refresh machinery in the build, which the shell
+  // deliberately omits.
+  const bustRef = useRef(new Map());   // qid → latest cache-bust token
   useEffect(() => {
     const unsub = window.__atelier?.subscribe?.('shell', (frame) => {
       if (frame.type === 'backend-error') {
@@ -557,21 +597,31 @@ function App() {
       }
       if (frame.type !== 'reload') return;
       const id = frame.moduleId;
-      if (id === 'shell' || id === activeQidRef.current || id === chromeQid) {
+      if (id === 'shell' || id === chromeQid) {
+        // A chrome can't hot-swap its component/JS (its styles + import map are
+        // baked into the document at load) → full reload. But a chrome edit
+        // that touched ONLY its stylesheet just needs the stylesheet re-fetched
+        // — refresh it in place, no reload, no viewport jump. Smooth theme /
+        // token / color tweaks. (A component edit clears cssOnly server-side.)
+        if (id === chromeQid && frame.cssOnly) { refreshChromeStyles(); return; }
         window.location.reload();
         return;
       }
-      const entry = loadedRef.current[id];
-      if (entry?.TopBarCenter) {
-        window.location.reload();
-        return;
-      }
-      const known = allModules.some((m) => m.qid === id);
-      if (!known) {
-        window.location.reload();
-        return;
-      }
-      dirtyRef.current.add(id);
+      if (!allModules.some((m) => m.qid === id)) { window.location.reload(); return; }
+      // Known module: re-import its bundle in the background, then merge it.
+      // The token guards against an out-of-order resolution clobbering newer
+      // code if two edits land close together.
+      const token = (bustRef.current.get(id) || 0) + 1;
+      bustRef.current.set(id, token);
+      loadModuleBundle(id, token).then((res) => {
+        if (bustRef.current.get(id) !== token) return;   // superseded by a newer edit
+        setLoaded((l) => ({ ...l, [id]: res }));
+      });
+      // Re-fetch the chrome stylesheet so any Tailwind class the edit newly
+      // introduced is generated and applied (the JS swap alone wouldn't bring
+      // it in). Runs for inactive edits too, so the CSS is ready before an SPA
+      // navigation — which also never re-fetches the stylesheet.
+      refreshChromeStyles();
     });
     return () => { try { unsub?.(); } catch {} };
   }, [chromeQid]);
@@ -616,7 +666,7 @@ function App() {
     const target = id ? buildUrl(ws, id) : buildUrl(ws, null);
     // A different chrome can't swap inside this document → load a fresh one.
     const crossesChrome = requiredChromeForQid(id ? qid : null) !== chromeQid;
-    if (crossesChrome || (qid && dirtyRef.current.has(qid))) { window.location.assign(target); return; }
+    if (crossesChrome) { window.location.assign(target); return; }
     navigateTo(target);
   }
 
@@ -626,12 +676,12 @@ function App() {
       ? curId : null;
     // Same SPA path as switching modules — every workspace's bundles are already
     // loaded client-side and the rail/active module derive from the URL, so no
-    // full reload is needed. Hard-load only if the preserved module was marked
-    // dirty by hot reload, or if the destination needs a different chrome.
+    // full reload is needed. Hard-load only if the destination needs a different
+    // chrome (which can't swap inside a live document).
     const target = buildUrl(ws, preserve);
     const targetQid = preserve ? `${ws}/${preserve}` : null;
     const crossesChrome = requiredChromeForQid(targetQid) !== chromeQid;
-    if (crossesChrome || (preserve && dirtyRef.current.has(`${ws}/${preserve}`))) {
+    if (crossesChrome) {
       window.location.assign(target);
       return;
     }
