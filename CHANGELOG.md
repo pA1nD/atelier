@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.9.1
+
+**Hot reload ignores content-identical touches.** The frontend file-watchers now hash the changed file and broadcast a reload only when its bytes actually differ from what was last served. A no-op rewrite — an editor saving an unchanged buffer, a formatter that changes nothing, a tool re-touching a file it just wrote on the next message — bumps mtime but no longer reloads the page. Real edits, new files, and deletions still reload (a directory, a delete, a >2 MB asset, or a first sighting reads as changed and is never suppressed). Mirrors the mtime-dedupe the backend reload path already does. Fixes spurious reloads where a just-edited module file was re-touched with identical content on the next interaction.
+
 ## 0.9.0
 
 **Hot-swap module reloads — edits land in place instead of full-reloading.** A reload frame for a known module now re-imports just that module's bundle and merges it into the live tree; the chrome, the WebSocket, the React runtime, and every other module stay mounted. No loading bar, no viewport jump. Full reloads are reserved for when a fresh document is genuinely needed (a chrome's component/JS, a shell/discovery change, a brand-new module the bootstrap never saw).

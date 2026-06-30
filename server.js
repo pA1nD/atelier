@@ -39,6 +39,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
 import { WebSocketServer } from 'ws';
@@ -1734,6 +1735,32 @@ const watchSkipSeg = (s) =>
   s.startsWith('.') ||
   s.startsWith('-');
 
+// Content-dedupe for the frontend watchers. fs.watch fires on every write,
+// including a content-IDENTICAL rewrite (an editor saving an unchanged buffer,
+// a formatter that changes nothing, a tool re-touching the file it just wrote)
+// — that bumps mtime but changes nothing, so reloading on it is pure noise.
+// Returns true only when the file's bytes actually differ from what we last
+// saw (and updates the record). A directory, a deleted/unreadable file, a
+// large asset, or a first sighting is treated as changed — never suppressed —
+// so real edits, creations, and deletions always reload. Mirrors the mtime-
+// dedupe the backend reload path already does.
+const _fileHashes = new Map();   // absPath → sha1 of last-seen content
+function contentChanged(absPath) {
+  let buf;
+  try {
+    const st = fs.statSync(absPath);
+    if (!st.isFile() || st.size > 2 * 1024 * 1024) { _fileHashes.delete(absPath); return true; }
+    buf = fs.readFileSync(absPath);
+  } catch {
+    _fileHashes.delete(absPath);   // gone / unreadable (e.g. a delete) → reload
+    return true;
+  }
+  const h = crypto.createHash('sha1').update(buf).digest('hex');
+  const prev = _fileHashes.get(absPath);
+  _fileHashes.set(absPath, h);
+  return prev !== h;               // undefined prev (first sight) ≠ h → changed
+}
+
 // Path-mounted modules (atelier.config.json `{ "path": ... }` entries) can
 // live anywhere on disk — outside ROOT, so the ROOT watcher misses them.
 // Walk current discovery once at boot and add a watcher per off-ROOT
@@ -1752,6 +1779,7 @@ function watchOffRootModules() {
         if (!filename) return;
         const segs = filename.split(path.sep);
         if (segs.some((s) => s === 'node_modules' || s === 'data' || s.startsWith('.'))) return;
+        if (!contentChanged(path.join(m.dir, filename))) return;   // skip content-identical touches
         broadcastReload(m.qualifiedId, { cssFile: filename.endsWith('.css') });
       });
       offRootWatched.add(m.qualifiedId);
@@ -1768,6 +1796,11 @@ if (HOT_RELOAD) fs.watch(ROOT, { recursive: true }, (event, filename) => {
   if (segs.some(watchSkipSeg)) return;
   // backend.js hot-swaps server-side via fs.watch — never nudge the browser.
   if (segs[segs.length - 1] === 'backend.js') return;
+  // Skip content-identical rewrites (editor write-back, no-op formatter, a tool
+  // re-touching a just-edited file on the next message): they bump mtime but
+  // change nothing. Dirs, deletes, and new files read as changed, so workspace
+  // creation and real edits still fire.
+  if (!contentChanged(path.join(ROOT, filename))) return;
 
   // Resolve the qualified id of the (possibly affected) module.
   //   root:      <mod>/...        → qualifiedId = 'global/<mod>'
