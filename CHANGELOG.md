@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.9.2
+
+**A module render crash now recovers on hot-swap.** A module that throws *while rendering* (frequent while an agent is mid-edit) is caught by a shell-owned per-module boundary that surfaces a neutral "Render Error" overlay in the module's own subtree — and, crucially, **resets the instant the module's code hot-swaps**. So the moment the crash is fixed the module re-renders, with no manual reload. Previously the crash was caught by a chrome's error boundary that reset only on navigation (a different module), so a render error stayed stuck — still showing the error even after the fix — until you navigated away or hard-refreshed. The boundary is isolated (it never crashes the chrome or sibling modules) and applies to every chrome.
+
 ## 0.9.1
 
 **Hot reload ignores content-identical touches.** The frontend file-watchers now hash the changed file and broadcast a reload only when its bytes actually differ from what was last served. A no-op rewrite — an editor saving an unchanged buffer, a formatter that changes nothing, a tool re-touching a file it just wrote on the next message — bumps mtime but no longer reloads the page. Real edits, new files, and deletions still reload (a directory, a delete, a >2 MB asset, or a first sighting reads as changed and is never suppressed). Mirrors the mtime-dedupe the backend reload path already does. Fixes spurious reloads where a just-edited module file was re-touched with identical content on the next interaction.

@@ -448,6 +448,40 @@ class ChromeErrorBoundary extends React.Component {
   }
 }
 
+// Per-module render-crash boundary, owned by the shell so every chrome gets it.
+// A module that throws WHILE RENDERING (the common case while an agent is mid-
+// edit) is caught here — isolated to its own subtree, surfaced as a dev overlay,
+// never crashing the chrome or sibling modules. Crucially it RESETS when the
+// module's code hot-swaps: the shell passes the live module component as
+// `moduleType`, and a hot-swap re-imports it into a NEW function identity, so
+// the moment the crash is fixed the new code renders — no manual reload. (This
+// inner boundary catches before any boundary the chrome wraps modules in; a
+// chrome boundary that only reset on navigation used to leave a render crash
+// stuck until you navigated away or hard-refreshed.)
+class ModuleCrashBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error(`[atelier] module '${this.props.qid}' render crashed:`, err, info?.componentStack || ''); }
+  componentDidUpdate(prev) {
+    // New module component identity (hot-swap, or navigation to another module)
+    // → clear the crash so the fresh code gets a chance to render. If it still
+    // throws, getDerivedStateFromError catches it again — no loop.
+    if (this.state.err && prev.moduleType !== this.props.moduleType) this.setState({ err: null });
+  }
+  render() {
+    if (!this.state.err) return this.props.children;
+    const mono = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+    const msg = (this.state.err && (this.state.err.stack || this.state.err.message)) || String(this.state.err);
+    return React.createElement('div', { style: { padding: 24, colorScheme: 'dark', font: `13px/1.6 ${mono}` } },
+      React.createElement('div', { style: { maxWidth: 820, background: '#0a0a0a', color: '#ededed', border: '1px solid #2a2a2a', borderRadius: 12, overflow: 'hidden' } },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: '1px solid #2a2a2a' } },
+          React.createElement('span', { style: { padding: '2px 8px', borderRadius: 6, fontWeight: 600, fontSize: 11, background: 'rgba(248,113,113,0.12)', color: '#f87171', border: '1px solid rgba(248,113,113,0.4)', textTransform: 'uppercase', letterSpacing: '.05em' } }, 'Render Error'),
+          React.createElement('span', { style: { color: '#a1a1a1' } }, this.props.qid || '')),
+        React.createElement('pre', { style: { margin: 0, padding: '18px 20px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, msg),
+        React.createElement('div', { style: { padding: '10px 20px', borderTop: '1px solid #2a2a2a', color: '#7a7a7a', fontSize: 12 } }, 'Clears automatically when the module renders without throwing.')));
+  }
+}
+
 function App() {
   // Auth module's handleUnauth took over → render only its bundle, no chrome.
   if (window.__ATELIER__?.takeover) return React.createElement(Takeover);
@@ -724,7 +758,13 @@ function App() {
     active = { kind: 'error', qid: activeMod.qid, err: new Error('no default export') };
   } else {
     const M = entry.Module;
-    active = { kind: 'ready', qid: activeMod.qid, element: React.createElement(M) };
+    // Wrap in the shell's crash boundary, keyed on the module component so a
+    // hot-swap (new M identity) resets a stuck render error — see ModuleCrashBoundary.
+    active = {
+      kind: 'ready',
+      qid: activeMod.qid,
+      element: React.createElement(ModuleCrashBoundary, { qid: activeMod.qid, moduleType: M }, React.createElement(M)),
+    };
   }
 
   return React.createElement(React.Fragment, null,
