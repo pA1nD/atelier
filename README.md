@@ -22,24 +22,27 @@
 Atelier is an **app shell + module runner**. Point your agent at a folder — a `frontend.jsx` and/or a `backend.js` — and it becomes a routed, hot-reloading, real-time module. The shell handles routing, bundling, a shared real-time WebSocket, workspaces, and (optional) auth, so a module stays a file or two of React and a handful of route handlers.
 
 ```
-myinstance/
-  atelier/            the shell — five files, ~3k lines
-  notes/              →  /global/notes      a module (a folder with a frontend.jsx)
+my-studio/
+  node_modules/@pa1nd/atelier     the shell — five files, ~3k lines (or a checkout at ./atelier/)
+  notes/              →  /global/notes       a module (a folder with a frontend.jsx)
   $acme/board/        →  /acme/board         a workspace module
 ```
 
-The whole shell is **five files (~3k lines)**, and your modules ship **zero dependencies of their own** — no React, no bundler, no WebSocket client to vendor. It ships **zero pixels and zero assumptions**: no default theme, no install step, no dev/prod notion. An instance is a folder you run.
+The whole shell is **five files (~3k lines)**, and your modules ship **zero dependencies of their own** — no React, no bundler, no WebSocket client to vendor. It ships **zero pixels and zero assumptions**: no default theme, no dev/prod notion. An instance is a folder you run.
 
 > **Platform.** Atelier runs anywhere Node 24+ does — there is no OS-specific install layer (you run it; your process manager / PaaS / reverse proxy is your concern).
 
 ## Quickstart
 
-```
-npm install
-npm run dev          # http://localhost:1844 (override with PORT=…), hot reload, discovers sibling modules
+```sh
+npm create @pa1nd/atelier my-studio    # scaffold a tiny instance that depends on @pa1nd/atelier
+cd my-studio && npm install
+npm run dev                            # http://localhost:1844 (override with PORT=…), hot reload, discovers sibling modules
 ```
 
-The folder you run from **is** the instance. Its [`atelier.config.json`](docs/README.md#configuration--discovery) is the source of truth (which modules run, which chrome, port, auth, …); environment variables override it at startup. Want a second instance? Run a second folder — or the same folder with different startup config (e.g. a different `PORT` and `auth`).
+Or add the shell to an existing folder — `npm install @pa1nd/atelier`, then `npx atelier`: the folder that owns `node_modules` is the instance. (Working from a checkout of this repo instead? The subfolder layout still works: the instance is the folder *containing* `atelier/`; run `npm install && npm run dev` inside `atelier/`.)
+
+The folder you run in **is** the instance. Its [`atelier.config.json`](docs/README.md#configuration--discovery) is the source of truth (which modules run, which chrome, port, auth, …); environment variables override it at startup. Want a second instance? Run a second folder — or the same folder with different startup config (e.g. a different `PORT` and `auth`).
 
 You'll see an "add a chrome" screen until you install a chrome module — the shell ships no chrome and has no built-in theme. Write or install one (a global-workspace folder exporting `meta = { isChrome: true, hidden: true }` and a `chrome` function) and point your config's `defaultChrome` at it. See [Modules → the chrome](docs/MODULES.md#special-module-the-chrome).
 

@@ -46,6 +46,34 @@ export const workspaceName = (dirName) =>
   isWorkspaceDir(dirName) ? dirName.slice(1) : null;
 
 /* ============================================================================
+ * INSTANCE ROOT RESOLUTION
+ *
+ * ROOT is the instance folder whose modules the shell discovers — distinct from
+ * where the shell's own code lives (hostDir). Resolved in priority order:
+ *   1. ATELIER_ROOT (explicit) — the instance folder itself; for managed
+ *      launchers (launchd/systemd/PaaS/Docker) that may not set PWD.
+ *   2. Shell installed as a dependency — hostDir is
+ *      `<instance>/node_modules/@scope/atelier`, so the instance is the folder
+ *      that OWNS that node_modules. Split on the FIRST `/node_modules/` so a
+ *      nested store (pnpm's `.pnpm/…/node_modules/…`) still resolves to the
+ *      consumer's project, not the store.
+ *   3. Legacy layout — the shell is a subfolder of the instance
+ *      (`<instance>/atelier`), so the instance is the parent of PWD (the shell's
+ *      *logical* cwd, which preserves a shared-symlink path where process.cwd()
+ *      would resolve it away). Falls back to hostDir's parent when PWD is unset.
+ *
+ * (A project literally nested inside a `node_modules/` dir is pathological;
+ *  ATELIER_ROOT overrides for that case.)
+ * ============================================================================ */
+export function resolveRoot({ atelierRoot, pwd, hostDir }) {
+  if (atelierRoot) return path.resolve(atelierRoot);
+  const marker = `${path.sep}node_modules${path.sep}`;
+  const i = hostDir.indexOf(marker);
+  if (i !== -1) return hostDir.slice(0, i);
+  return path.resolve(pwd || hostDir, '..');
+}
+
+/* ============================================================================
  * MODULE CONFIG — optional filter + path inclusion at
  * <workspace>/atelier.config.json.
  *

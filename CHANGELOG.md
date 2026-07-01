@@ -2,6 +2,20 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.10.0
+
+**Atelier is now an npm package — install the shell as a dependency and run it with `atelier`.** `npm install @pa1nd/atelier` makes an instance a plain npm project: a `package.json` that depends on the shell, nothing vendored (`npm create @pa1nd/atelier my-studio` scaffolds one). The subfolder layout — a checkout at `<instance>/atelier/` — keeps working unchanged; both are first-class.
+
+### Added
+- **Published as `@pa1nd/atelier`** (MIT) with an **`atelier` bin** — `server.js` is the bin, so `npx atelier` (or a scaffolded `"dev": "atelier"` script) boots the instance, and `atelier <id>` is standalone mode, exactly as `node server.js <id>` was.
+- **Instance-root resolution understands the dependency layout** — `resolveRoot` (discovery.js) picks ROOT in priority order: `ATELIER_ROOT` (explicit, unchanged) → shell installed under `node_modules` (the instance is the folder that *owns* that `node_modules`; splits on the first marker so a pnpm nested store resolves to the consumer project, not the store) → legacy parent-of-PWD (shell as a subfolder — behavior identical to 0.9.x). Unit-tested in `test/root-resolve.test.js`.
+- **Hoisting-agnostic vendor assets** — `/assets/react.js` and `/assets/react-dom.js` locate the React UMD builds via Node resolution (`createRequire` against the package's own root) instead of a hardcoded `<shell>/node_modules/…` path, so they serve whether the shell's dependencies are nested (dev checkout) or hoisted (installed as a dependency).
+
+### Notes
+- **No module-authoring contract change** — module shape, `ctx`, `window.__atelier`, URLs, and the config schema are unchanged. This release changes how the shell itself is obtained and where it may live on disk.
+- In a monorepo whose hoisting puts the shell in the repo-root `node_modules`, ROOT resolves to the repo root — set `ATELIER_ROOT` to the intended instance folder. Same escape hatch for `npx` without a local install or a global install. The resolved root prints at startup, so a wrong one is obvious.
+- Shell files don't hot-reload — **restart instances to pick this up.**
+
 ## 0.9.2
 
 **A module render crash now recovers on hot-swap.** A module that throws *while rendering* (frequent while an agent is mid-edit) is caught by a shell-owned per-module boundary that surfaces a neutral "Render Error" overlay in the module's own subtree — and, crucially, **resets the instant the module's code hot-swaps**. So the moment the crash is fixed the module re-renders, with no manual reload. Previously the crash was caught by a chrome's error boundary that reset only on navigation (a different module), so a render error stayed stuck — still showing the error even after the fix — until you navigated away or hard-refreshed. The boundary is isolated (it never crashes the chrome or sibling modules) and applies to every chrome.

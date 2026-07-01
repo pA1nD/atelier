@@ -47,7 +47,17 @@ This page is the shell itself: running an instance, what lives in `atelier/`, an
 
 ## Running an instance
 
-An atelier instance is a **folder you run** — there is no install step, no launchd, no `~/.atelier/`. The folder holds (or path-mounts via config) your modules and a chrome, plus an optional `atelier.config.json`.
+An atelier instance is a **folder you run** — no launchd, no `~/.atelier/`. The folder holds (or path-mounts via config) your modules and a chrome, plus an optional `atelier.config.json`. The shell itself can live in either of two places:
+
+**As a dependency** — `npm install @pa1nd/atelier` (or scaffold a fresh instance with `npm create @pa1nd/atelier my-studio`). The shell runs itself from `node_modules` via its `atelier` bin:
+
+```
+npx atelier                                # http://localhost:1844 (PORT= to override), hot reload
+npx atelier <id>                           # standalone — just one module
+npx atelier <workspace>/<id>               # standalone — a workspace module
+```
+
+**As a subfolder** — a checkout of this repo at `<instance>/atelier/`:
 
 ```
 npm install
@@ -56,9 +66,9 @@ npm run dev:module -- <id>                 # standalone — just one module
 npm run dev:module -- <workspace>/<id>     # standalone — a workspace module
 ```
 
-`npm run dev` is just `node server.js`. Point a browser at the port; you'll see an "add a chrome" screen until a chrome is installed (the shell ships none). Standalone mode (`dev:module`) runs a single module in isolation — it shows no chrome unless the requested module is itself one.
+Either way it's the same server (`npm run dev` and the `atelier` bin are both just `server.js`). Point a browser at the port; you'll see an "add a chrome" screen until a chrome is installed (the shell ships none). Standalone mode runs a single module in isolation — it shows no chrome unless the requested module is itself one.
 
-> **Which folder is the instance?** Modules are discovered in the folder you run from, inferred from `PWD` (your shell's logical working directory — so it still points at the instance even when `atelier/` is a shared symlink). For **managed launchers** (launchd, systemd, Docker, a PaaS) that may not set `PWD`, set **`ATELIER_ROOT=/path/to/instance`** to name the folder explicitly — it overrides the inference. The resolved root is printed at startup (`Atelier · <mode> · <root> · env=<env>`), so a wrong one is obvious.
+> **Which folder is the instance?** Resolved in priority order: **1.** `ATELIER_ROOT=/path/to/instance` — explicit; for **managed launchers** (launchd, systemd, Docker, a PaaS) that may not set `PWD`, and for monorepos whose hoisting puts the shell in the repo-root `node_modules`. **2.** Shell installed as a dependency — the instance is the folder that *owns* the `node_modules` the shell runs from (a pnpm nested store resolves to the consumer project, not the store). **3.** Subfolder layout — the parent of the folder you run from, inferred from `PWD` (your shell's logical working directory — so it still points at the instance even when `atelier/` is a shared symlink). The resolved root is printed at startup (`Atelier · <mode> · <root> · env=<env>`), so a wrong one is obvious.
 
 ### One folder = one instance
 

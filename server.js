@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /* Atelier runner — host mode + standalone mode.
  *
  *   node atelier/server.js                         → host mode, all modules in the rail
@@ -40,6 +41,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
 import { WebSocketServer } from 'ws';
@@ -47,24 +49,24 @@ import { getJsx, getJsxBundle, getCss } from './build.js';
 import { resolveModuleChrome, missingChrome } from './chrome-resolve.js';
 import {
   loadConfig, loadModuleConfig, shouldIncludeModule, collectConfigPaths, resolvePathEntry,
-  CONFIG_FILENAME,
+  CONFIG_FILENAME, resolveRoot,
   RESERVED_NAMES, GLOBAL_WORKSPACE, isSpecialDir, isWorkspaceDir, workspaceName,
 } from './discovery.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
-// ROOT is the instance folder where modules are discovered. Resolved three ways,
-// in order:
-//   1. ATELIER_ROOT, if set — the instance folder itself. Explicit; for managed
-//      launchers (launchd/systemd/PaaS/Docker) that don't reliably set PWD.
-//   2. else atelier/'s parent, derived from PWD — the shell's *logical* cwd,
-//      which preserves the symlink path when atelier/ is shared across instances
-//      (process.cwd() would resolve the symlink to the shared shell location).
-//   3. else atelier/'s parent, derived from HOST_DIR — last-resort fallback when
-//      PWD is unset (then ROOT collapses to the shared shell's own parent, which
-//      is only correct for a non-symlinked checkout — hence prefer ATELIER_ROOT).
-const ROOT = process.env.ATELIER_ROOT
-  ? path.resolve(process.env.ATELIER_ROOT)
-  : path.resolve(process.env.PWD || HOST_DIR, '..');
+// Resolve the shell's own dependencies (react/react-dom UMD) from HOST_DIR — works
+// whether they're nested under the shell (dev checkout) or hoisted to the instance's
+// top-level node_modules (shell installed as a dependency).
+const hostRequire = createRequire(import.meta.url);
+// ROOT is the instance folder where modules are discovered — distinct from
+// HOST_DIR (the shell's own code). Priority: ATELIER_ROOT → shell-in-node_modules
+// (installed as a dependency) → legacy PWD-parent (shell as a subfolder). See
+// resolveRoot in discovery.js for the full rationale.
+const ROOT = resolveRoot({
+  atelierRoot: process.env.ATELIER_ROOT,
+  pwd: process.env.PWD,
+  hostDir: HOST_DIR,
+});
 
 const [, , requestedId] = process.argv;
 const MODE = requestedId ? 'standalone' : 'host';
@@ -1131,12 +1133,18 @@ function resolveAssetSource(pathname) {
   // with React's warnings (invalid hooks, missing keys, readable errors);
   // 'production' ships the minified build.
   const VENDOR = {
-    '/assets/react.js':     PROD_BUILD ? 'react/umd/react.production.min.js'     : 'react/umd/react.development.js',
-    '/assets/react-dom.js': PROD_BUILD ? 'react-dom/umd/react-dom.production.min.js' : 'react-dom/umd/react-dom.development.js',
+    '/assets/react.js':     ['react',     PROD_BUILD ? 'umd/react.production.min.js'     : 'umd/react.development.js'],
+    '/assets/react-dom.js': ['react-dom', PROD_BUILD ? 'umd/react-dom.production.min.js' : 'umd/react-dom.development.js'],
   };
   if (VENDOR[pathname]) {
-    const src = path.join(HOST_DIR, 'node_modules', VENDOR[pathname]);
-    return fs.existsSync(src)
+    // Resolve the package ROOT via its always-exported package.json (React's
+    // `exports` map doesn't expose ./umd/*), then join the UMD file as a plain
+    // path — hoisting-agnostic, so it works nested (dev) or hoisted (installed).
+    const [pkg, rel] = VENDOR[pathname];
+    let src = null;
+    try { src = path.join(path.dirname(hostRequire.resolve(`${pkg}/package.json`)), rel); }
+    catch { src = null; }
+    return src && fs.existsSync(src)
       ? { kind: 'raw', src, contentType: 'text/javascript; charset=utf-8' }
       : null;
   }

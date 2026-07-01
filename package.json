@@ -1,8 +1,25 @@
 {
-  "name": "atelier",
-  "version": "0.9.2",
-  "private": true,
+  "name": "@pa1nd/atelier",
+  "version": "0.10.0",
   "type": "module",
+  "description": "The Atelier app shell — discovers, mounts, and serves feature modules around one shared chrome: a single runtime hosting many small, context-window-sized apps. Install as a dependency and run with `atelier`.",
+  "bin": {
+    "atelier": "server.js"
+  },
+  "files": [
+    "CHANGELOG.md",
+    "server.js",
+    "build.js",
+    "discovery.js",
+    "chrome-resolve.js",
+    "client.jsx",
+    "index.html",
+    "shims",
+    "docs"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dev": "node server.js",
     "dev:module": "node server.js",
@@ -19,5 +36,26 @@
     "react-dom": "18.3.1",
     "tailwindcss": "4.2.4",
     "ws": "8.21.0"
-  }
+  },
+  "license": "MIT",
+  "author": "pA1nD",
+  "homepage": "https://github.com/pA1nD/atelier#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pA1nD/atelier.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pA1nD/atelier/issues"
+  },
+  "keywords": [
+    "atelier",
+    "app-shell",
+    "module-runner",
+    "framework",
+    "react",
+    "esbuild",
+    "tailwind",
+    "multi-tenant",
+    "agents"
+  ]
 }
