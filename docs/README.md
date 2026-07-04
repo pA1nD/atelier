@@ -49,7 +49,7 @@ This page is the shell itself: running an instance, what lives in `atelier/`, an
 
 An atelier instance is a **folder you run** — no launchd, no `~/.atelier/`. The folder holds (or path-mounts via config) your modules and a chrome, plus an optional `atelier.config.json`. The shell itself can live in either of two places:
 
-**As a dependency** — `npm install @pa1nd/atelier` (or scaffold a fresh instance with `npm create @pa1nd/atelier my-studio`). The shell runs itself from `node_modules` via its `atelier` bin:
+**As a dependency** — `npm install @pa1nd/atelier`, or scaffold a fresh instance with `npm create @pa1nd/atelier my-studio` — optionally pulling a whole **starter kit** of modules (chrome included) with `-- --kit <kit>`; kits and specs are the scaffolder's feature, documented at [create-atelier](https://github.com/pA1nD/create-atelier). The shell runs itself from `node_modules` via its `atelier` bin:
 
 ```
 npx atelier                                # http://localhost:1844 (PORT= to override), hot reload
