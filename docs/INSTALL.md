@@ -23,35 +23,33 @@ Your instance is a plain folder: a `package.json` that depends on the shell, an 
 
 ## Install modules
 
+Modules come from **marketplaces** — and a marketplace is simply a public GitHub repo whose folders are modules. Register one, see what it offers, pick by name:
+
 ```sh
-npx atelier add kanban                            # by name, from your marketplaces
-npx atelier add kanban --from bigcorp/modules     # by name, from a specific repo
+npx atelier add --marketplace bigcorp/modules     # register — installs nothing
+npx atelier add --list                            # what your marketplaces offer (✓ = installed)
+npx atelier add kanban                            # install one module by name
+```
+
+`add` copies the module into your instance, installs its dependencies, and it's live on the next page load — no restart.
+
+Modules don't have to come from a marketplace, though — `add` takes anything npm can fetch:
+
+```sh
+npx atelier add kanban --from bigcorp/modules     # one-off from a repo, without registering it
 npx atelier add @scope/kanban                     # an npm package
 npx atelier add github:someone/kanban             # a git repo
 npx atelier add ../kanban --workspace acme        # a local folder, into $acme/
 ```
 
-`add` copies the module into your instance, installs its dependencies, and it's live on the next page load — no restart. Along the way it looks after you:
+Along the way, `add` looks after you:
 
 - **It never overwrites your edits.** An installed module is yours. If the folder already exists, `add` stops; `--force` replaces the code but keeps the module's `data/`.
 - **Failures are loud.** If the module's dependencies don't install, you get the full error and the exact command to retry — nothing is swallowed.
 - **It tells you what's missing.** Some modules need things a folder can't carry — a CLI like `ffmpeg`, an API key. If a module declares such needs, `add` checks and prints what's missing with the install command for each; add `--yes` to run those commands for you.
+- **Nothing is picked silently.** If a name exists in more than one of your marketplaces, `add` stops and shows you the `--from` commands to choose between them.
 
-One thing to know: anything that isn't a bare name is fetched with npm, so a local folder or git repo needs a `name` and `version` in its `package.json`.
-
-## Marketplaces
-
-A marketplace is simply a **public GitHub repo whose folders are modules** — and you don't need to install any of it to use it. Register it, browse it, pick what you want:
-
-```sh
-npx atelier add --marketplace bigcorp/modules     # register — installs nothing
-npx atelier add --list                            # see what your marketplaces offer
-npx atelier add kanban                            # pick one module by name
-```
-
-If the same name exists in more than one of your marketplaces, `add` stops and asks you to choose with `--from` — nothing is picked silently.
-
-Two related conveniences: `--from <owner/repo>` installs from a repo without registering it, and scaffolding with `--kit` registers the kit repo for you — so when that repo gains new modules later, they're one `add` away.
+Two footnotes: anything that isn't a bare name is fetched with npm, so a local folder or git repo needs a `name` and `version` in its `package.json`. And scaffolding with `--kit` registers the kit repo as a marketplace for you — so when that repo gains new modules later, they're one `add` away.
 
 ## Shipping your own modules
 
