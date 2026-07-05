@@ -17,7 +17,7 @@ Your instance is a plain folder: a `package.json` that depends on the shell, an 
 
 | Option | What it does |
 |---|---|
-| `--kit <owner/repo>` | Start with a whole kit: every module in that repo, theme included. |
+| `--kit <owner/repo \| git url>` | Start with a whole kit: every module in that repo, theme included. A public GitHub `owner/repo`, or any git url you can clone — `git+ssh://git@github.com/bigcorp/private-kit.git` scaffolds from a **private** kit via your own git auth. |
 | `--chrome <spec>` | Start with just a theme. |
 | `--add <spec>` | Start with one extra module (repeat as you like). |
 
