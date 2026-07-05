@@ -40,7 +40,7 @@ cd my-studio && npm install
 npm run dev                            # http://localhost:1844 (override with PORT=…), hot reload, discovers sibling modules
 ```
 
-Or add the shell to an existing folder — `npm install @pa1nd/atelier`, then `npx atelier`: the folder that owns `node_modules` is the instance. (Working from a checkout of this repo instead? The subfolder layout still works: the instance is the folder *containing* `atelier/`; run `npm install && npm run dev` inside `atelier/`.)
+Or add the shell to an existing folder — `npm install @pa1nd/atelier`, then `npx atelier`: the folder that owns `node_modules` is the instance. Install modules with `npx atelier add <spec>` — a folder of a marketplace repo, an npm package, a git url, or a local folder ([docs](docs/MODULES.md#sharing-modules--atelier-add--the-shipping-convention)). (Working from a checkout of this repo instead? The subfolder layout still works: the instance is the folder *containing* `atelier/`; run `npm install && npm run dev` inside `atelier/`.)
 
 The folder you run in **is** the instance. Its [`atelier.config.json`](docs/README.md#configuration--discovery) is the source of truth (which modules run, which chrome, port, auth, …); environment variables override it at startup. Want a second instance? Run a second folder — or the same folder with different startup config (e.g. a different `PORT` and `auth`).
 

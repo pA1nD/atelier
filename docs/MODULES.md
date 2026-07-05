@@ -99,7 +99,31 @@ const ws = require('ws')          // a node_modules dep
 import { helper } from './lib.js'  // first-party relative imports bundle in — no createRequire
 ```
 
-The shell never installs module deps for you.
+The shell never installs module deps for you — the **installer** does (below).
+
+### Sharing modules — `atelier add` & the shipping convention
+
+Modules are **sharing-first**: a module folder ships everything it needs to work, so installing one is nothing more than *copy the folder, install its npm deps*. The convention:
+
+- **`<module>/package.json` is the whole dependency manifest.** No external registry of a module's needs — if it imports a package, it declares it there, and any installer runs `npm install` inside the folder.
+- **`data/` never ships.** It's runtime state; installers skip it on copy and preserve the existing one on reinstall.
+- **Degrade gracefully.** A need the folder can't carry (a system CLI, a network service, an API key) must not crash the module — fall back, and surface what's missing in the module's own UI.
+- **Don't assume a chrome.** Pin `meta.chrome` or inline what you borrow — kit exports beyond your target chrome's are not portable.
+
+The installer is part of the shell's bin:
+
+```
+npx atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force]
+```
+
+- `<spec>` — a **bare name** (`kanban`) is one folder of a **marketplace repo**: a public github repo whose top-level folders are modules. Anything else is fetched via `npm pack`: a registry name (`@scope/kanban`), a git url, a tarball url, or a local folder.
+- Bare names resolve against `--from <owner/repo>`, else each entry of `"marketplaces": ["<owner/repo>", …]` in `atelier.config.json`, in order. (That key is read by tooling only — the server ignores it.)
+- `--workspace <ws>` installs into `$<ws>/` instead of the global workspace.
+- An existing folder is **never overwritten silently** — it may carry local edits. `--force` replaces it, preserving its `data/`.
+- If the module declares dependencies, they're installed in place; a failure is **loud** — the folder stays put with clear instructions to fix and re-run `npm install` there.
+- If the instance's `atelier.config.json` runs an allow-mode `modules` filter, the new module is appended to it (the filter is re-read per request, so the install is live with no restart).
+
+A marketplace repo may also carry `.atelier/marketplace.json` — **marketing only** (store name, icon, accent, per-app taglines and screenshots, which don't belong inside module folders). It has no install semantics: the folders are the inventory, and each module's own `package.json` is its dependency manifest.
 
 ### Runtime state
 

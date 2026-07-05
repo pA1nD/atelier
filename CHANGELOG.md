@@ -2,6 +2,21 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.11.0
+
+**`atelier add` — the module installer, and the sharing convention it implements.** Installing a module is now a first-class terminal act: *copy the folder, install its npm deps*. No marketplace-side dependency bookkeeping — a module's own `package.json` is its whole dependency manifest, and marketplace manifests are marketing-only.
+
+### Added
+- **`atelier add <spec>`** — a new subcommand on the `atelier` bin (`cli.js` dispatches; everything else runs the server exactly as before). A bare `<spec>` names a folder of a **marketplace repo** (a public github repo whose top-level folders are modules), resolved via `--from <owner/repo>` or the new `marketplaces` list in `atelier.config.json`; any other spec is fetched via `npm pack` (registry name, git url, tarball url, local folder). `--workspace <ws>` targets `$<ws>/`.
+- **The shipping convention** (docs/MODULES.md → *Sharing modules*): `package.json` owns a module's deps and installers run `npm install` in the folder — loudly failing with the folder kept in place for a manual retry; `data/` never ships and survives reinstalls; modules degrade gracefully around needs a folder can't carry; pin `meta.chrome` or inline what you borrow.
+- **Never overwrite silently** — an existing module folder is refused (it may carry local edits); `--force` replaces it, preserving its `data/`.
+- **Live filter append** — on instances with an allow-mode `modules` filter, the installed module is added to `atelier.config.json` (re-read per request, so no restart).
+- **`marketplaces` config key** — tooling-only (the server ignores it): github `owner/repo` entries bare names resolve against, in order.
+
+### Notes
+- **No server behavior change** — `server.js`, discovery, routing, and the module contract are untouched; the bin entry moved from `server.js` to the `cli.js` dispatcher. `add` becomes a reserved word for standalone mode (`node server.js add` remains the escape hatch for a module literally named "add").
+- Marketplace manifests (`.atelier/marketplace.json`) are **marketing-only** from here on: store identity + per-app copy/screenshots. Install semantics live in each module.
+
 ## 0.10.0
 
 **Atelier is now an npm package — install the shell as a dependency and run it with `atelier`.** `npm install @pa1nd/atelier` makes an instance a plain npm project: a `package.json` that depends on the shell, nothing vendored (`npm create @pa1nd/atelier my-studio` scaffolds one). The subfolder layout — a checkout at `<instance>/atelier/` — keeps working unchanged; both are first-class.

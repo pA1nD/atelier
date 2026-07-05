@@ -66,7 +66,7 @@ npm run dev:module -- <id>                 # standalone — just one module
 npm run dev:module -- <workspace>/<id>     # standalone — a workspace module
 ```
 
-Either way it's the same server (`npm run dev` and the `atelier` bin are both just `server.js`). Point a browser at the port; you'll see an "add a chrome" screen until a chrome is installed (the shell ships none). Standalone mode runs a single module in isolation — it shows no chrome unless the requested module is itself one.
+Either way it's the same server (`npm run dev` and the `atelier` bin are both just `server.js`). Install modules into the instance with **`npx atelier add <spec>`** — see [Modules → Sharing modules](./MODULES.md#sharing-modules--atelier-add--the-shipping-convention). Point a browser at the port; you'll see an "add a chrome" screen until a chrome is installed (the shell ships none). Standalone mode runs a single module in isolation — it shows no chrome unless the requested module is itself one.
 
 > **Which folder is the instance?** Resolved in priority order: **1.** `ATELIER_ROOT=/path/to/instance` — explicit; for **managed launchers** (launchd, systemd, Docker, a PaaS) that may not set `PWD`, and for monorepos whose hoisting puts the shell in the repo-root `node_modules`. **2.** Shell installed as a dependency — the instance is the folder that *owns* the `node_modules` the shell runs from (a pnpm nested store resolves to the consumer project, not the store). **3.** Subfolder layout — the parent of the folder you run from, inferred from `PWD` (your shell's logical working directory — so it still points at the instance even when `atelier/` is a shared symlink). The resolved root is printed at startup (`Atelier · <mode> · <root> · env=<env>`), so a wrong one is obvious.
 
@@ -124,6 +124,7 @@ All optional; resolved **defaults ← config ← environment** (env wins, so a P
 | `auth` | `false` | `ATELIER_AUTH` | path/id of the auth module, or `false` to run ungated (see [AUTH.md](./AUTH.md)) |
 | `revalidateMs` | `30000` | `ATELIER_REVALIDATE_MS` | how often live WebSocket sockets re-run `authenticate` (only when `auth` is set) — so logout/permission changes propagate without a reconnect; see [AUTH.md](./AUTH.md) |
 | `label` | `null` | `ATELIER_LABEL` | optional instance name a chrome may display |
+| `marketplaces` | `[]` | — | github `owner/repo` list the [`atelier add`](./MODULES.md#sharing-modules--atelier-add--the-shipping-convention) installer resolves bare module names against, in order. Tooling-only — the server ignores it |
 | `modules` | _(all run)_ | — | the module filter below |
 
 #### Module filter — top-level entries
