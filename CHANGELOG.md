@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.13.0
+
+**Private module stores — a marketplace is any git repo you can clone.** Marketplace and kit entries now take two forms: a public GitHub `owner/repo` (fetched as an anonymous tarball, exactly as before) or **any git url** — `git+ssh://…`, `git@host:…`, `https://….git` — fetched with a shallow clone that rides *your* git auth (ssh keys, credential helper). Private team stores, self-hosted GitLab/Gitea, and local `file://` repos all work in `atelier add` (`--marketplace`, `--list`, bare names, `--from`) and in `npm create --kit`. Failure stays loud: a clone that can't authenticate says so and points at your access setup.
+
 ## 0.12.0
 
 **Declared system needs — the `atelier` field, checked by `atelier add`.** A module can now declare in its own package.json what the folder can't carry:

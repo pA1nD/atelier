@@ -35,10 +35,11 @@ Whatever a `<spec>` resolves to must be **one module folder** — a folder with 
 
 ## Install modules
 
-Modules come from **marketplaces** — and a marketplace is simply a public GitHub repo whose folders are modules. Register one, see what it offers, pick by name:
+Modules come from **marketplaces** — and a marketplace is simply a git repo whose folders are modules: a public GitHub `owner/repo`, or **any git url you can clone** (`git+ssh://…` — that's how private stores work, riding your own ssh keys or credential helper). Register one, see what it offers, pick by name:
 
 ```sh
 npx atelier add --marketplace bigcorp/modules     # register — installs nothing
+npx atelier add --marketplace git+ssh://git@github.com/bigcorp/private-modules.git   # private store, via your git auth
 npx atelier add --list                            # what your marketplaces offer (✓ = installed)
 npx atelier add kanban                            # install one module by name
 npx atelier add kanban --yes                      # …and also run the install commands for any system needs it declares (ffmpeg & co.)

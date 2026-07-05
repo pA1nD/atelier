@@ -28,7 +28,7 @@ const fail = (msg) => { console.error(`\natelier add: ${msg}\n`); process.exit(1
 
 /* ---- args ---------------------------------------------------------------- */
 const USAGE = `usage: atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force] [--yes]
-       atelier add --marketplace <owner/repo>     register a marketplace (installs nothing)
+       atelier add --marketplace <owner/repo | git url>   register a marketplace (installs nothing)
        atelier add --list                         what your marketplaces offer
   <spec>   a bare module name (a folder of a registered marketplace), or anything
            npm can fetch: @scope/name, a git url, a tarball url, a local folder
@@ -51,10 +51,18 @@ for (let i = 0; i < args.length; i++) {
   else fail(`unknown option: ${a}\n\n${USAGE}`);
 }
 if (!spec && !registerRepo && !list) fail(USAGE);
-if (from) {
-  from = from.replace(/^github:/, '');
-  if (!/^[\w.-]+\/[\w.-]+$/.test(from)) fail(`--from must be a github <owner/repo>, got "${from}"`);
-}
+// A marketplace entry is a github <owner/repo> (fetched as a tarball, no auth)
+// or ANY git url you can clone — git+ssh://…, git@host:…, https://….git — which
+// uses your local git auth (ssh keys / credential helper), so private stores work.
+const isRepoShorthand = (s) => /^[\w.-]+\/[\w.-]+$/.test(s);
+const isGitUrl = (s) => /^(git\+ssh:\/\/|git\+https:\/\/|ssh:\/\/|git@)/.test(s) || /^https?:\/\/.+\.git$/.test(s) || /^file:\/\//.test(s);
+const normMarket = (r) => {
+  const n = String(r).replace(/^github:/, '');
+  if (isRepoShorthand(n)) return n;
+  if (isGitUrl(n)) return n.replace(/^git\+/, '');
+  fail(`a marketplace is a github <owner/repo> or a git url (git+ssh://… for private stores), got "${r}"`);
+};
+if (from) from = normMarket(from);
 if (workspace && !/^[a-zA-Z0-9][\w.-]*$/.test(workspace)) fail(`"${workspace}" isn't a usable workspace name`);
 
 /* ---- the instance --------------------------------------------------------- */
@@ -74,18 +82,32 @@ const runNpm = (args, opts = {}) => process.env.npm_execpath
   ? execFileSync(process.execPath, [process.env.npm_execpath, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts })
   : execFileSync('npm', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts });
 
-const repoRoots = new Map();   // owner/repo → extracted tarball root (downloaded once)
+const repoRoots = new Map();   // marketplace entry → local root (fetched once)
 async function fetchRepoRoot(repo) {
   if (repoRoots.has(repo)) return repoRoots.get(repo);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-add-'));
-  const url = `https://codeload.github.com/${repo}/tar.gz/HEAD`;
-  const res = await fetch(url).catch((e) => fail(`could not reach github.com for ${repo}: ${e.message}`));
-  if (!res.ok) fail(`could not download github.com/${repo} (HTTP ${res.status}) — is it a public repo?`);
-  fs.writeFileSync(path.join(tmp, 'repo.tgz'), Buffer.from(await res.arrayBuffer()));
-  const out = path.join(tmp, 'repo');
-  fs.mkdirSync(out);
-  execFileSync('tar', ['-xzf', path.join(tmp, 'repo.tgz'), '-C', out]);
-  const root = path.join(out, fs.readdirSync(out)[0]);   // single "<repo>-<ref>" top dir
+  let root;
+  if (isRepoShorthand(repo)) {
+    // public github shorthand — anonymous tarball, no git needed
+    const url = `https://codeload.github.com/${repo}/tar.gz/HEAD`;
+    const res = await fetch(url).catch((e) => fail(`could not reach github.com for ${repo}: ${e.message}`));
+    if (!res.ok) fail(`could not download github.com/${repo} (HTTP ${res.status}) — is it a public repo? (private stores work as git urls: git+ssh://…)`);
+    fs.writeFileSync(path.join(tmp, 'repo.tgz'), Buffer.from(await res.arrayBuffer()));
+    const out = path.join(tmp, 'repo');
+    fs.mkdirSync(out);
+    execFileSync('tar', ['-xzf', path.join(tmp, 'repo.tgz'), '-C', out]);
+    root = path.join(out, fs.readdirSync(out)[0]);   // single "<repo>-<ref>" top dir
+  } else {
+    // any git url — shallow clone with YOUR git auth (ssh keys / credential helper)
+    root = path.join(tmp, 'repo');
+    try {
+      execFileSync('git', ['clone', '--depth', '1', repo, root],
+        { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    } catch (e) {
+      const detail = (e.stderr || '').toString().trim().split('\n').slice(-2).join('\n  ');
+      fail(`could not clone ${repo} — check your access (ssh key / credential helper)\n  ${detail}`);
+    }
+  }
   repoRoots.set(repo, root);
   return root;
 }
@@ -97,7 +119,7 @@ const repoModuleDirs = (root) => fs.readdirSync(root, { withFileTypes: true })
 async function fetchModule() {
   if (isBareName(spec)) {
     const repos = from ? [from]
-      : (Array.isArray(config?.marketplaces) ? config.marketplaces.map((r) => String(r).replace(/^github:/, '')) : []);
+      : (Array.isArray(config?.marketplaces) ? config.marketplaces.map(normMarket) : []);
     if (!repos.length) {
       fail(`"${spec}" is a bare module name, but there is no marketplace to resolve it against.
   Pass one:            atelier add ${spec} --from <owner/repo>
@@ -113,7 +135,7 @@ async function fetchModule() {
       if (fs.existsSync(src) && isModuleFolder(src)) hits.push({ repo, src });
       else seen.push(`${repo}: ${repoModuleDirs(root).join(', ') || '(no modules)'}`);
     }
-    if (hits.length === 1) return { src: hits[0].src, id: spec, origin: `github.com/${hits[0].repo}` };
+    if (hits.length === 1) return { src: hits[0].src, id: spec, origin: isRepoShorthand(hits[0].repo) ? `github.com/${hits[0].repo}` : hits[0].repo };
     if (hits.length > 1) {
       fail(`"${spec}" exists in ${hits.length} of your marketplaces — pick one:\n${hits.map((h) => `  atelier add ${spec} --from ${h.repo}`).join('\n')}`);
     }
@@ -137,11 +159,6 @@ async function fetchModule() {
 }
 
 /* ---- --marketplace / --list — subscribe & browse without installing -------- */
-const normRepo = (r) => {
-  const n = String(r).replace(/^github:/, '');
-  if (!/^[\w.-]+\/[\w.-]+$/.test(n)) fail(`a marketplace is a github <owner/repo>, got "${r}"`);
-  return n;
-};
 const installedIds = () => {
   const ids = new Set();
   try {
@@ -156,10 +173,10 @@ const installedIds = () => {
 };
 
 if (registerRepo) {
-  const repo = normRepo(registerRepo);
+  const repo = normMarket(registerRepo);
   const cfg = config || {};
   cfg.marketplaces = Array.isArray(cfg.marketplaces) ? cfg.marketplaces : [];
-  if (cfg.marketplaces.map(normRepo).includes(repo)) {
+  if (cfg.marketplaces.map(normMarket).includes(repo)) {
     console.log(`  ${repo} is already a registered marketplace.`);
   } else {
     cfg.marketplaces.push(repo);
@@ -175,7 +192,7 @@ if (registerRepo) {
 }
 
 if (list) {
-  const repos = (Array.isArray(config?.marketplaces) ? config.marketplaces : []).map(normRepo);
+  const repos = (Array.isArray(config?.marketplaces) ? config.marketplaces : []).map(normMarket);
   if (!repos.length) fail(`no marketplaces registered — add one with:  atelier add --marketplace <owner/repo>`);
   const have = installedIds();
   for (const repo of [...new Set(repos)]) {

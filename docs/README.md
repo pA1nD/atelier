@@ -125,7 +125,7 @@ All optional; resolved **defaults ← config ← environment** (env wins, so a P
 | `auth` | `false` | `ATELIER_AUTH` | path/id of the auth module, or `false` to run ungated (see [AUTH.md](./AUTH.md)) |
 | `revalidateMs` | `30000` | `ATELIER_REVALIDATE_MS` | how often live WebSocket sockets re-run `authenticate` (only when `auth` is set) — so logout/permission changes propagate without a reconnect; see [AUTH.md](./AUTH.md) |
 | `label` | `null` | `ATELIER_LABEL` | optional instance name a chrome may display |
-| `marketplaces` | `[]` | — | github `owner/repo` repos the [`atelier add`](./INSTALL.md#install-modules) installer resolves bare module names against (register with `atelier add --marketplace`). Tooling-only — the server ignores it |
+| `marketplaces` | `[]` | — | marketplace repos — github `owner/repo` or any clonable git url — the [`atelier add`](./INSTALL.md#install-modules) installer resolves bare module names against (register with `atelier add --marketplace`). Tooling-only — the server ignores it |
 | `modules` | _(all run)_ | — | the module filter below |
 
 #### Module filter — top-level entries
