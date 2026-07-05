@@ -14,7 +14,8 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 - **`marketplaces` config key** — tooling-only (the server ignores it): github `owner/repo` entries bare names resolve against, in order.
 
 ### Notes
-- **No server behavior change** — `server.js`, discovery, routing, and the module contract are untouched; the bin entry moved from `server.js` to the `cli.js` dispatcher. `add` becomes a reserved word for standalone mode (`node server.js add` remains the escape hatch for a module literally named "add").
+- **Hardening:** the `uncaughtException` / `unhandledRejection` handlers now register **before** the first backend mount — an async fault thrown while the very first backends come up gets the fail-loud isolation banner instead of killing the process raw.
+- **No other server behavior change** — discovery, routing, and the module contract are untouched; the bin entry moved from `server.js` to the `cli.js` dispatcher. `add` becomes a reserved word for standalone mode (`node server.js add` remains the escape hatch for a module literally named "add").
 - Marketplace manifests (`.atelier/marketplace.json`) are **marketing-only** from here on: store identity + per-app copy/screenshots. Install semantics live in each module.
 
 ## 0.10.0

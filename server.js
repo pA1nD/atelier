@@ -914,6 +914,15 @@ async function mountPendingBackends() {
   }
 }
 
+// Registered BEFORE the first mount: module code starts running inside
+// mountPendingBackends (timers, listen()), and an async fault landing before
+// registration kills the process raw — no isolation, no banner. Safe to hoist:
+// handleUncaught and its whole call chain are function declarations, and the
+// state they touch (wsClients, backendErrors) is initialized above this line.
+process.on('uncaughtException', (err) => handleUncaught('uncaughtException', err));
+process.on('unhandledRejection', (reason) =>
+  handleUncaught('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason))));
+
 await mountPendingBackends();
 
 // ------------------------------------------------------------------------
@@ -1084,10 +1093,6 @@ function handleUncaught(kind, err) {
   process.exitCode = 1;
   process.exit(1);
 }
-
-process.on('uncaughtException', (err) => handleUncaught('uncaughtException', err));
-process.on('unhandledRejection', (reason) =>
-  handleUncaught('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason))));
 
 // ------------------------------------------------------------------------
 // URL → source path mapping
@@ -1772,8 +1777,8 @@ function contentChanged(absPath) {
 // Path-mounted modules (atelier.config.json `{ "path": ... }` entries) can
 // live anywhere on disk — outside ROOT, so the ROOT watcher misses them.
 // Walk current discovery once at boot and add a watcher per off-ROOT
-// module dir. Skips node_modules/dotfiles to avoid getting drowned by
-// npm-install events.
+// module dir. Same skip rules as the ROOT watcher (watchSkipSeg + the
+// backend.js exemption), so a module behaves identically wherever it lives.
 const offRootWatched = new Set();
 function watchOffRootModules() {
   if (!HOT_RELOAD) return;
@@ -1786,7 +1791,9 @@ function watchOffRootModules() {
       fs.watch(m.dir, { recursive: true }, (event, filename) => {
         if (!filename) return;
         const segs = filename.split(path.sep);
-        if (segs.some((s) => s === 'node_modules' || s === 'data' || s.startsWith('.'))) return;
+        if (segs.some(watchSkipSeg)) return;
+        // backend.js hot-swaps server-side via fs.watch — never nudge the browser.
+        if (segs[segs.length - 1] === 'backend.js') return;
         if (!contentChanged(path.join(m.dir, filename))) return;   // skip content-identical touches
         broadcastReload(m.qualifiedId, { cssFile: filename.endsWith('.css') });
       });
