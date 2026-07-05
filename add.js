@@ -27,26 +27,30 @@ const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const fail = (msg) => { console.error(`\natelier add: ${msg}\n`); process.exit(1); };
 
 /* ---- args ---------------------------------------------------------------- */
-const [spec, ...flags] = process.argv.slice(2);
-if (!spec || spec.startsWith('-')) {
-  fail(`usage: atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force] [--yes]
-  <spec>   a bare module name (a folder of a marketplace repo), or anything
+const USAGE = `usage: atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force] [--yes]
+       atelier add --marketplace <owner/repo>     register a marketplace (installs nothing)
+       atelier add --list                         what your marketplaces offer
+  <spec>   a bare module name (a folder of a registered marketplace), or anything
            npm can fetch: @scope/name, a git url, a tarball url, a local folder
-  --from   the marketplace repo for bare names (else the \`marketplaces\` list
-           in atelier.config.json)
+  --from   install a bare name from a specific repo (registered or not)
   --workspace  install into $<ws>/ instead of the global workspace
   --force  replace an existing module folder (its data/ is preserved)
   --yes    also run the install hints of missing system needs (the module's
-           \`atelier.bins\` declarations — author-supplied commands)`);
+           \`atelier.bins\` declarations — author-supplied commands)`;
+const args = process.argv.slice(2);
+let spec = null, from = null, workspace = null, force = false, yes = false, registerRepo = null, list = false;
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--from') from = args[++i] || fail('--from needs <owner/repo>');
+  else if (a === '--workspace') workspace = args[++i] || fail('--workspace needs a name');
+  else if (a === '--force') force = true;
+  else if (a === '--yes') yes = true;
+  else if (a === '--marketplace') registerRepo = args[++i] || fail('--marketplace needs <owner/repo>');
+  else if (a === '--list') list = true;
+  else if (!a.startsWith('-') && spec === null) spec = a;
+  else fail(`unknown option: ${a}\n\n${USAGE}`);
 }
-let from = null, workspace = null, force = false, yes = false;
-for (let i = 0; i < flags.length; i++) {
-  if (flags[i] === '--from') from = flags[++i] || fail('--from needs <owner/repo>');
-  else if (flags[i] === '--workspace') workspace = flags[++i] || fail('--workspace needs a name');
-  else if (flags[i] === '--force') force = true;
-  else if (flags[i] === '--yes') yes = true;
-  else fail(`unknown option: ${flags[i]}`);
-}
+if (!spec && !registerRepo && !list) fail(USAGE);
 if (from) {
   from = from.replace(/^github:/, '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(from)) fail(`--from must be a github <owner/repo>, got "${from}"`);
@@ -100,14 +104,20 @@ async function fetchModule() {
   Or configure them:   "marketplaces": ["<owner/repo>"] in ${CONFIG_PATH}
   (Full specs — @scope/name, git urls, tarballs, local folders — need neither.)`);
     }
-    const seen = [];
-    for (const repo of repos) {
+    // Marketplaces are a SET, not a search order: exactly one hit installs,
+    // several hits stop and ask (silent shadowing would be worse than a prompt).
+    const hits = [], seen = [];
+    for (const repo of [...new Set(repos)]) {
       const root = await fetchRepoRoot(repo);
       const src = path.join(root, spec);
-      if (fs.existsSync(src) && isModuleFolder(src)) return { src, id: spec, origin: `github.com/${repo}` };
-      seen.push(`${repo}: ${repoModuleDirs(root).join(', ') || '(no modules)'}`);
+      if (fs.existsSync(src) && isModuleFolder(src)) hits.push({ repo, src });
+      else seen.push(`${repo}: ${repoModuleDirs(root).join(', ') || '(no modules)'}`);
     }
-    fail(`no module "${spec}" in ${repos.length === 1 ? 'that marketplace' : 'any configured marketplace'} — available:\n  ${seen.join('\n  ')}`);
+    if (hits.length === 1) return { src: hits[0].src, id: spec, origin: `github.com/${hits[0].repo}` };
+    if (hits.length > 1) {
+      fail(`"${spec}" exists in ${hits.length} of your marketplaces — pick one:\n${hits.map((h) => `  atelier add ${spec} --from ${h.repo}`).join('\n')}`);
+    }
+    fail(`no module "${spec}" in ${repos.length === 1 ? 'that marketplace' : 'any of your marketplaces'} — available:\n  ${seen.join('\n  ')}`);
   }
   // anything npm can pack
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-add-'));
@@ -124,6 +134,59 @@ async function fetchModule() {
   if (!isModuleFolder(src)) fail(`"${spec}" fetched, but it isn't a module (no frontend.jsx or backend.js at its top level)`);
   const id = (readPkg(src).name || tgz.replace(/\.tgz$/, '')).split('/').pop();
   return { src, id, origin: spec };
+}
+
+/* ---- --marketplace / --list — subscribe & browse without installing -------- */
+const normRepo = (r) => {
+  const n = String(r).replace(/^github:/, '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(n)) fail(`a marketplace is a github <owner/repo>, got "${r}"`);
+  return n;
+};
+const installedIds = () => {
+  const ids = new Set();
+  try {
+    for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      if (e.name.startsWith('$')) {
+        try { for (const w of fs.readdirSync(path.join(ROOT, e.name))) ids.add(w); } catch {}
+      } else ids.add(e.name);
+    }
+  } catch {}
+  return ids;
+};
+
+if (registerRepo) {
+  const repo = normRepo(registerRepo);
+  const cfg = config || {};
+  cfg.marketplaces = Array.isArray(cfg.marketplaces) ? cfg.marketplaces : [];
+  if (cfg.marketplaces.map(normRepo).includes(repo)) {
+    console.log(`  ${repo} is already a registered marketplace.`);
+  } else {
+    cfg.marketplaces.push(repo);
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
+    console.log(`  registered: ${repo}  (in ${CONFIG_PATH})`);
+  }
+  const root = await fetchRepoRoot(repo);
+  const have = installedIds();
+  console.log(`  it offers:`);
+  for (const n of repoModuleDirs(root)) console.log(`    ${have.has(n) ? '✓' : '·'} ${n}${have.has(n) ? '  (installed)' : ''}`);
+  console.log(`\n  install one with:  npx atelier add <name>\n`);
+  process.exit(0);
+}
+
+if (list) {
+  const repos = (Array.isArray(config?.marketplaces) ? config.marketplaces : []).map(normRepo);
+  if (!repos.length) fail(`no marketplaces registered — add one with:  atelier add --marketplace <owner/repo>`);
+  const have = installedIds();
+  for (const repo of [...new Set(repos)]) {
+    const root = await fetchRepoRoot(repo);
+    console.log(`  ${repo}:`);
+    const mods = repoModuleDirs(root);
+    for (const n of mods) console.log(`    ${have.has(n) ? '✓' : '·'} ${n}${have.has(n) ? '  (installed)' : ''}`);
+    if (!mods.length) console.log('    (no modules)');
+  }
+  console.log(`\n  install with:  npx atelier add <name>\n`);
+  process.exit(0);
 }
 
 const { src, id, origin } = await fetchModule();

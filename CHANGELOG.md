@@ -10,6 +10,8 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 "atelier": { "os": ["darwin"], "bins": { "ffmpeg": "brew install ffmpeg" }, "env": ["SOME_API_KEY"], "note": "…" }
 ```
 
+Also in `atelier add`: **`--marketplace <owner/repo>`** registers a marketplace without installing anything (and shows what it offers), **`--list`** browses everything your marketplaces offer with installed-markers, and bare names now treat your marketplaces as a **set** — a name found in several stops and asks you to pick with `--from` instead of silently taking the first.
+
 After installing a module (and its npm deps), `atelier add` checks the declaration and prints an **ACTION NEEDED** block for anything missing — each absent bin with its author-supplied install hint, each unset env var, an OS mismatch — while the module still installs and runs (degrade-gracefully stays the rule). Nothing beyond `npm install` is ever executed unless you pass **`--yes`**, which runs the missing bins' hints (the same trust already extended to npm lifecycle scripts) and re-checks honestly afterwards. The shell itself never reads the field — it's an installer/tooling convention, documented in docs/MODULES.md.
 
 ## 0.11.0

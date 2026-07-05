@@ -1,84 +1,75 @@
 # Install
 
-Two commands cover the whole consumer side of atelier: **`npm create @pa1nd/atelier`** turns an empty folder into a running instance, and **`npx atelier add`** installs modules into it. This page documents both — plus the conventions they implement: how modules ship, and what a marketplace is.
+Two commands cover everything: **`npm create @pa1nd/atelier`** gives you a running atelier, and **`npx atelier add`** installs modules into it. You need **Node 24 or newer**.
 
-## Create an instance — `npm create @pa1nd/atelier`
+## Create an instance
 
 ```sh
-npm create @pa1nd/atelier my-studio                          # a tiny, empty instance
-npm create @pa1nd/atelier my-studio -- --kit <owner/repo>    # …preloaded with a whole starter kit
+npm create @pa1nd/atelier my-studio                          # a fresh, empty instance
+npm create @pa1nd/atelier my-studio -- --kit <owner/repo>    # …or preloaded with a starter kit
 cd my-studio && npm install
 npm run dev                                                  # → http://localhost:1844
 ```
 
-> The first `--` is npm's pass-through separator — everything after it goes to the scaffolder instead of being parsed by npm itself.
+> The first `--` hands everything after it to the scaffolder instead of npm.
 
-The scaffold is deliberately tiny — an instance is a folder, and this writes exactly four files:
+Your instance is a plain folder: a `package.json` that depends on the shell, an `atelier.config.json` for settings, and a README. The shell updates like any dependency — `npm update @pa1nd/atelier`.
 
-- **`package.json`** — depends on `@pa1nd/atelier` (the shell arrives from npm and runs itself from `node_modules`; update it with `npm update @pa1nd/atelier`), with `dev` / `dev:module` scripts calling the `atelier` bin.
-- **`atelier.config.json`** — `label`, `port`; `defaultChrome` when a kit or `--chrome` supplied one; `marketplaces: ["<kit repo>"]` when `--kit` was used, so bare-name `atelier add` works from day one.
-- **`.gitignore`**, **`README.md`**.
-
-| Option | Meaning |
+| Option | What it does |
 |---|---|
-| `--kit <owner/repo>` | Pull **every module folder** of a kit repo into the instance (same rule as the shell's discovery: a folder with a `frontend.jsx` or `backend.js`). The kit's chrome — detected via `isChrome: true` — becomes `defaultChrome`. |
-| `--chrome <spec>` | One chrome module, set as `defaultChrome`. |
-| `--add <spec>` | Any other module (repeatable). |
+| `--kit <owner/repo>` | Start with a whole kit: every module in that repo, theme included. |
+| `--chrome <spec>` | Start with just a theme. |
+| `--add <spec>` | Start with one extra module (repeat as you like). |
 
-A bare `<spec>` names one folder of the kit repo; anything else is fetched via `npm pack` (registry name, git url, tarball url, local folder). Node ≥ 24 runs the instance; the scaffolder itself runs on Node ≥ 18 so old setups get a friendly message instead of a crash.
-
-## Install modules — `npx atelier add`
-
-```
-npx atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force] [--yes]
-```
+## Install modules
 
 ```sh
-npx atelier add kanban                            # a folder of the first configured marketplace
-npx atelier add kanban --from bigcorp/modules     # …or of a specific repo
+npx atelier add kanban                            # by name, from your marketplaces
+npx atelier add kanban --from bigcorp/modules     # by name, from a specific repo
 npx atelier add @scope/kanban                     # an npm package
-npx atelier add github:someone/kanban             # a git repo that is one module
+npx atelier add github:someone/kanban             # a git repo
 npx atelier add ../kanban --workspace acme        # a local folder, into $acme/
-npx atelier add kanban --force                    # replace an existing copy (data/ kept)
 ```
 
-What one `add` does, in order:
+`add` copies the module into your instance, installs its dependencies, and it's live on the next page load — no restart. Along the way it looks after you:
 
-1. **Fetch.** A bare name comes straight off a marketplace repo's folders — resolved against `--from <owner/repo>`, else each entry of `"marketplaces": […]` in `atelier.config.json`, in order. Every *other* spec goes through `npm pack`, which requires a `package.json` with a `name` and `version` in the module (npm's rule, not atelier's).
-2. **Copy the folder** into the instance (or `$<ws>/` with `--workspace`) — excluding `node_modules`, `data`, and `.git`. An existing folder is **never overwritten silently**: it may carry local edits, so `add` refuses unless you pass `--force`, which replaces the code but **preserves the module's `data/`**.
-3. **Install its npm deps** — `npm install` inside the folder, when its `package.json` declares dependencies. A failure is **loud**: the folder stays put with exact instructions to fix and re-run `npm install` there.
-4. **Check its declared system needs** (the `atelier` field, below) and print an **ACTION NEEDED** block for anything missing. The module still installs and runs — degrading gracefully is part of the shipping convention.
-5. **Keep the instance's filter honest.** On an allow-mode `modules` filter, the new module is appended to `atelier.config.json` — and since the filter is re-read per request, the install is live with no restart.
+- **It never overwrites your edits.** An installed module is yours. If the folder already exists, `add` stops; `--force` replaces the code but keeps the module's `data/`.
+- **Failures are loud.** If the module's dependencies don't install, you get the full error and the exact command to retry — nothing is swallowed.
+- **It tells you what's missing.** Some modules need things a folder can't carry — a CLI like `ffmpeg`, an API key. If a module declares such needs, `add` checks and prints what's missing with the install command for each; add `--yes` to run those commands for you.
 
-`add` has no dependencies of its own: Node's standard library, the npm that invoked it, and the system `tar`.
+One thing to know: anything that isn't a bare name is fetched with npm, so a local folder or git repo needs a `name` and `version` in its `package.json`.
 
-## Declared system needs — the `atelier` field
+## Marketplaces
 
-Some needs can't ship in a folder — a system CLI, a platform, an API key. A module declares them in its own `package.json` so installers can check them:
+A marketplace is simply a **public GitHub repo whose folders are modules** — and you don't need to install any of it to use it. Register it, browse it, pick what you want:
 
-```json
-"atelier": {
-  "os": ["darwin"],
-  "bins": { "ffmpeg": "brew install ffmpeg" },
-  "env": ["SOME_API_KEY"],
-  "note": "video previews need ffmpeg; without it the module falls back to stills"
-}
+```sh
+npx atelier add --marketplace bigcorp/modules     # register — installs nothing
+npx atelier add --list                            # see what your marketplaces offer
+npx atelier add kanban                            # pick one module by name
 ```
 
-Everything is optional and **declarative**. The installer *checks and reports* — missing bins with their author-supplied install hints, unset env vars, an OS mismatch — and never runs anything beyond `npm install` unless asked: **`--yes`** executes the missing bins' hints (the same trust already extended to npm lifecycle scripts) and re-checks honestly afterwards. The scaffolder prints the same report, check-only, for every starter module. The shell itself never reads this field — it's an installer/tooling convention.
+If the same name exists in more than one of your marketplaces, `add` stops and asks you to choose with `--from` — nothing is picked silently.
 
-## Marketplaces & kits
+Two related conveniences: `--from <owner/repo>` installs from a repo without registering it, and scaffolding with `--kit` registers the kit repo for you — so when that repo gains new modules later, they're one `add` away.
 
-A **marketplace is just a public github repo whose top-level folders are modules.** The same repo is a **kit** when `npm create --kit` pulls all of it at scaffold time, and a **marketplace** when `atelier add <name>` pulls one folder later. Publishing a module *is* pushing its folder to such a repo.
+## Shipping your own modules
 
-- Bare-name resolution is configured per instance: `"marketplaces": ["<owner/repo>", …]` in `atelier.config.json`, tried in order. The key is read by tooling only — the server ignores it.
-- A repo may carry `.atelier/marketplace.json` — **marketing only** (store name, icon, accent, per-app taglines and screenshots, which don't belong inside module folders). It has no install semantics: the folders are the inventory.
+Publishing is as plain as installing:
 
-## How modules ship — the convention
+- **Push module folders to a public GitHub repo.** That's a marketplace.
+- **A module ships everything it needs**: its npm dependencies in its own `package.json`, and anything the folder can't carry declared in an `atelier` field so installers can check for it:
 
-For module authors, the contract that makes all of the above work:
+  ```json
+  "atelier": {
+    "os": ["darwin"],
+    "bins": { "ffmpeg": "brew install ffmpeg" },
+    "env": ["SOME_API_KEY"],
+    "note": "video previews need ffmpeg; without it the module falls back to stills"
+  }
+  ```
 
-- **`<module>/package.json` is the whole dependency manifest.** If it imports a package, it declares it there — no external registry of a module's needs. (In `backend.js`, load deps with `createRequire` — see [Modules → Dependencies](./MODULES.md#dependencies).)
-- **`data/` never ships.** It's runtime state; installers skip it on copy and preserve it on reinstall.
-- **Degrade gracefully.** A missing system need must not crash the module — fall back, surface what's missing in the module's own UI, and declare it in the `atelier` field so installers can say so up front.
-- **Don't assume a chrome.** Pin `meta.chrome` or inline what you borrow — kit exports beyond your target chrome's are not portable.
+- **Keep `data/` out of the repo** — it's runtime state, and installers preserve it across reinstalls.
+- **Don't crash on a missing need** — degrade gracefully, and say what's missing in your module's UI.
+
+For the full module-authoring contract (`ctx`, real-time, hot reload, chromes), see [Modules](./MODULES.md).
