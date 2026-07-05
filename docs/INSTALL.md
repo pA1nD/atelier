@@ -31,6 +31,8 @@ A `<spec>` — here and in `atelier add` — is any of:
 | `https://…/kanban.tgz` | a tarball url |
 | `../kanban` | a local folder |
 
+Whatever a `<spec>` resolves to must be **one module folder** — a folder with a `frontend.jsx` and/or `backend.js` at its top level (the [module shape](./MODULES.md#module-convention)); anything else is refused. A **chrome is just a module too**, so it installs the same way. A whole *repo of* modules is not a `<spec>` — that's a marketplace: register it with `--marketplace` and pull its modules by name.
+
 ## Install modules
 
 Modules come from **marketplaces** — and a marketplace is simply a public GitHub repo whose folders are modules. Register one, see what it offers, pick by name:
