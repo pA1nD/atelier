@@ -18,8 +18,8 @@ Your instance is a plain folder: a `package.json` that depends on the shell, an 
 | Option | What it does |
 |---|---|
 | `--kit <owner/repo>` | Start with a whole kit: every module in that repo, theme included. |
-| `--chrome <spec>` | Start with just a theme. |
-| `--add <spec>` | Start with one extra module (repeat as you like). |
+| `--chrome <spec>` | Start with just a theme — `<spec>` is a folder name from the kit repo, or anything npm can fetch: `@scope/name`, a git url, a tarball url, a local folder. |
+| `--add <spec>` | Start with one extra module — same `<spec>` forms as `--chrome`. Repeat as you like. |
 
 ## Install modules
 
