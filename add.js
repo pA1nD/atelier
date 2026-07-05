@@ -29,19 +29,22 @@ const fail = (msg) => { console.error(`\natelier add: ${msg}\n`); process.exit(1
 /* ---- args ---------------------------------------------------------------- */
 const [spec, ...flags] = process.argv.slice(2);
 if (!spec || spec.startsWith('-')) {
-  fail(`usage: atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force]
+  fail(`usage: atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force] [--yes]
   <spec>   a bare module name (a folder of a marketplace repo), or anything
            npm can fetch: @scope/name, a git url, a tarball url, a local folder
   --from   the marketplace repo for bare names (else the \`marketplaces\` list
            in atelier.config.json)
   --workspace  install into $<ws>/ instead of the global workspace
-  --force  replace an existing module folder (its data/ is preserved)`);
+  --force  replace an existing module folder (its data/ is preserved)
+  --yes    also run the install hints of missing system needs (the module's
+           \`atelier.bins\` declarations — author-supplied commands)`);
 }
-let from = null, workspace = null, force = false;
+let from = null, workspace = null, force = false, yes = false;
 for (let i = 0; i < flags.length; i++) {
   if (flags[i] === '--from') from = flags[++i] || fail('--from needs <owner/repo>');
   else if (flags[i] === '--workspace') workspace = flags[++i] || fail('--workspace needs a name');
   else if (flags[i] === '--force') force = true;
+  else if (flags[i] === '--yes') yes = true;
   else fail(`unknown option: ${flags[i]}`);
 }
 if (from) {
@@ -179,6 +182,45 @@ if (pkg.dependencies && Object.keys(pkg.dependencies).length) {
 `);
     process.exit(1);
   }
+}
+
+/* ---- system needs — the module's own `atelier` block ------------------------
+ * Declarative, in the module's package.json:
+ *   "atelier": { "os": ["darwin"],
+ *                "bins": { "ffmpeg": "brew install ffmpeg" },
+ *                "env": ["SOME_API_KEY"],
+ *                "note": "free-text caveat" }
+ * The installer CHECKS and REPORTS — it never runs anything beyond npm unless
+ * --yes, which executes the missing bins' author-supplied install hints (the
+ * same trust already extended to the module's npm lifecycle scripts).
+ */
+const needs = pkg.atelier && typeof pkg.atelier === 'object' ? pkg.atelier : {};
+const binOk = (b) => { try { execFileSync('/bin/sh', ['-c', `command -v ${b}`], { stdio: 'ignore' }); return true } catch { return false } };
+const declaredBins = Object.entries(needs.bins && typeof needs.bins === 'object' ? needs.bins : {})
+  .filter(([b]) => /^[A-Za-z0-9._-]+$/.test(b) || (console.log(`  ! ignoring unusable bin name in atelier.bins: ${JSON.stringify(b)}`), false));
+let missingBins = declaredBins.filter(([b]) => !binOk(b));
+
+if (yes && missingBins.length) {
+  for (const [b, hint] of missingBins) {
+    if (!hint) continue;
+    console.log(`  running install hint for ${b}:  ${hint}`);
+    try { execFileSync('/bin/sh', ['-c', String(hint)], { stdio: ['ignore', 'inherit', 'inherit'] }); }
+    catch { console.log(`  ! hint for ${b} exited non-zero`); }
+  }
+  missingBins = declaredBins.filter(([b]) => !binOk(b));   // re-check honestly
+}
+
+const missingEnv = (Array.isArray(needs.env) ? needs.env : []).filter((k) => !process.env[k]);
+const osMismatch = Array.isArray(needs.os) && needs.os.length && !needs.os.includes(process.platform);
+if (needs.note) console.log(`  note: ${needs.note}`);
+if (osMismatch || missingBins.length || missingEnv.length) {
+  console.log(`\n  ! ACTION NEEDED — ${qualified} is installed and will run, but degraded until:`);
+  if (osMismatch) console.log(`    · it targets os [${needs.os.join(', ')}] — this machine is ${process.platform}`);
+  for (const [b, hint] of missingBins) console.log(`    · missing ${b}${hint ? `  →  ${hint}` : ''}`);
+  for (const k of missingEnv) console.log(`    · missing env ${k} — provide it via your environment or launcher`);
+  if (missingBins.some(([, h]) => h) && !yes) console.log(`    (re-run with --yes to run the install hints)`);
+} else if (declaredBins.length || (needs.env || []).length) {
+  console.log(`  needs: all present ✓`);
 }
 
 /* ---- the instance's module filter ------------------------------------------

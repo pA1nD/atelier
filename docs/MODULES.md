@@ -107,13 +107,24 @@ Modules are **sharing-first**: a module folder ships everything it needs to work
 
 - **`<module>/package.json` is the whole dependency manifest.** No external registry of a module's needs — if it imports a package, it declares it there, and any installer runs `npm install` inside the folder.
 - **`data/` never ships.** It's runtime state; installers skip it on copy and preserve the existing one on reinstall.
-- **Degrade gracefully.** A need the folder can't carry (a system CLI, a network service, an API key) must not crash the module — fall back, and surface what's missing in the module's own UI.
+- **Degrade gracefully.** A need the folder can't carry (a system CLI, a network service, an API key) must not crash the module — fall back, and surface what's missing in the module's own UI. Declare such needs in the `atelier` field of the same package.json so installers can check them:
+
+  ```json
+  "atelier": {
+    "os": ["darwin"],
+    "bins": { "ffmpeg": "brew install ffmpeg" },
+    "env": ["SOME_API_KEY"],
+    "note": "video previews need ffmpeg; without it the module falls back to stills"
+  }
+  ```
+
+  Everything is optional and **declarative** — the installer *checks and reports* (missing bins with their install hints, missing env, an OS mismatch) and never runs anything beyond `npm install` unless asked: `--yes` executes the missing bins' author-supplied hints, the same trust already extended to npm lifecycle scripts. The shell itself never reads this field.
 - **Don't assume a chrome.** Pin `meta.chrome` or inline what you borrow — kit exports beyond your target chrome's are not portable.
 
 The installer is part of the shell's bin:
 
 ```
-npx atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force]
+npx atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force] [--yes]
 ```
 
 ```sh
@@ -132,6 +143,7 @@ npx atelier add kanban --force                    # replace an existing copy (da
 - `--workspace <ws>` installs into `$<ws>/` instead of the global workspace.
 - An existing folder is **never overwritten silently** — it may carry local edits. `--force` replaces it, preserving its `data/`.
 - If the module declares dependencies, they're installed in place; a failure is **loud** — the folder stays put with clear instructions to fix and re-run `npm install` there.
+- The module's `atelier` needs (above) are checked after install: anything missing prints an **ACTION NEEDED** block with the author's install hints; `--yes` runs those hints for you.
 - If the instance's `atelier.config.json` runs an allow-mode `modules` filter, the new module is appended to it (the filter is re-read per request, so the install is live with no restart).
 
 A marketplace repo may also carry `.atelier/marketplace.json` — **marketing only** (store name, icon, accent, per-app taglines and screenshots, which don't belong inside module folders). It has no install semantics: the folders are the inventory, and each module's own `package.json` is its dependency manifest.

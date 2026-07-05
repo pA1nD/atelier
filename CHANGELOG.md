@@ -2,6 +2,16 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.12.0
+
+**Declared system needs — the `atelier` field, checked by `atelier add`.** A module can now declare in its own package.json what the folder can't carry:
+
+```json
+"atelier": { "os": ["darwin"], "bins": { "ffmpeg": "brew install ffmpeg" }, "env": ["SOME_API_KEY"], "note": "…" }
+```
+
+After installing a module (and its npm deps), `atelier add` checks the declaration and prints an **ACTION NEEDED** block for anything missing — each absent bin with its author-supplied install hint, each unset env var, an OS mismatch — while the module still installs and runs (degrade-gracefully stays the rule). Nothing beyond `npm install` is ever executed unless you pass **`--yes`**, which runs the missing bins' hints (the same trust already extended to npm lifecycle scripts) and re-checks honestly afterwards. The shell itself never reads the field — it's an installer/tooling convention, documented in docs/MODULES.md.
+
 ## 0.11.0
 
 **`atelier add` — the module installer, and the sharing convention it implements.** Installing a module is now a first-class terminal act: *copy the folder, install its npm deps*. No marketplace-side dependency bookkeeping — a module's own `package.json` is its whole dependency manifest, and marketplace manifests are marketing-only.
