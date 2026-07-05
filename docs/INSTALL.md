@@ -11,7 +11,7 @@ cd my-studio && npm install
 npm run dev                                                  # → http://localhost:1844
 ```
 
-> The first `--` is npm's pass-through separator — everything after it goes to the scaffolder instead of being parsed by npm itself. (`npm create vite my-app -- --template react` has the same shape.)
+> The first `--` is npm's pass-through separator — everything after it goes to the scaffolder instead of being parsed by npm itself.
 
 The scaffold is deliberately tiny — an instance is a folder, and this writes exactly four files:
 
