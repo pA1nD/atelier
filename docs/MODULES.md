@@ -116,6 +116,17 @@ The installer is part of the shell's bin:
 npx atelier add <spec> [--from <owner/repo>] [--workspace <ws>] [--force]
 ```
 
+```sh
+npx atelier add kanban                            # a folder of the first configured marketplace
+npx atelier add kanban --from bigcorp/modules     # …or of a specific repo
+npx atelier add @scope/kanban                     # an npm package
+npx atelier add github:someone/kanban             # a git repo that is one module
+npx atelier add ../kanban --workspace acme        # a local folder, into $acme/
+npx atelier add kanban --force                    # replace an existing copy (data/ kept)
+```
+
+> Bare names come straight off a marketplace repo's folders — nothing else needed. Every *other* spec goes through `npm pack`, which requires a `package.json` with a `name` and `version` in the module (npm's rule, not atelier's) — worth knowing when you `add` a plain local folder or a git repo.
+
 - `<spec>` — a **bare name** (`kanban`) is one folder of a **marketplace repo**: a public github repo whose top-level folders are modules. Anything else is fetched via `npm pack`: a registry name (`@scope/kanban`), a git url, a tarball url, or a local folder.
 - Bare names resolve against `--from <owner/repo>`, else each entry of `"marketplaces": ["<owner/repo>", …]` in `atelier.config.json`, in order. (That key is read by tooling only — the server ignores it.)
 - `--workspace <ws>` installs into `$<ws>/` instead of the global workspace.
