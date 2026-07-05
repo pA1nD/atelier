@@ -18,8 +18,18 @@ Your instance is a plain folder: a `package.json` that depends on the shell, an 
 | Option | What it does |
 |---|---|
 | `--kit <owner/repo>` | Start with a whole kit: every module in that repo, theme included. |
-| `--chrome <spec>` | Start with just a theme — `<spec>` is a folder name from the kit repo, or anything npm can fetch: `@scope/name`, a git url, a tarball url, a local folder. |
-| `--add <spec>` | Start with one extra module — same `<spec>` forms as `--chrome`. Repeat as you like. |
+| `--chrome <spec>` | Start with just a theme. |
+| `--add <spec>` | Start with one extra module (repeat as you like). |
+
+A `<spec>` — here and in `atelier add` — is any of:
+
+| `<spec>` | What you get |
+|---|---|
+| `kanban` | a module folder, by name — from the kit repo here, from your registered marketplaces in `atelier add` |
+| `@scope/kanban` | an npm package |
+| `github:user/repo` | a git repo that is one module |
+| `https://…/kanban.tgz` | a tarball url |
+| `../kanban` | a local folder |
 
 ## Install modules
 
