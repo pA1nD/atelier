@@ -13,7 +13,7 @@ npm run dev                                                  # → http://localh
 
 > The first `--` hands everything after it to the scaffolder instead of npm.
 
-Your instance is a plain folder: a `package.json` that depends on the shell, an `atelier.config.json` for settings, and a README. The shell updates like any dependency — `npm update @pa1nd/atelier`.
+Your instance is a plain folder: a `package.json` that depends on the shell, an `atelier.config.json` for settings, and nothing else — the folder is yours. The shell updates like any dependency — `npm update @pa1nd/atelier`.
 
 | Option | What it does |
 |---|---|
