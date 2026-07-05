@@ -25,7 +25,7 @@ A `<spec>` — here and in `atelier add` — is any of:
 
 | `<spec>` | What you get |
 |---|---|
-| `kanban` | a module folder, by name — from the kit repo here, from your registered marketplaces in `atelier add` |
+| `kanban` | a module folder, by name. Here: from the kit repo. In `atelier add`: searched across **all** your registered marketplaces — one match installs, several stop and ask you to pick with `--from` |
 | `@scope/kanban` | an npm package |
 | `github:user/repo` | a git repo that is one module |
 | `https://…/kanban.tgz` | a tarball url |
