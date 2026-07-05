@@ -41,6 +41,7 @@ Modules come from **marketplaces** — and a marketplace is simply a public GitH
 npx atelier add --marketplace bigcorp/modules     # register — installs nothing
 npx atelier add --list                            # what your marketplaces offer (✓ = installed)
 npx atelier add kanban                            # install one module by name
+npx atelier add kanban --yes                      # …and also run the install commands for any system needs it declares (ffmpeg & co.)
 ```
 
 `add` copies the module into your instance, installs its dependencies, and it's live on the next page load — no restart.
@@ -68,7 +69,7 @@ Two footnotes: anything that isn't a bare name is fetched with npm, so a local f
 Publishing is as plain as installing:
 
 - **Push module folders to a public GitHub repo.** That's a marketplace.
-- **A module ships everything it needs**: its npm dependencies in its own `package.json`, and anything the folder can't carry declared in an `atelier` field so installers can check for it:
+- **A module ships everything it needs**: its npm dependencies in its own `package.json`, and anything the folder can't carry declared in an `atelier` field so installers can check for it — and `atelier add --yes` can install it:
 
   ```json
   "atelier": {
