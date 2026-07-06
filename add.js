@@ -220,16 +220,6 @@ if (fs.existsSync(dest) && !force) {
   Re-run with --force to replace it (its data/ is preserved).`);
 }
 
-// --force: keep the old module's data/ (runtime state) across the swap.
-let savedData = null;
-if (fs.existsSync(dest)) {
-  const dataDir = path.join(dest, 'data');
-  if (fs.existsSync(dataDir)) {
-    savedData = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-add-data-'));
-    fs.cpSync(dataDir, path.join(savedData, 'data'), { recursive: true });
-  }
-}
-
 // Stage under a dot-prefixed name — invisible to discovery. A RUNNING instance
 // hot-mounts new folders on its next request, so copying into place and THEN
 // installing deps leaves a window where the backend mounts against an empty
@@ -248,7 +238,6 @@ fs.cpSync(src, staging, {
     return top !== 'node_modules' && top !== 'data' && top !== '.git';
   },
 });
-if (savedData) fs.cpSync(path.join(savedData, 'data'), path.join(staging, 'data'), { recursive: true });
 
 /* ---- dependencies — the module's own package.json is the manifest ---------- */
 const pkg = readPkg(staging);
@@ -266,6 +255,13 @@ if (pkg.dependencies && Object.keys(pkg.dependencies).length) {
   }
 }
 
+// --force: carry the LIVE module's data/ (runtime state) into the staged copy
+// at the last moment — a rename, not a snapshot, so nothing the still-running
+// module wrote during the (possibly long) dependency install is lost. Same
+// filesystem, so it's instant regardless of size, and the module's open file
+// handles survive the move.
+const oldData = path.join(dest, 'data');
+if (fs.existsSync(oldData)) fs.renameSync(oldData, path.join(staging, 'data'));
 fs.rmSync(dest, { recursive: true, force: true });
 fs.renameSync(staging, dest);
 staged = false;
