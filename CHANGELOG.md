@@ -2,7 +2,7 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
-## Unreleased
+## 0.14.0
 
 **Computed `meta` now works.** `` name: `Hi ${x}` `` — or any meta built from module-scope constants — used to be silently dropped, `chrome:` pin included: the static parse can't read it, and the old in-process fallback died on the standard top-level patterns (`window.__atelier.self(…)`, a bare `@atelier/kit` import). Valid JavaScript losing declared behavior was the real bug. A pure object literal is still the fast path (read from source, nothing executes); a computed meta now falls back to a **disposable sandbox process** — the module bundled with every bare import stubbed to inert proxies, browser globals proxied, evaluated, `meta` read as JSON, process killed (so top-level timers/side effects die with it, and nothing ever executes inside the server). If both paths fail, discovery warns loudly with the module and the exact reason instead of silently degrading. Cached by mtime — one sandbox run per edit, zero cost for literal metas.
 
