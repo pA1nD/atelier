@@ -2,7 +2,7 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
-## Unreleased
+## 0.13.1
 
 **A backend that fails to load now heals itself the moment it can.** Observed in the wild: `atelier add` into a *running* instance copied the module folder, the shell hot-mounted it before `npm install` finished, and the backend stayed bricked on `Cannot find module` until a restart. Three layers fixed:
 
