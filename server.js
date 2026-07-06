@@ -39,11 +39,13 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
+import { execFile } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild';
+import { build as esbuildBuild } from 'esbuild';
 import { WebSocketServer } from 'ws';
 import { getJsx, getJsxBundle, getCss } from './build.js';
 import { resolveModuleChrome, missingChrome } from './chrome-resolve.js';
@@ -441,39 +443,19 @@ function getModules() {
 // without waiting for the dynamic import on the client. Eliminates the
 // first-paint flicker where grouped modules briefly render ungrouped.
 //
-// How it works: transform the JSX with esbuild, wrap in a data: URL, and
-// dynamic-import it in Node. `meta` is a plain top-level object literal —
-// no React or browser globals needed at module load — so Proxy stubs for
-// `React`, `ReactDOM`, and `window` are enough to let common top-level
-// destructures (`const { useState } = React;`, `const { createPortal } =
-// ReactDOM;`) and store-init blocks (`if (!window.__store) …`) not throw.
-// `document` is intentionally NOT stubbed — modules that touch it at top
-// scope must still guard with `typeof document !== 'undefined'` so live
-// DOM side-effects don't fire during SSR. Cached by file mtime so
-// repeated requests pay the cost once per edit.
+// Two paths. FAST: `meta` is a pure object literal by convention → a static
+// brace-balanced read, nothing executes (the path for ~every module).
+// FALLBACK: a computed meta (template literal, module-scope constant, spread)
+// is evaluated in a DISPOSABLE child process — the module is bundled with
+// every bare import stubbed to a deep proxy, browser globals proxied, and the
+// child prints `meta` as JSON and exits, so top-level side effects (timers,
+// listeners) die with it and nothing ever executes inside the server process.
+// Module code is already trusted like a dependency (a backend runs in the
+// shell's process); an isolated child running a frontend's top level is
+// strictly less. Cached by file mtime so repeated requests pay once per edit.
 // ------------------------------------------------------------------------
 
 const metaCache = new Map();   // moduleId → { meta, mtimeMs }
-let reactStubbed = false;
-
-function stubReactOnce() {
-  if (reactStubbed) return;
-  // React.Component / React.PureComponent must be extendable so modules
-  // (or the chrome) declaring `class Foo extends React.Component` at module
-  // top level don't blow up during meta extraction. Everything else is a
-  // no-op function (covers hooks, createElement, etc.).
-  class StubComponent { render() { return null; } }
-  const stub = new Proxy({}, {
-    get(_, prop) {
-      if (prop === 'Component' || prop === 'PureComponent') return StubComponent;
-      return () => null;
-    },
-  });
-  globalThis.React = stub;
-  globalThis.ReactDOM = stub;
-  globalThis.window = stub;
-  reactStubbed = true;
-}
 
 // Static meta extraction — the PRIMARY path. `meta` is a top-level object
 // literal by convention, so a brace-balanced scan + Function-eval reads it
@@ -512,38 +494,105 @@ function extractMetaStatically(src) {
   return { meta: {} };
 }
 
+// The sandbox runner, spawned per computed-meta module (rare, mtime-cached).
+// Deep proxies stand in for browser globals AND every bare import, so the
+// standard top-level patterns (`window.__atelier.self(…)`, `import {...} from
+// '@atelier/kit'`, hook destructures) evaluate instead of throwing. `then` is
+// explicitly NOT proxied so an awaited stub can never deadlock the child.
+const META_RUNNER = `
+const deep = () => new Proxy(function () {}, {
+  get(t, p) {
+    if (p === Symbol.toPrimitive || p === 'toString' || p === 'valueOf') return () => '';
+    if (p === Symbol.iterator) return function* () {};
+    if (p === 'then') return undefined;
+    return deep();
+  },
+  apply: () => deep(),
+  construct: () => deep(),
+  has: () => true,
+});
+globalThis.__atelierDeepStub = deep;
+// defineProperty, not assignment — navigator (and friends) are getter-only
+// globals in modern Node, where plain assignment throws.
+for (const g of ['window', 'document', 'navigator', 'localStorage', 'location', 'React', 'ReactDOM']) {
+  try { Object.defineProperty(globalThis, g, { value: deep(), configurable: true, writable: true }); } catch {}
+}
+try {
+  const mod = await import(process.argv[2]);
+  const meta = mod.meta;
+  process.stdout.write(JSON.stringify(meta && typeof meta === 'object' ? meta : {}));
+} catch (e) {
+  process.stdout.write(JSON.stringify({ __error: String((e && e.message) || e) }));
+}
+process.exit(0);
+`;
+
+async function extractMetaSandboxed(src) {
+  let tmpBundle = null, tmpRunner = null;
+  try {
+    const result = await esbuildBuild({
+      entryPoints: [src],
+      bundle: true,
+      format: 'esm',
+      platform: 'node',
+      write: false,
+      loader: { '.jsx': 'jsx', '.css': 'empty' },
+      jsxFactory: 'React.createElement',
+      jsxFragment: 'React.Fragment',
+      logLevel: 'silent',
+      define: { 'import.meta.url': JSON.stringify(pathToFileURL(src).href) },
+      plugins: [{
+        name: 'stub-bare',
+        setup(b) {
+          // Every bare specifier (npm package, node: builtin, @atelier/kit)
+          // resolves to a deep-proxy stub — CJS, so esbuild's interop makes
+          // both default and named imports land on the proxy.
+          b.onResolve({ filter: /^[^./]/ }, () => ({ path: 'stub', namespace: 'atelier-meta-stub' }));
+          b.onLoad({ filter: /.*/, namespace: 'atelier-meta-stub' }, () => ({
+            loader: 'js',
+            contents: 'module.exports = globalThis.__atelierDeepStub();',
+          }));
+        },
+      }],
+    });
+    const base = path.join(os.tmpdir(), `atelier-meta-${process.pid}-${++importSalt}`);
+    tmpBundle = base + '.mjs';
+    tmpRunner = base + '-run.mjs';
+    fs.writeFileSync(tmpBundle, result.outputFiles[0].text);
+    fs.writeFileSync(tmpRunner, META_RUNNER);
+    const out = await new Promise((resolve, reject) => {
+      execFile(process.execPath, [tmpRunner, pathToFileURL(tmpBundle).href], { timeout: 5000 }, (err, stdout) => {
+        if (err && !stdout) return reject(err);
+        resolve(stdout);
+      });
+    });
+    const meta = JSON.parse(out || '{}');
+    if (meta.__error) return { meta: {}, error: meta.__error };
+    return { meta };
+  } catch (e) {
+    return { meta: {}, error: String((e && e.message) || e) };
+  } finally {
+    for (const f of [tmpBundle, tmpRunner]) { if (f) try { fs.unlinkSync(f); } catch {} }
+  }
+}
+
 async function readMeta(src, label) {
   const code = fs.readFileSync(src, 'utf8');
   // Static-first: read the literal `meta` from source without running the
   // module. This is the path for ~every module (their `meta` is a literal),
-  // so a frontend's top-level code does NOT execute in Node at discovery.
+  // so a frontend's top-level code does NOT execute anywhere at discovery.
   const stat = extractMetaStatically(code);
   if (Object.keys(stat.meta).length) return stat.meta;
-  // Fallback — `meta` is computed/spread/imported and couldn't be parsed
-  // statically: transform + import the module to evaluate it. Top-level code
-  // runs here, so keep frontend top-level side-effect-free (browser globals
-  // like `document` are undefined in Node — see MODULES.md).
-  stubReactOnce();
-  let meta = {};
-  try {
-    const out = await esbuildTransform(code, {
-      loader: 'jsx',
-      format: 'esm',
-      jsx: 'transform',
-      jsxFactory: 'React.createElement',
-      jsxFragment: 'React.Fragment',
-    });
-    const url = 'data:text/javascript;base64,' + Buffer.from(out.code).toString('base64');
-    const mod = await import(url);
-    meta = mod.meta || {};
-  } catch { /* fall through — the declared-but-unreadable warning below */ }
+  if (!/export\s+const\s+meta\s*=/.test(code)) return {};   // no meta declared — nothing to evaluate
+  // Fallback — `meta` is computed (template literal, module constant, spread):
+  // evaluate it in the disposable sandbox child.
+  const sand = await extractMetaSandboxed(src);
+  if (Object.keys(sand.meta).length) return sand.meta;
   // Fail loud, not fatal: the module DECLARED a meta the shell couldn't read.
   // Dropping it silently loses real behavior — a `chrome:` pin, the rail name,
   // the group — and the module still renders, so nothing else surfaces it.
-  if (!Object.keys(meta).length && /export\s+const\s+meta\s*=/.test(code)) {
-    console.warn(`  ! ${label || src}: \`export const meta\` isn't a pure object literal${stat.error ? ` (${stat.error})` : ''} — the whole meta, including any \`chrome:\` pin, is being IGNORED. Inline the values; compute display strings inside the component instead.`);
-  }
-  return meta;
+  console.warn(`  ! ${label || src}: couldn't read \`export const meta\`${sand.error ? ` (${sand.error})` : stat.error ? ` (${stat.error})` : ''} — the whole meta, including any \`chrome:\` pin, is being IGNORED. A pure object literal always works; computed values must evaluate with browser globals and imports stubbed.`);
+  return sand.meta;
 }
 
 async function getModuleMeta(m) {

@@ -4,7 +4,7 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 
 ## Unreleased
 
-**An unreadable `meta` now warns instead of vanishing.** `meta` must be a pure object literal (the convention) — a computed value like `` name: `Hi ${x}` `` breaks the static parse, and the dynamic fallback can't run for a typical module (top-level `window.__atelier.self(…)` has no Node equivalent). The whole declaration — including a `chrome:` pin — was silently dropped; the module still rendered, so nothing surfaced it. Discovery now logs once per edit: the module, the rule, and the fix (inline the values; compute display strings inside the component).
+**Computed `meta` now works.** `` name: `Hi ${x}` `` — or any meta built from module-scope constants — used to be silently dropped, `chrome:` pin included: the static parse can't read it, and the old in-process fallback died on the standard top-level patterns (`window.__atelier.self(…)`, a bare `@atelier/kit` import). Valid JavaScript losing declared behavior was the real bug. A pure object literal is still the fast path (read from source, nothing executes); a computed meta now falls back to a **disposable sandbox process** — the module bundled with every bare import stubbed to inert proxies, browser globals proxied, evaluated, `meta` read as JSON, process killed (so top-level timers/side effects die with it, and nothing ever executes inside the server). If both paths fail, discovery warns loudly with the module and the exact reason instead of silently degrading. Cached by mtime — one sandbox run per edit, zero cost for literal metas.
 
 ## 0.13.1
 

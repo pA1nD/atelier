@@ -32,6 +32,16 @@ test('bootstrap reflects discovery — globals + the $team workspace', async () 
   assert.match(html, /"team"/)   // $team discovered + surfaced as a workspace
 })
 
+test('a COMPUTED meta is evaluated in the sandbox — name resolves, chrome pin survives', async () => {
+  const html = await (await fetch(server.base + '/')).text()
+  // epsilon's meta is `name: \`Epsilon ${IQ}IQ\`` with IQ = CHAPTERS.length, plus a
+  // top-level window.__atelier.self(...) and a bare @atelier/kit import — none
+  // of which the static parser can read. The sandboxed fallback must deliver
+  // the evaluated values into the bootstrap.
+  assert.match(html, /"Epsilon 3IQ"/)
+  assert.match(html, /"pinned-chrome"/)
+})
+
 test('no chrome installed → chromeQid is null (shell ships no default)', async () => {
   const html = await (await fetch(server.base + '/')).text()
   assert.match(html, /"chromeQid":null/)
