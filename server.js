@@ -746,7 +746,7 @@ const backendErrors = new Map();   // qid → { message }
 // Turn a raw load error into an actionable one. The classic trap: a backend is
 // hot-loaded from a `data:` URL, so a static `import x from 'pkg'` can't resolve
 // a node_modules dependency — name the fix (`createRequire`) right in the message.
-function enrichBackendError(err) {
+function enrichBackendError(err, dir) {
   let msg = err?.message || String(err);
   // The data: URL a backend is loaded from is a huge base64 blob — collapse it
   // so the actionable part of the message isn't buried.
@@ -755,6 +755,13 @@ function enrichBackendError(err) {
   if (spec) {
     const pkg = spec[1];
     msg += `\n\nA backend is hot-loaded from a data: URL, so a static \`import … from '${pkg}'\` can't resolve a node_modules dependency. Load it at runtime instead:\n  import { createRequire } from 'node:module';\n  const require = createRequire(import.meta.url);\n  const dep = require('${pkg}');`;
+  }
+  // The other trap: `createRequire(import.meta.url)('pkg')` resolves against the
+  // MODULE's own node_modules — a module folder that landed without them (cloned
+  // instance, hand-copied folder, a failed install) throws Cannot find module.
+  const miss = /Cannot find (?:module|package) '([^']+)'/.exec(msg);
+  if (!spec && miss && !/^[./~]|^[A-Za-z]:|^node:/.test(miss[1])) {
+    msg += `\n\nThe module loads '${miss[1]}' from its own node_modules, which isn't installed here — a module ships its dependencies in its own package.json. Install them in place:\n  ${dir ? `(cd ${JSON.stringify(dir)} && npm install)` : 'npm install   # inside the module folder'}`;
   }
   return msg;
 }
@@ -773,7 +780,7 @@ async function mountBackend(m) {
   let plug;
   try { plug = await importBackend(m); }
   catch (err) {
-    const message = enrichBackendError(err);
+    const message = enrichBackendError(err, m.dir);
     console.error(`  ! ${m.qualifiedId}: backend failed to load — ${message}`);
     setBackendError(m.qualifiedId, message);
     return;
@@ -786,7 +793,7 @@ async function reloadBackend(m) {
   let plug;
   try { plug = await importBackend(m); }
   catch (err) {
-    const message = enrichBackendError(err);
+    const message = enrichBackendError(err, m.dir);
     console.error(`  ! ${m.qualifiedId}: reload failed, keeping current version — ${message}`);
     setBackendError(m.qualifiedId, message);
     return;
