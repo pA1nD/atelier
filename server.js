@@ -686,6 +686,7 @@ function makeModuleScope(m) {
   };
 }
 
+let importSalt = 0;
 async function importBackend(m) {
   // Bundle the module's backend + first-party transitive imports into a
   // single data-URL ESM chunk and import that. Each bundle produces a new
@@ -713,7 +714,14 @@ async function importBackend(m) {
     define: { 'import.meta.url': JSON.stringify(pathToFileURL(entry).href) },
   });
   const code = result.outputFiles[0].text;
-  const url = 'data:text/javascript;base64,' + Buffer.from(code).toString('base64');
+  // Salt every load with a URL fragment: Node's ESM loader caches by full
+  // specifier — including a REJECTED evaluation — so an unchanged bundle (same
+  // data: URL) would replay the cached failure forever. The case that needs a
+  // fresh attempt is a dependency arriving (npm install finishing) with no
+  // source change. The fragment isn't part of the payload (code + inline
+  // sourcemap stay byte-identical); cache-growth cost matches any code-change
+  // reload, which already mints a new URL per save.
+  const url = 'data:text/javascript;base64,' + Buffer.from(code).toString('base64') + `#atelier-load=${++importSalt}`;
   const mod = await import(url);
   const plug = mod.default;
   if (!plug?.mountRoutes) throw new Error('no default.mountRoutes export');
@@ -794,8 +802,9 @@ async function reloadBackend(m) {
   try { plug = await importBackend(m); }
   catch (err) {
     const message = enrichBackendError(err, m.dir);
-    console.error(`  ! ${m.qualifiedId}: reload failed, keeping current version — ${message}`);
-    setBackendError(m.qualifiedId, message);
+    // setBackendError debounces identical repeats — reuse that so retry storms
+    // (reload attempts while `npm install` streams files in) log once, not per event.
+    if (setBackendError(m.qualifiedId, message)) console.error(`  ! ${m.qualifiedId}: reload failed, keeping current version — ${message}`);
     return;
   }
   clearBackendError(m.qualifiedId);
@@ -856,7 +865,13 @@ function watchBackend(m) {
     const w = fs.watch(m.dir, { recursive: true }, (event, filename) => {
       if (!filename) return;
       const segs = filename.split(path.sep);
-      if (ignored(segs)) return;
+      // While the backend is in a load-error state, let normally-ignored events
+      // through: a module can land before its deps (`atelier add` copies, then
+      // installs) and `npm install` finishing — node_modules writes, then the
+      // root package-lock.json — is exactly the signal that heals a
+      // missing-dependency failure. Zero cost while healthy.
+      const broken = backendErrors.has(m.qualifiedId);
+      if (ignored(segs) && !broken) return;
       // Module dir / backend.js gone → teardown so routes, timers, and file
       // handles don't outlive the source. Existence-checked so a transient
       // event during an atomic save can't false-fire.
@@ -865,7 +880,7 @@ function watchBackend(m) {
           console.warn(`  ! unmount ${m.qualifiedId}: ${err.message}`));
         return;
       }
-      if (filename.endsWith('.js')) scheduleReload(m);
+      if (filename.endsWith('.js') || broken) scheduleReload(m);
     });
     backendWatchers.set(m.qualifiedId, w);
   } catch (err) {
@@ -896,7 +911,9 @@ function scheduleReload(m) {
       }
     };
     scan(m.dir);
-    if (mtime && mtime === lastReloadMtime.get(m.qualifiedId)) return;
+    // A broken backend bypasses the dedupe: its source didn't change — its
+    // dependencies did (node_modules isn't scanned) — and a retry is the point.
+    if (mtime && mtime === lastReloadMtime.get(m.qualifiedId) && !backendErrors.has(m.qualifiedId)) return;
     lastReloadMtime.set(m.qualifiedId, mtime);
     reloadBackend(m).catch((err) => console.error(`  ! reload ${m.qualifiedId}: ${err.message}`));
   }, 150));

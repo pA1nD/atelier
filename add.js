@@ -228,11 +228,19 @@ if (fs.existsSync(dest)) {
     savedData = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-add-data-'));
     fs.cpSync(dataDir, path.join(savedData, 'data'), { recursive: true });
   }
-  fs.rmSync(dest, { recursive: true, force: true });
 }
 
+// Stage under a dot-prefixed name — invisible to discovery. A RUNNING instance
+// hot-mounts new folders on its next request, so copying into place and THEN
+// installing deps leaves a window where the backend mounts against an empty
+// node_modules and fails. Deps install into the staging dir; only a complete
+// module is renamed into place (same parent dir → same fs → atomic).
 fs.mkdirSync(destParent, { recursive: true });
-fs.cpSync(src, dest, {
+const staging = path.join(destParent, `.add-${id}-${process.pid}`);
+fs.rmSync(staging, { recursive: true, force: true });
+let staged = true;
+process.on('exit', () => { if (staged) { try { fs.rmSync(staging, { recursive: true, force: true }); } catch {} } });
+fs.cpSync(src, staging, {
   recursive: true,
   filter: (p) => {
     const rel = path.relative(src, p);
@@ -240,11 +248,11 @@ fs.cpSync(src, dest, {
     return top !== 'node_modules' && top !== 'data' && top !== '.git';
   },
 });
-if (savedData) fs.cpSync(path.join(savedData, 'data'), path.join(dest, 'data'), { recursive: true });
-console.log(`  installed: ${qualified}  ←  ${origin}`);
+if (savedData) fs.cpSync(path.join(savedData, 'data'), path.join(staging, 'data'), { recursive: true });
 
 /* ---- dependencies — the module's own package.json is the manifest ---------- */
-const pkg = readPkg(dest);
+const pkg = readPkg(staging);
+let depsFailed = false;
 if (pkg.dependencies && Object.keys(pkg.dependencies).length) {
   console.log(`  installing dependencies (${Object.keys(pkg.dependencies).join(', ')})…`);
   try {
@@ -252,16 +260,24 @@ if (pkg.dependencies && Object.keys(pkg.dependencies).length) {
       process.env.npm_execpath
         ? [process.env.npm_execpath, 'install', '--no-fund', '--no-audit']
         : ['install', '--no-fund', '--no-audit'],
-      { cwd: dest, stdio: ['ignore', 'inherit', 'inherit'] });
+      { cwd: staging, stdio: ['ignore', 'inherit', 'inherit'] });
   } catch {
-    console.error(`
+    depsFailed = true;   // still land the module (documented behavior), fail loud below
+  }
+}
+
+fs.rmSync(dest, { recursive: true, force: true });
+fs.renameSync(staging, dest);
+staged = false;
+console.log(`  installed: ${qualified}  ←  ${origin}`);
+if (depsFailed) {
+  console.error(`
   ✗ DEPENDENCY INSTALL FAILED for ${qualified}
     The module is in place at ${dest}, but its npm dependencies did not
     install — it will NOT work until they do. Fix the error above, then:
       cd ${dest} && npm install
 `);
-    process.exit(1);
-  }
+  process.exit(1);
 }
 
 /* ---- system needs — the module's own `atelier` block ------------------------

@@ -4,7 +4,13 @@ Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema)
 
 ## Unreleased
 
-**Missing module dependencies now fail with the fix in the message.** A backend whose `createRequire(…)('pkg')` can't resolve a package — a module folder that landed without its `node_modules` (cloned instance, hand-copied folder, a failed install) — used to surface Node's bare `Cannot find module 'pkg'`. The error (on the module's `/api`, in the overlay, and in the log) now explains that a module ships its dependencies in its own package.json and prints the copy-pasteable remedy: `(cd <module dir> && npm install)`.
+**A backend that fails to load now heals itself the moment it can.** Observed in the wild: `atelier add` into a *running* instance copied the module folder, the shell hot-mounted it before `npm install` finished, and the backend stayed bricked on `Cannot find module` until a restart. Three layers fixed:
+
+- **Self-heal.** While a backend is in a load-error state, the watcher stops ignoring `node_modules`/`data` events and retries the load (debounced) — so `npm install` finishing in the module folder remounts it automatically. Zero change to the healthy path.
+- **Fresh retries.** Node's ESM loader caches a *rejected* evaluation by specifier, so an unchanged bundle (same `data:` URL) replayed the cached failure forever — even a `touch` couldn't revive it. Every load is now salted with a URL fragment (payload and inline sourcemap stay byte-identical), so a retry is a real retry.
+- **`atelier add` stages before it lands.** The module is copied to a discovery-invisible staging dir, its dependencies install *there*, and only the complete folder is renamed into place (atomic) — a running instance never sees a half-installed module. On `--force`, the old module keeps serving until the swap.
+
+**Missing module dependencies now fail with the fix in the message.** A backend whose `createRequire(…)('pkg')` can't resolve a package — a module folder that landed without its `node_modules` (cloned instance, hand-copied folder, a failed install) — used to surface Node's bare `Cannot find module 'pkg'`. The error (on the module's `/api`, in the overlay, and in the log) now explains that a module ships its dependencies in its own package.json and prints the copy-pasteable remedy: `(cd <module dir> && npm install)` — and thanks to the self-heal above, running it brings the module up with no further action.
 
 ## 0.13.0
 
