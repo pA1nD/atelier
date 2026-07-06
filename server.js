@@ -484,9 +484,9 @@ function stubReactOnce() {
 // literal (computed/spread/imported) → caller falls back to executing it.
 function extractMetaStatically(src) {
   const re = /export\s+const\s+meta\s*=\s*\{/.exec(src);
-  if (!re) return {};
+  if (!re) return { meta: {} };
   const start = src.indexOf('{', re.index);
-  if (start < 0) return {};
+  if (start < 0) return { meta: {} };
   let depth = 0;
   let str = null;          // current string delimiter (', ", or `)
   for (let i = start; i < src.length; i++) {
@@ -501,12 +501,15 @@ function extractMetaStatically(src) {
     else if (c === '}') {
       depth--;
       if (depth === 0) {
-        try { return new Function('return (' + src.slice(start, i + 1) + ')')() || {}; }
-        catch { return {}; }
+        // The literal evaluates in an empty scope — a module-scope reference
+        // (`${IQ}`) throws here, and that message IS the diagnostic: it names
+        // the exact symbol that makes this meta unreadable.
+        try { return { meta: new Function('return (' + src.slice(start, i + 1) + ')')() || {} }; }
+        catch (e) { return { meta: {}, error: e.message }; }
       }
     }
   }
-  return {};
+  return { meta: {} };
 }
 
 async function readMeta(src, label) {
@@ -515,7 +518,7 @@ async function readMeta(src, label) {
   // module. This is the path for ~every module (their `meta` is a literal),
   // so a frontend's top-level code does NOT execute in Node at discovery.
   const stat = extractMetaStatically(code);
-  if (Object.keys(stat).length) return stat;
+  if (Object.keys(stat.meta).length) return stat.meta;
   // Fallback — `meta` is computed/spread/imported and couldn't be parsed
   // statically: transform + import the module to evaluate it. Top-level code
   // runs here, so keep frontend top-level side-effect-free (browser globals
@@ -538,7 +541,7 @@ async function readMeta(src, label) {
   // Dropping it silently loses real behavior — a `chrome:` pin, the rail name,
   // the group — and the module still renders, so nothing else surfaces it.
   if (!Object.keys(meta).length && /export\s+const\s+meta\s*=/.test(code)) {
-    console.warn(`  ! ${label || src}: \`export const meta\` isn't a pure object literal (computed values like template literals can't be read statically) — the whole meta, including any \`chrome:\` pin, is being IGNORED. Inline the values; compute display strings inside the component instead.`);
+    console.warn(`  ! ${label || src}: \`export const meta\` isn't a pure object literal${stat.error ? ` (${stat.error})` : ''} — the whole meta, including any \`chrome:\` pin, is being IGNORED. Inline the values; compute display strings inside the component instead.`);
   }
   return meta;
 }
