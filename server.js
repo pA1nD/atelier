@@ -509,7 +509,7 @@ function extractMetaStatically(src) {
   return {};
 }
 
-async function readMeta(src) {
+async function readMeta(src, label) {
   const code = fs.readFileSync(src, 'utf8');
   // Static-first: read the literal `meta` from source without running the
   // module. This is the path for ~every module (their `meta` is a literal),
@@ -521,6 +521,7 @@ async function readMeta(src) {
   // runs here, so keep frontend top-level side-effect-free (browser globals
   // like `document` are undefined in Node — see MODULES.md).
   stubReactOnce();
+  let meta = {};
   try {
     const out = await esbuildTransform(code, {
       loader: 'jsx',
@@ -531,10 +532,15 @@ async function readMeta(src) {
     });
     const url = 'data:text/javascript;base64,' + Buffer.from(out.code).toString('base64');
     const mod = await import(url);
-    return mod.meta || {};
-  } catch {
-    return {};
+    meta = mod.meta || {};
+  } catch { /* fall through — the declared-but-unreadable warning below */ }
+  // Fail loud, not fatal: the module DECLARED a meta the shell couldn't read.
+  // Dropping it silently loses real behavior — a `chrome:` pin, the rail name,
+  // the group — and the module still renders, so nothing else surfaces it.
+  if (!Object.keys(meta).length && /export\s+const\s+meta\s*=/.test(code)) {
+    console.warn(`  ! ${label || src}: \`export const meta\` isn't a pure object literal (computed values like template literals can't be read statically) — the whole meta, including any \`chrome:\` pin, is being IGNORED. Inline the values; compute display strings inside the component instead.`);
   }
+  return meta;
 }
 
 async function getModuleMeta(m) {
@@ -545,7 +551,7 @@ async function getModuleMeta(m) {
   const cached = metaCache.get(m.qualifiedId);
   if (cached && cached.mtimeMs === mtimeMs) return cached.meta;
   try {
-    const meta = await readMeta(src);
+    const meta = await readMeta(src, m.qualifiedId);
     metaCache.set(m.qualifiedId, { meta, mtimeMs });
     return meta;
   } catch (err) {
