@@ -1,8 +1,8 @@
 {
   "name": "@pa1nd/atelier",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "type": "module",
-  "description": "The Atelier app shell — discovers, mounts, and serves feature modules around one shared chrome: a single runtime hosting many small, context-window-sized apps. Install as a dependency, run with `atelier`, install modules with `atelier add`.",
+  "description": "The Atelier app shell \u2014 discovers, mounts, and serves feature modules around one shared chrome: a single runtime hosting many small, context-window-sized apps. Install as a dependency, run with `atelier`, install modules with `atelier add`.",
   "bin": {
     "atelier": "cli.js"
   },

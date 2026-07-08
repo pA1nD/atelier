@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveRoot } from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, listCollections, readPkg, readModuleMeta,
-  copyModuleFiltered, git, gitErr, gitHead,
+  copyModuleFiltered, git, gitErr, gitHead, CLI_NAME,
 } from './collections.js';
 import { buildProblems } from './gate.js';
 
@@ -248,8 +248,8 @@ function stageHandoff(m, st) {
   console.log(`  → staged: ${path.relative(ROOT, stagingDir)}   (your module is untouched, still running the old version)`);
   if (st.conflicts.length) console.log(`    conflicts in: ${st.conflicts.join(', ')}`);
   console.log(`    have your agent resolve it:`);
-  console.log(`      claude "resolve the merge conflicts in ${stagingDir}, then run: atelier update ${qual} --continue"`);
-  console.log(`    or discard it:  atelier update ${qual} --abort`);
+  console.log(`      claude "resolve the merge conflicts in ${stagingDir}, then run: ${CLI_NAME} update ${qual} --continue"`);
+  console.log(`    or discard it:  ${CLI_NAME} update ${qual} --abort`);
 }
 
 /* ---- prompts ----------------------------------------------------------------- */
@@ -333,7 +333,7 @@ for (const coll of collections) {
   for (const m of mods) {
     const qual = `${m.workspace}/${m.id}`;
     if (fs.existsSync(path.join(m.dir, '.update-merge'))) {
-      console.log(`  · ${qual} has a staged merge pending — finish it first: atelier update ${coll}/${m.prov.module} --continue (or --abort)`);
+      console.log(`  · ${qual} has a staged merge pending — finish it first: ${CLI_NAME} update ${coll}/${m.prov.module} --continue (or --abort)`);
       staged++;
       continue;
     }

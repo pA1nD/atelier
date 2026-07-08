@@ -27,7 +27,7 @@ import {
 } from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, isModuleFolder, readPkg, readModuleMeta,
-  copyModuleFiltered, isGitRepo, git, gitCommitAll,
+  copyModuleFiltered, isGitRepo, git, gitCommitAll, CLI_NAME,
 } from './collections.js';
 import { buildProblems } from './gate.js';
 
@@ -78,7 +78,7 @@ function moduleDirFor(spec) {
   }
   if (hits.length === 1) return hits[0].abs;
   if (hits.length > 1) {
-    fail(`"${spec}" is mounted in ${hits.length} workspaces — say which one:\n${hits.map((h) => `  atelier package ${h.workspace}/${wantId}`).join('\n')}`);
+    fail(`"${spec}" is mounted in ${hits.length} workspaces — say which one:\n${hits.map((h) => `  ${CLI_NAME} package ${h.workspace}/${wantId}`).join('\n')}`);
   }
   return direct;   // not found anywhere — the caller errors with this path
 }
@@ -224,5 +224,5 @@ if (!hash) {
   process.exit(0);
 }
 console.log(`\n  ✓ packaged  →  ${COLLECTIONS_DIR}/${collection}/  (commit ${hash})`);
-console.log(`    publish it:  atelier publish ${collection} --serve      (share on this network)`);
-console.log(`                 atelier publish ${collection} --to <git-url>\n`);
+console.log(`    publish it:  ${CLI_NAME} publish ${collection} --serve      (share on this network)`);
+console.log(`                 ${CLI_NAME} publish ${collection} --to <git-url>\n`);

@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveRoot, RESERVED_NAMES } from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, collectionsRoot, listCollections, listModuleDirs,
-  isModuleFolder, readPkg, copyModuleFiltered, git, gitErr, gitHead,
+  isModuleFolder, readPkg, copyModuleFiltered, git, gitErr, gitHead, CLI_NAME,
 } from './collections.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -96,8 +96,8 @@ async function subscribe(source) {
   const dest = collectionDir(ROOT, name);
   if (fs.existsSync(dest)) {
     fail(`already subscribed to "${name}" (${COLLECTIONS_DIR}/${name}/)
-  Install from it:            atelier add ${name}
-  Subscribe under a new name: atelier add ${source} --as <name>`);
+  Install from it:            ${CLI_NAME} add ${name}
+  Subscribe under a new name: ${CLI_NAME} add ${source} --as <name>`);
   }
   fs.mkdirSync(collectionsRoot(ROOT), { recursive: true });
   try {
@@ -280,7 +280,7 @@ const dir = collectionDir(ROOT, collection);
 if (!fs.existsSync(dir)) {
   const have = listCollections(ROOT);
   fail(`not subscribed to "${collection}"${have.length ? ` — you have: ${have.join(', ')}` : ''}
-  Subscribe first:  atelier add github:owner/repo   (or any git url / path / .bundle)`);
+  Subscribe first:  ${CLI_NAME} add github:owner/repo   (or any git url / path / .bundle)`);
 }
 if (!isSource(spec)) refresh(collection);   // a fresh subscription is already current
 

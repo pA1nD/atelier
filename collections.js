@@ -13,8 +13,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 export const COLLECTIONS_DIR = '_collections';
+
+// How to invoke the CLI *on this machine* — used in printed next-step hints.
+// Installed as a dependency → the bin is only reachable through npx; running
+// from a checkout → the operator has their own invocation, `atelier` reads
+// cleanest. Hints for the RECEIVING side of a share always say `npx atelier`
+// (their setup is unknown; npx is the documented default).
+export const CLI_NAME = /[\\/]node_modules[\\/]/.test(fileURLToPath(import.meta.url)) ? 'npx atelier' : 'atelier';
 
 export const isModuleFolder = (dir) =>
   fs.existsSync(path.join(dir, 'frontend.jsx')) || fs.existsSync(path.join(dir, 'backend.js'));

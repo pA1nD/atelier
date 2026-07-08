@@ -24,7 +24,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveRoot } from './discovery.js';
-import { COLLECTIONS_DIR, collectionDir, listCollections, isGitRepo, git, gitErr } from './collections.js';
+import { COLLECTIONS_DIR, CLI_NAME, collectionDir, listCollections, isGitRepo, git, gitErr } from './collections.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const fail = (msg) => { console.error(`\natelier publish: ${msg}\n`); process.exit(1); };
@@ -51,9 +51,9 @@ const ROOT = resolveRoot({ atelierRoot: process.env.ATELIER_ROOT, pwd: process.e
 const dir = collectionDir(ROOT, name);
 if (!fs.existsSync(dir)) {
   const have = listCollections(ROOT);
-  fail(`no collection "${name}" in ${COLLECTIONS_DIR}/${have.length ? ` — you have: ${have.join(', ')}` : ' (nothing packaged yet — start with: atelier package <module>)'}`);
+  fail(`no collection "${name}" in ${COLLECTIONS_DIR}/${have.length ? ` — you have: ${have.join(', ')}` : ' (nothing packaged yet — start with: ${CLI_NAME} package <module>)'}`);
 }
-if (!isGitRepo(dir)) fail(`${COLLECTIONS_DIR}/${name} isn't a git repo — cut into it first with: atelier package <module> --to ${name}`);
+if (!isGitRepo(dir)) fail(`${COLLECTIONS_DIR}/${name} isn't a git repo — cut into it first with: ${CLI_NAME} package <module> --to ${name}`);
 
 /* ---- --bundle ------------------------------------------------------------- */
 if (bundle) {
@@ -61,7 +61,7 @@ if (bundle) {
   try { git(['bundle', 'create', out, '--all'], dir); }
   catch (e) { fail(`git bundle failed:\n  ${gitErr(e)}`); }
   console.log(`\n  ✓ ${COLLECTIONS_DIR}/${name}  →  ${out}`);
-  console.log(`    send the file any way you like; the receiver runs:  atelier add ${out.replace(os.homedir(), '~')}\n`);
+  console.log(`    send the file any way you like; the receiver runs:  npx atelier add ${out.replace(os.homedir(), '~')}\n`);
   process.exit(0);
 }
 
@@ -75,7 +75,7 @@ if (serve) {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405).end(); return; }
     if (sub === '/' || sub === `/${name}` || sub === `/${name}/`) {
       res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end(`atelier collection "${name}" — install with:\n  atelier add http://<this-host>:${port}/${name}\n`);
+      res.end(`atelier collection "${name}" — install with:\n  npx atelier add http://<this-host>:${port}/${name}\n`);
       return;
     }
     if (!sub.startsWith(`/${name}/`)) { res.writeHead(404).end(); return; }
@@ -112,7 +112,7 @@ if (serve) {
       .map((i) => i.address);
     console.log(`\n  serving ${COLLECTIONS_DIR}/${name}/ read-only (committed cuts only) — ctrl-c to stop`);
     for (const h of [...new Set([mdnsName(), ...ips].filter(Boolean))]) {
-      console.log(`    atelier add http://${h}:${port}/${name}`);
+      console.log(`    npx atelier add http://${h}:${port}/${name}`);
     }
     console.log('');
   });
@@ -125,7 +125,7 @@ if (serve) {
     ? `git@github.com:${to.slice(7)}.git`
     : to ? to.replace(/^git\+/, '') : null;
   const origin = (() => { try { return git(['remote', 'get-url', 'origin'], dir).trim(); } catch { return null; } })();
-  if (!pushUrl && !origin) fail(`collection "${name}" has no git origin yet — tell publish where to put it:\n  atelier publish ${name} --to github:owner/repo   (or any git url, --serve, --bundle)`);
+  if (!pushUrl && !origin) fail(`collection "${name}" has no git origin yet — tell publish where to put it:\n  ${CLI_NAME} publish ${name} --to github:owner/repo   (or any git url, --serve, --bundle)`);
   const target = pushUrl || origin;
   try {
     git(['push', '-u', target, 'HEAD'], dir, { stdio: ['ignore', 'inherit', 'inherit'] });
@@ -134,6 +134,6 @@ if (serve) {
   }
   if (pushUrl && !origin) { try { git(['remote', 'add', 'origin', pushUrl], dir); } catch {} }
   console.log(`\n  ✓ pushed ${COLLECTIONS_DIR}/${name}  →  ${target}`);
-  if (to && to.startsWith('github:')) console.log(`    others install it with:  atelier add ${to}\n`);
+  if (to && to.startsWith('github:')) console.log(`    others install it with:  npx atelier add ${to}\n`);
   else console.log('');
 }

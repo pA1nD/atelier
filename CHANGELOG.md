@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.15.1
+
+**Printed hints know who they're for.** `publish --serve` / `--bundle` / `--to github:` print the command the *receiving* person runs — that's now always `npx atelier add …` (the documented, works-everywhere form; a bare `atelier` only exists on machines with their own alias). Local next-step hints (publish-it, subscribe-first, update --continue, list) adapt to how *this* machine runs the CLI: `npx atelier` when the shell is an npm dependency, `atelier` on a checkout.
+
 ## 0.15.0
 
 **Collections: sharing is now one shape and four verbs.** Breaking — a hard before/after. The only thing atelier shares is a **collection**: a git repo whose top-level folders are modules. `atelier package` produces them, so the norm costs authors one command — and buys uniform channels (subscribe once, every future cut is one command away), full history on everything that enters an instance, and transports that are just "where a git repo lives."
