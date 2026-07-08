@@ -103,7 +103,7 @@ The shell never installs module deps for you — the **installer** does (below).
 
 ### Sharing modules
 
-Modules are **sharing-first**: a folder ships everything it needs, so installing one is *copy the folder, install its npm deps* — and a public git repo of module folders is a marketplace. The commands (`npm create @pa1nd/atelier`, `npx atelier add`), the `atelier` system-needs field, marketplaces & kits, and the full shipping convention are documented on their own page: **[Install](./INSTALL.md)**.
+Modules are **sharing-first**: a folder ships everything it needs, so installing one is *copy the folder, install its npm deps* — and a git repo of module folders is a **collection**, the one shape atelier shares. The verbs (`atelier package` / `publish` / `add` / `list`), the `atelier` system-needs field, and the full shipping convention are documented on their own page: **[Install](./INSTALL.md)**.
 
 ### Runtime state
 
@@ -443,12 +443,12 @@ export default function Module() { /* … renders inside the 'midnight-chrome' c
 
 | | how it's set |
 |---|---|
-| **Available chromes** | every *mounted* module with `meta.isChrome === true`. Mount one (in the instance folder, a `modules` path-mount, or a marketplace install) and it's selectable; deny it in `atelier.config.json` and it isn't. |
+| **Available chromes** | every *mounted* module with `meta.isChrome === true`. Mount one (in the instance folder, a `modules` path-mount, or a collection install) and it's selectable; deny it in `atelier.config.json` and it isn't. |
 | **Default chrome** | the `defaultChrome` setting (or `ATELIER_DEFAULT_CHROME` env), else the alphabetically-first mounted chrome. |
 
 **Navigation crosses chromes with a full page load.** A chrome can't be swapped inside a live document — its `styles.css` and the `@atelier/kit` import map are baked in when the page loads. So navigating from a module on chrome A to one on chrome B triggers a full reload (the new document boots in B); navigating *within* a single chrome stays a client-side SPA transition. **With no `meta.chrome` anywhere, every module resolves to the default and nothing ever reloads — behaviour is byte-identical to a single-chrome instance.** For the smoothest feel, pin chromes at the app/workspace granularity, so a reload happens only when you switch apps, not on every click.
 
-**This is what makes a marketplace work.** An app can ship its **own chrome folder** alongside its module(s) and pin it with `meta.chrome`. Installing the app mounts both: the module themes itself with its chrome. On an instance that *doesn't* have that chrome, the module shows the clear "chrome not installed" error above — so the operator knows exactly what to mount, rather than the app silently rendering in the wrong skin.
+**This is what makes a shared collection work.** An app can ship its **own chrome folder** alongside its module(s) and pin it with `meta.chrome`. Installing the app mounts both: the module themes itself with its chrome. On an instance that *doesn't* have that chrome, the module shows the clear "chrome not installed" error above — so the operator knows exactly what to mount, rather than the app silently rendering in the wrong skin.
 
 > **Kit pairing.** A themed module's `@atelier/kit` resolves to *its* chrome's kit — so pair a module with a chrome that exports the primitives it imports. Themes aren't drop-in (see [`@atelier/kit`](#publishing-primitives--atelierkit) above).
 

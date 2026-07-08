@@ -1,6 +1,6 @@
 {
   "name": "@pa1nd/atelier",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "type": "module",
   "description": "The Atelier app shell — discovers, mounts, and serves feature modules around one shared chrome: a single runtime hosting many small, context-window-sized apps. Install as a dependency, run with `atelier`, install modules with `atelier add`.",
   "bin": {
@@ -10,6 +10,12 @@
     "CHANGELOG.md",
     "cli.js",
     "add.js",
+    "update.js",
+    "package.js",
+    "publish.js",
+    "list.js",
+    "collections.js",
+    "gate.js",
     "server.js",
     "build.js",
     "discovery.js",

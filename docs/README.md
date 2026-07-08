@@ -39,7 +39,7 @@ The split above is enforced by *how each layer is built and loaded* — so the m
 > **Platform.** Atelier runs anywhere **Node 24+** does — there's no OS-specific install layer (an instance is a folder you run; your process manager / PaaS / reverse proxy is your concern). Recursive file-watching (hot reload) works on macOS, Linux, and Windows on Node 24.
 
 **The rest of the docs:**
-- **[Install](./INSTALL.md)** — creating an instance (`npm create`), installing modules (`atelier add`), marketplaces & kits, and the shipping convention.
+- **[Install](./INSTALL.md)** — creating an instance (`npm create`), collections (the one shareable shape) and the verbs that move them (`atelier package` / `publish` / `add` / `list`), and the shipping convention.
 - **[Modules](./MODULES.md)** — building a module (shape, `ctx`, real-time, hot-reload, slots), plus the special modules: the **chrome** and a pointer to auth.
 - **[Workspaces](./WORKSPACES.md)** — the multi-tenant model: `global` + `$<ws>/`, the `qualifiedId`, the rail and picker.
 - **[Auth](./AUTH.md)** — the trusted auth slot: `authenticate` / `authorize`, the `user` object, request gating across all three surfaces.
@@ -50,7 +50,7 @@ This page is the shell itself: running an instance, what lives in `atelier/`, an
 
 An atelier instance is a **folder you run** — no launchd, no `~/.atelier/`. The folder holds (or path-mounts via config) your modules and a chrome, plus an optional `atelier.config.json`. The shell itself can live in either of two places:
 
-**As a dependency** — `npm install @pa1nd/atelier`, or scaffold a fresh instance with `npm create @pa1nd/atelier my-studio` — optionally pulling a whole **starter kit** of modules (chrome included) with `-- --kit <kit>`; kits and specs are the scaffolder's feature, documented at [create-atelier](https://github.com/pA1nD/create-atelier). The shell runs itself from `node_modules` via its `atelier` bin:
+**As a dependency** — `npm install @pa1nd/atelier`, or scaffold a fresh instance with `npm create @pa1nd/atelier my-studio` — optionally pulling a whole **starter collection** of modules (chrome included) with `-- --kit <collection>`; scaffolder options are documented at [create-atelier](https://github.com/pA1nD/create-atelier). The shell runs itself from `node_modules` via its `atelier` bin:
 
 ```
 npx atelier                                # http://localhost:1844 (PORT= to override), hot reload
@@ -67,7 +67,7 @@ npm run dev:module -- <id>                 # standalone — just one module
 npm run dev:module -- <workspace>/<id>     # standalone — a workspace module
 ```
 
-Either way it's the same server (`npm run dev` and the `atelier` bin are both just `server.js`). Install modules into the instance with **`npx atelier add <spec>`** — see [Install](./INSTALL.md). Point a browser at the port; you'll see an "add a chrome" screen until a chrome is installed (the shell ships none). Standalone mode runs a single module in isolation — it shows no chrome unless the requested module is itself one.
+Either way it's the same server (`npm run dev` and the `atelier` bin are both just `server.js`). Install modules into the instance with **`npx atelier add <source>`** — collections and the sharing verbs are documented in [Install](./INSTALL.md). Point a browser at the port; you'll see an "add a chrome" screen until a chrome is installed (the shell ships none). Standalone mode runs a single module in isolation — it shows no chrome unless the requested module is itself one.
 
 > **Which folder is the instance?** Resolved in priority order: **1.** `ATELIER_ROOT=/path/to/instance` — explicit; for **managed launchers** (launchd, systemd, Docker, a PaaS) that may not set `PWD`, and for monorepos whose hoisting puts the shell in the repo-root `node_modules`. **2.** Shell installed as a dependency — the instance is the folder that *owns* the `node_modules` the shell runs from (a pnpm nested store resolves to the consumer project, not the store). **3.** Subfolder layout — the parent of the folder you run from, inferred from `PWD` (your shell's logical working directory — so it still points at the instance even when `atelier/` is a shared symlink). The resolved root is printed at startup (`Atelier · <mode> · <root> · env=<env>`), so a wrong one is obvious.
 
@@ -125,7 +125,6 @@ All optional; resolved **defaults ← config ← environment** (env wins, so a P
 | `auth` | `false` | `ATELIER_AUTH` | path/id of the auth module, or `false` to run ungated (see [AUTH.md](./AUTH.md)) |
 | `revalidateMs` | `30000` | `ATELIER_REVALIDATE_MS` | how often live WebSocket sockets re-run `authenticate` (only when `auth` is set) — so logout/permission changes propagate without a reconnect; see [AUTH.md](./AUTH.md) |
 | `label` | `null` | `ATELIER_LABEL` | optional instance name a chrome may display |
-| `marketplaces` | `[]` | — | marketplace repos — github `owner/repo` or any clonable git url — the [`atelier add`](./INSTALL.md#install-modules) installer resolves bare module names against (register with `atelier add --marketplace`). Tooling-only — the server ignores it |
 | `modules` | _(all run)_ | — | the module filter below |
 
 #### Module filter — top-level entries

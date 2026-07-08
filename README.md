@@ -40,7 +40,7 @@ cd my-studio && npm install
 npm run dev                            # http://localhost:1844 (override with PORT=…), hot reload, discovers sibling modules
 ```
 
-Or add the shell to an existing folder — `npm install @pa1nd/atelier`, then `npx atelier`: the folder that owns `node_modules` is the instance. Install modules with `npx atelier add <spec>` — a folder of a marketplace repo, an npm package, a git url, or a local folder ([docs](docs/INSTALL.md)). (Working from a checkout of this repo instead? The subfolder layout still works: the instance is the folder *containing* `atelier/`; run `npm install && npm run dev` inside `atelier/`.)
+Or add the shell to an existing folder — `npm install @pa1nd/atelier`, then `npx atelier`: the folder that owns `node_modules` is the instance. Install modules with `npx atelier add <source>` — a collection's git repo on GitHub, any git url, a served collection on your network, or a local folder/bundle ([docs](docs/INSTALL.md)). (Working from a checkout of this repo instead? The subfolder layout still works: the instance is the folder *containing* `atelier/`; run `npm install && npm run dev` inside `atelier/`.)
 
 The folder you run in **is** the instance. Its [`atelier.config.json`](docs/README.md#configuration--discovery) is the source of truth (which modules run, which chrome, port, auth, …); environment variables override it at startup. Want a second instance? Run a second folder — or the same folder with different startup config (e.g. a different `PORT` and `auth`).
 
@@ -77,7 +77,7 @@ The full contract — `ctx`, the real-time WebSocket, `ctx.module(id)` slots, ho
 Four pages (a chrome may also surface these in-app), in this order:
 
 - **[docs/README.md](docs/README.md)** — **Atelier**: running an instance, what lives in `atelier/`, and `atelier.config.json`.
-- **[docs/INSTALL.md](docs/INSTALL.md)** — **Install**: creating an instance, `atelier add`, marketplaces & kits, the shipping convention.
+- **[docs/INSTALL.md](docs/INSTALL.md)** — **Install**: creating an instance, collections and the sharing verbs (`package` / `publish` / `add` / `list`), the shipping convention.
 - **[docs/MODULES.md](docs/MODULES.md)** — **Modules**: module shape, `ctx`, real-time (`self`/`broadcast`), hot-reload, cross-module slots, sidecar servers — plus the special modules (the **chrome** + `@atelier/kit`).
 - **[docs/WORKSPACES.md](docs/WORKSPACES.md)** — **Workspaces**: the multi-tenant model (`global` + `$<ws>/`), the `qualifiedId`, rail and picker.
 - **[docs/AUTH.md](docs/AUTH.md)** — **Auth**: the auth-module slot, the `user`/`defaultUser` contract, request + WebSocket gating, takeover render.
