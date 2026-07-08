@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.15.2
+
+**`add` now sees the whole instance before installing.** The duplicate check used to look only at the literal destination folder — a module the instance already mounts *somewhere else* (a `$<ws>/` folder, or a working tree path-mounted via `atelier.config.json`) slipped past it, and installing a collection could quietly give you a second copy of something you already develop. Every install now sweeps root folders, workspace folders, and config path-mounts for the same module id: collisions are reported with their qualifiedId and mount path and skipped; an explicit `--force` still installs a separate copy alongside.
+
 ## 0.15.1
 
 **Printed hints know who they're for.** `publish --serve` / `--bundle` / `--to github:` print the command the *receiving* person runs — that's now always `npx atelier add …` (the documented, works-everywhere form; a bare `atelier` only exists on machines with their own alias). Local next-step hints (publish-it, subscribe-first, update --continue, list) adapt to how *this* machine runs the CLI: `npx atelier` when the shell is an npm dependency, `atelier` on a checkout.

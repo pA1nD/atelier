@@ -23,7 +23,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { resolveRoot, RESERVED_NAMES } from './discovery.js';
+import {
+  resolveRoot, RESERVED_NAMES, GLOBAL_WORKSPACE,
+  loadModuleConfig, collectConfigPaths, resolvePathEntry, isWorkspaceDir,
+} from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, collectionsRoot, listCollections, listModuleDirs,
   isModuleFolder, readPkg, copyModuleFiltered, git, gitErr, gitHead, CLI_NAME,
@@ -136,6 +139,29 @@ let anyDepsFailed = false;
 const pendingStagings = new Set();
 process.on('exit', () => { for (const s of pendingStagings) { try { fs.rmSync(s, { recursive: true, force: true }); } catch {} } });
 
+// Everywhere this instance already mounts a module with this id — root
+// folders, $<ws>/ folders, AND atelier.config.json path-mounts (working
+// trees can live anywhere on disk). Installing a same-named module without
+// noticing would quietly give the instance two of them.
+function existingElsewhere(id, dest) {
+  const hits = [];
+  const consider = (dir, ws, mounted) => {
+    if (dir !== dest && isModuleFolder(dir)) hits.push({ q: `${ws}/${id}`, dir, mounted });
+  };
+  consider(path.join(ROOT, id), GLOBAL_WORKSPACE, false);
+  let ents = [];
+  try { ents = fs.readdirSync(ROOT, { withFileTypes: true }); } catch {}
+  for (const e of ents) {
+    if (e.isDirectory() && isWorkspaceDir(e.name)) consider(path.join(ROOT, e.name, id), e.name.slice(1), false);
+  }
+  for (const entry of collectConfigPaths(loadModuleConfig(ROOT), { globalWorkspace: GLOBAL_WORKSPACE })) {
+    const abs = resolvePathEntry(entry.path, ROOT);
+    if (!abs) continue;
+    if ((entry.id || path.basename(abs)) === id) consider(abs, entry.workspace, true);
+  }
+  return hits;
+}
+
 function installModule(collection, id) {
   const src = path.join(collectionDir(ROOT, collection), id);
   if (RESERVED_NAMES.has(id)) { console.log(`  ! skipping ${id} — a reserved name in atelier`); return false; }
@@ -145,6 +171,14 @@ function installModule(collection, id) {
 
   if (fs.existsSync(dest) && !force) {
     console.log(`  · ${qualified} already installed — kept (yours; --force replaces it, data/ preserved)`);
+    return false;
+  }
+  const elsewhere = existingElsewhere(id, dest);
+  if (elsewhere.length && !force) {
+    for (const h of elsewhere) {
+      console.log(`  · ${id} already lives in this instance as ${h.q}${h.mounted ? `  (path-mounted from ${h.dir.replace(process.env.HOME, '~')})` : ''} — skipped`);
+    }
+    console.log(`    (--force installs a separate ${qualified} copy alongside it)`);
     return false;
   }
 

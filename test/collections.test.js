@@ -213,6 +213,27 @@ test('add rejects a repo that is not a collection, and unknown module names', ()
   assert.match(r2.out, /it offers: app, mychrome/)
 })
 
+test('add flags a module the instance already mounts elsewhere (path-mount in a workspace)', () => {
+  const { collDir } = producerWithApp()
+  const consumer = mkInstance()
+  // consumer already develops "app" — a working tree elsewhere, path-mounted into a workspace
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-mine-'))
+  mkModule(elsewhere, 'app', {})
+  fs.writeFileSync(path.join(consumer, 'atelier.config.json'), JSON.stringify({
+    modules: [{ workspace: 'travel', modules: [path.join(elsewhere, 'app')] }],
+  }))
+  const r = cli(consumer, ['add', collDir])
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /app already lives in this instance as travel\/app/)
+  assert.match(r.out, /path-mounted/)
+  assert.ok(!fs.existsSync(path.join(consumer, 'app')), 'no silent duplicate installed')
+  assert.ok(fs.existsSync(path.join(consumer, 'mychrome', 'frontend.jsx')), 'non-colliding modules still install')
+  // explicit --force installs the separate copy alongside
+  const r2 = cli(consumer, ['add', 'app/app', '--force'])
+  assert.equal(r2.code, 0, r2.out)
+  assert.ok(fs.existsSync(path.join(consumer, 'app', 'frontend.jsx')))
+})
+
 /* ---- publish ------------------------------------------------------------------ */
 
 test('publish --bundle round-trips through add', () => {
