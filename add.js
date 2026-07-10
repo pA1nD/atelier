@@ -237,6 +237,9 @@ function installModule(collection, id, head) {
 
   if (fs.existsSync(dest) && !force) {
     console.log(`  · ${qualified} already installed — kept (yours; --force replaces it, data/ preserved)`);
+    // still check (and with --yes, run) the module's system needs — "install
+    // it, then satisfy its needs later" must not require --force gymnastics
+    reportNeeds(readPkg(dest), qualified, `${CLI_NAME} add ${collection}/${id} --yes`);
     return false;
   }
   const elsewhere = existingElsewhere(id, dest);
@@ -305,13 +308,13 @@ function installModule(collection, id, head) {
       cd ${dest} && npm install
 `);
   }
-  reportNeeds(pkg, qualified);
+  reportNeeds(pkg, qualified, `${CLI_NAME} add ${collection}/${id} --yes`);
   if (!configured) updateFilter(id);   // external installs mount by path instead
   return true;
 }
 
 /* ---- system needs — the module's own `atelier` block ------------------------ */
-function reportNeeds(pkg, qualified) {
+function reportNeeds(pkg, qualified, yesCmd) {
   const needs = pkg.atelier && typeof pkg.atelier === 'object' ? pkg.atelier : {};
   const binOk = (b) => { try { execFileSync('/bin/sh', ['-c', `command -v ${b}`], { stdio: 'ignore' }); return true; } catch { return false; } };
   const declaredBins = Object.entries(needs.bins && typeof needs.bins === 'object' ? needs.bins : {})
@@ -334,7 +337,7 @@ function reportNeeds(pkg, qualified) {
     if (osMismatch) console.log(`    · it targets os [${needs.os.join(', ')}] — this machine is ${process.platform}`);
     for (const [b, hint] of missingBins) console.log(`    · missing ${b}${hint ? `  →  ${hint}` : ''}`);
     for (const k of missingEnv) console.log(`    · missing env ${k} — provide it via your environment or launcher`);
-    if (missingBins.some(([, h]) => h) && !yes) console.log(`    (re-run with --yes to run the install hints)`);
+    if (missingBins.some(([, h]) => h) && !yes) console.log(`    (run the install hints for you:  ${yesCmd})`);
   }
 }
 

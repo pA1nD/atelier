@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.16.1
+
+**Forgot `--yes`? The way back now exists — and is printed.** The needs report used to end with "(re-run with --yes to run the install hints)", which was a dead end: re-running skipped the already-installed module before the needs check ever fired. Now the skip path re-checks a module's system needs every time (and with `--yes`, runs the author's install hints against the installed copy), and every needs report prints the exact copy-pasteable command — `atelier add <collection>/<module> --yes` — instead of vague advice.
+
 ## 0.16.0
 
 **`installPath` — route new installs to your own folders, chromes separately.** Instances that keep module working trees outside the instance folder (a central modules repo, a separate chromes repo with its own agent rules so an app-focused agent can't restyle the chrome) can now declare it: `{ "installPath": { "modules": "~/work/modules", "chromes": "~/work/chromes" } }` in `atelier.config.json`. `add` reads the cut's own `meta.isChrome` to route each module, path-mounts external installs into the config automatically (live — path entries are filter-neutral), and `update`, `list`, and the duplicate sweep now reason over **everything the instance mounts** — root folders, workspaces, and config path-mounts — so externally-installed modules update in place, show ✓ in `list`, and are never silently duplicated. Modules that already exist elsewhere are never relocated; the paths route *new* installs only.

@@ -267,6 +267,28 @@ test('installPath routes modules and chromes to separate folders, auto-mounts th
   assert.match(fs.readFileSync(path.join(modHome, 'app', 'frontend.jsx'), 'utf8'), /v2/, 'updated in place, outside the instance')
 })
 
+test('forgot --yes: the exact re-run command is printed and WORKS on the installed module', () => {
+  const root = mkInstance()
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-hint-')), 'hint-ran')
+  mkModule(root, 'tool', {
+    pkg: { name: 'tool', version: '1.0.0', atelier: { bins: { 'no-such-bin-x9q': `touch ${marker}` } } },
+  })
+  assert.equal(cli(root, ['package', 'tool', '--yes']).code, 0)
+
+  const consumer = mkInstance()
+  const r = cli(consumer, ['add', path.join(root, '_collections', 'tool')])
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /ACTION NEEDED/)
+  assert.match(r.out, /add tool\/tool --yes/, 'prints the exact command, not vague advice')
+  assert.ok(!fs.existsSync(marker), 'hints never run without --yes')
+
+  // the printed command actually works on an ALREADY-INSTALLED module
+  const r2 = cli(consumer, ['add', 'tool/tool', '--yes'])
+  assert.equal(r2.code, 0, r2.out)
+  assert.match(r2.out, /already installed — kept/)
+  assert.ok(fs.existsSync(marker), 'install hint executed on re-run with --yes')
+})
+
 /* ---- publish ------------------------------------------------------------------ */
 
 test('publish --bundle round-trips through add', () => {
