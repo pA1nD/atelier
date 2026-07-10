@@ -125,6 +125,54 @@ $ npx atelier list
 
 `--as` names the subscription locally (default: the repo's basename) — useful when two sources share a name, or when `studio` means something else on your machine.
 
+## Example 4 — two people, one collection: contributing back
+
+The full loop, where everything above meets. You and a coworker both subscribe to your team's collection with push rights; you improve kanban while they improve crm.
+
+```console
+# ── you — improve kanban, then cut it into the team collection ───
+$ …edit kanban…
+$ npx atelier package kanban --to studio
+  ✓ kanban 1.4.0
+  ✓ packaged  →  _collections/studio/  (commit 9c41f02)
+```
+
+That cut landed in **your mirror's local branch — the outbox**. Nothing is published yet; the team hasn't seen it. Meanwhile your coworker publishes their crm cut first. Note what does *not* happen to you:
+
+```console
+$ npx atelier update studio
+  pulled: studio   (bebf969..40aa1c7)
+  · studio: 1 unpublished local cut on the mirror — receiving from the published channel; npx atelier publish studio when ready
+  ✓ global/crm 2.1.0 → 2.2.0   (no local edits)
+  · global/kanban up to date
+```
+
+A full outbox never blocks the channel: you received their crm cut normally, your kanban work sat untouched, and the note reminds you there's something waiting to ship. Now ship it:
+
+```console
+$ npx atelier publish studio
+  ✗ upstream moved while this mirror holds 1 unpublished local cut — push rejected.
+
+  Nothing is lost and nothing needs merging here: a cut is regenerated from
+  your working tree in one command. The path is realign → recut → publish:
+
+    1. realign the mirror to the published channel   (offered below — your
+       local cuts stay recoverable under refs/atelier/discarded/)
+    2. only if others changed a module you also changed:
+         npx atelier update studio --merge
+    3. npx atelier package kanban --to studio
+    4. npx atelier publish studio
+
+  realign now? (non-destructive — cuts kept under refs/atelier/discarded/) [Y/n] y
+  ✓ realigned to the published channel — your cuts are kept at refs/atelier/discarded/…
+
+$ npx atelier package kanban --to studio
+$ npx atelier publish studio
+  ✓ pushed _collections/studio  →  git@github.com:acme/studio.git
+```
+
+Step 2 was skippable here — they touched crm, you touched kanban. Had you both changed the *same* module, `update studio --merge` would have brought their cut into your working tree first (the staged, verified merge from Example 2 — conflicts hand off to your agent, never auto-picked), and your recut would then contain both. That's the one rule that keeps team collections simple: **merges happen in working trees; a collection only ever receives finished, build-gated snapshots.** Your coworker's next `update studio` picks up kanban 1.4.0, both sides converge, and nobody ever ran a raw git command.
+
 ## Where `add` can point
 
 | Source | What it is |
@@ -143,6 +191,16 @@ Bare words (`studio`, `studio/crm`) are never sources — they name your subscri
 - **`data/` is runtime state.** It ships only when a cut says `--data` (point-in-time content, placed on first install); a `--force` reinstall always keeps the live `data/`.
 - **Provenance:** `add` writes a small `.atelier` file into each installed module — which collection, which mirror commit. That's the merge base `atelier update` reasons from, and it's stripped from any cut you package onward.
 - **System needs:** if a module declares an `atelier` block (below), `add` checks and reports what's missing; `--yes` also runs the author's install hints.
+
+## Under the hood: the mirror, the channel, and `.atelier`
+
+Three small mechanisms carry everything above — knowing them makes the system predictable instead of magical:
+
+**The mirror.** A subscription is a full `git clone` under `_collections/<name>/`. The history is the point: it's what makes updates incremental, merge bases real, and offline installs possible.
+
+**The channel vs. the outbox.** What you *receive* is the **published channel** — the mirror's `origin/HEAD`. What you *contribute* stacks up as ordinary commits on the mirror's local branch: your **outbox** (`package --to <subscribed collection>` writes there; `publish` pushes it). Reception reads the channel ref exclusively — installs, update baselines, and provenance all come from it — so a full outbox never blocks incoming cuts, and your unpublished work can never be mistaken for upstream's baseline. When someone publishes before you, your push is rejected and `publish` walks you through realign → recut → publish; realigning is **non-destructive** (discarded cuts stay recoverable under `refs/atelier/discarded/`), and since every cut is regenerated from your working tree in one command, nothing of value ever lives *only* in the mirror.
+
+**`.atelier` — the membership card.** `add` writes a small JSON file into each installed module: which collection it came from, and the **published** commit it was installed from. That commit is the merge base `update` reasons from — "you've edited 3 files" is a diff against it, and updates merge upstream's changes *onto* yours instead of over them. Because it only ever references published commits, nothing you do to your mirror's local branch can invalidate it. It never travels (`package` strips it from every cut), and deleting it simply disconnects the module from its channel — a module without one is just a folder, and everything except `update` treats it exactly the same. If upstream ever rewrites history out from under a pointer, `update` says so loudly and offers `--overwrite` or resubscribing — never a silent guess.
 
 ## Shipping your own modules
 
