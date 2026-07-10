@@ -234,6 +234,39 @@ test('add flags a module the instance already mounts elsewhere (path-mount in a 
   assert.ok(fs.existsSync(path.join(consumer, 'app', 'frontend.jsx')))
 })
 
+test('installPath routes modules and chromes to separate folders, auto-mounts them, and update finds them there', () => {
+  const { producer, collDir } = producerWithApp()
+  const consumer = mkInstance()
+  const modHome = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-mods-'))
+  const chromeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-chromes-'))
+  fs.writeFileSync(path.join(consumer, 'atelier.config.json'), JSON.stringify({
+    installPath: { modules: modHome, chromes: chromeHome },
+  }))
+  const r = cli(consumer, ['add', collDir])
+  assert.equal(r.code, 0, r.out)
+  assert.ok(fs.existsSync(path.join(modHome, 'app', 'frontend.jsx')), 'module routed to installPath.modules')
+  assert.ok(fs.existsSync(path.join(chromeHome, 'mychrome', 'frontend.jsx')), 'chrome routed to installPath.chromes')
+  assert.ok(!fs.existsSync(path.join(consumer, 'app')) && !fs.existsSync(path.join(consumer, 'mychrome')),
+    'nothing lands in the instance folder')
+  const cfg = JSON.parse(fs.readFileSync(path.join(consumer, 'atelier.config.json'), 'utf8'))
+  assert.ok(cfg.modules.includes(path.join(modHome, 'app')), 'module path-mounted automatically')
+  assert.ok(cfg.modules.includes(path.join(chromeHome, 'mychrome')), 'chrome path-mounted automatically')
+  // list sees them as installed through the path-mounts
+  assert.match(cli(consumer, ['list']).out, /✓ app/)
+  // re-add stays clobber-safe against the external location
+  const r2 = cli(consumer, ['add', 'app'])
+  assert.match(r2.out, /already installed — kept|already lives in this instance/)
+  // upstream cuts a new version → update finds and upgrades the EXTERNAL working copy in place
+  fs.writeFileSync(path.join(producer, 'app', 'frontend.jsx'),
+    `export const meta = { chrome: 'mychrome' };\nexport default function App() { return <div>v2</div>; }\n`)
+  fs.writeFileSync(path.join(producer, 'app', 'package.json'), JSON.stringify({ name: 'app', version: '2.0.0' }))
+  assert.equal(cli(producer, ['package', 'app', '--yes']).code, 0)
+  const r3 = cli(consumer, ['update', 'app'])
+  assert.equal(r3.code, 0, r3.out)
+  assert.match(r3.out, /1\.0\.0 → 2\.0\.0/)
+  assert.match(fs.readFileSync(path.join(modHome, 'app', 'frontend.jsx'), 'utf8'), /v2/, 'updated in place, outside the instance')
+})
+
 /* ---- publish ------------------------------------------------------------------ */
 
 test('publish --bundle round-trips through add', () => {

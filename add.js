@@ -23,14 +23,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import {
-  resolveRoot, RESERVED_NAMES, GLOBAL_WORKSPACE,
-  loadModuleConfig, collectConfigPaths, resolvePathEntry, isWorkspaceDir,
-} from './discovery.js';
+import { resolveRoot, RESERVED_NAMES } from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, collectionsRoot, listCollections, listModuleDirs,
-  isModuleFolder, readPkg, git, gitErr, channelHead, aheadOfChannel, extractTreeAt, CLI_NAME,
+  isModuleFolder, readPkg, git, gitErr, channelHead, aheadOfChannel, extractTreeAt,
+  instanceModuleDirs, installPathFor, extractMetaStatic, CLI_NAME,
 } from './collections.js';
+
+const HOME = process.env.HOME || '';
+const tilde = (p) => (HOME && p.startsWith(HOME + path.sep)) ? '~' + p.slice(HOME.length) : p;
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const fail = (msg) => { console.error(`\natelier add: ${msg}\n`); process.exit(1); };
@@ -164,27 +165,73 @@ process.on('exit', () => { for (const s of pendingStagings) { try { fs.rmSync(s,
 // trees can live anywhere on disk). Installing a same-named module without
 // noticing would quietly give the instance two of them.
 function existingElsewhere(id, dest) {
-  const hits = [];
-  const consider = (dir, ws, mounted) => {
-    if (dir !== dest && isModuleFolder(dir)) hits.push({ q: `${ws}/${id}`, dir, mounted });
+  return instanceModuleDirs(ROOT)
+    .filter((m) => m.id === id && path.resolve(m.dir) !== path.resolve(dest))
+    .map((m) => ({ q: `${m.workspace}/${id}`, dir: m.dir, mounted: m.mounted }));
+}
+
+// The cut declares chrome-ness itself (meta.isChrome in its frontend) — read
+// from the channel commit, so `installPath.chromes` routes chromes correctly.
+function moduleIsChrome(collection, head, id) {
+  try { return !!extractMetaStatic(git(['show', `${head}:${id}/frontend.jsx`], collectionDir(ROOT, collection))).isChrome; }
+  catch { return false; }
+}
+
+// An install that landed OUTSIDE the instance folder must be path-mounted in
+// atelier.config.json or discovery never sees it. Plain path strings are
+// filter-neutral (always safe to append); a NEW workspace object is an allow
+// marker, so it's only auto-added when the list already has allow markers —
+// otherwise appending one would silently flip the whole filter to allow mode.
+function ensureMounted(absDir) {
+  const CONFIG_PATH = path.join(ROOT, 'atelier.config.json');
+  let config = {};
+  try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch {}
+  if (!config || typeof config !== 'object') config = {};
+  if (!Array.isArray(config.modules)) config.modules = [];
+  const entries = config.modules;
+  const p = tilde(absDir);
+  const resolves = (raw) => {
+    if (typeof raw !== 'string' || !raw) return null;
+    const expanded = raw === '~' || raw.startsWith('~/') ? path.join(HOME, raw.slice(1)) : raw;
+    return path.resolve(path.isAbsolute(expanded) ? expanded : path.resolve(ROOT, expanded));
   };
-  consider(path.join(ROOT, id), GLOBAL_WORKSPACE, false);
-  let ents = [];
-  try { ents = fs.readdirSync(ROOT, { withFileTypes: true }); } catch {}
-  for (const e of ents) {
-    if (e.isDirectory() && isWorkspaceDir(e.name)) consider(path.join(ROOT, e.name, id), e.name.slice(1), false);
+  const sameAbs = (e) => resolves(typeof e === 'string' ? e : e && typeof e === 'object' ? e.path : null) === path.resolve(absDir);
+  const write = () => {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+    console.log(`  config: mounted ${p}${workspace ? ` into workspace ${workspace}` : ''} (live — no restart needed)`);
+  };
+  if (!workspace) {
+    if (entries.some(sameAbs)) return;
+    entries.push(p);
+    return write();
   }
-  for (const entry of collectConfigPaths(loadModuleConfig(ROOT), { globalWorkspace: GLOBAL_WORKSPACE })) {
-    const abs = resolvePathEntry(entry.path, ROOT);
-    if (!abs) continue;
-    if ((entry.id || path.basename(abs)) === id) consider(abs, entry.workspace, true);
+  const ws = entries.find((e) => e && typeof e === 'object' && e.workspace === workspace);
+  if (ws && Array.isArray(ws.modules)) {
+    if (ws.modules.some(sameAbs)) return;
+    ws.modules.push(p);
+    return write();
   }
-  return hits;
+  if (ws) {
+    console.log(`  ! workspace "${workspace}" is include-all in atelier.config.json — mount it yourself: add "${p}" to a modules list for it`);
+    return;
+  }
+  const isDeny = (e) => (typeof e === 'string' && e.startsWith('!')) || (e && typeof e === 'object' && typeof e.workspace === 'string' && e.workspace.startsWith('!'));
+  const isPath = (e) => (typeof e === 'string' && /^[.~/]/.test(e)) || (e && typeof e === 'object' && typeof e.path === 'string');
+  const hasAllow = entries.some((e) => !isDeny(e) && !isPath(e));
+  if (!hasAllow && entries.some((e) => !isPath(e))) {
+    console.log(`  ! atelier.config.json has no allow-mode filter — a new workspace entry would change its meaning; mount it yourself:\n    { "workspace": "${workspace}", "modules": ["${p}"] }`);
+    return;
+  }
+  entries.push({ workspace, modules: [p] });
+  return write();
 }
 
 function installModule(collection, id, head) {
   if (RESERVED_NAMES.has(id)) { console.log(`  ! skipping ${id} — a reserved name in atelier`); return false; }
-  const destParent = workspace ? path.join(ROOT, '$' + workspace) : ROOT;
+  // installPath routes NEW working copies (modules and chromes separately —
+  // operators often keep them in different repos under different agent rules)
+  const configured = installPathFor(ROOT, moduleIsChrome(collection, head, id));
+  const destParent = configured || (workspace ? path.join(ROOT, '$' + workspace) : ROOT);
   const dest = path.join(destParent, id);
   const qualified = `${workspace || 'global'}/${id}`;
 
@@ -247,7 +294,8 @@ function installModule(collection, id, head) {
   fs.rmSync(dest, { recursive: true, force: true });
   fs.renameSync(staging, dest);
   pendingStagings.delete(staging);
-  console.log(`  installed: ${qualified}  ←  ${collection}`);
+  console.log(`  installed: ${qualified}  ←  ${collection}${configured ? `   → ${tilde(dest)}` : ''}`);
+  if (configured) ensureMounted(dest);
   if (depsFailed) {
     anyDepsFailed = true;
     console.error(`
@@ -258,7 +306,7 @@ function installModule(collection, id, head) {
 `);
   }
   reportNeeds(pkg, qualified);
-  updateFilter(id);
+  if (!configured) updateFilter(id);   // external installs mount by path instead
   return true;
 }
 

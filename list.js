@@ -10,23 +10,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveRoot } from './discovery.js';
-import { COLLECTIONS_DIR, CLI_NAME, collectionDir, listCollections, listModuleDirs, git } from './collections.js';
+import { COLLECTIONS_DIR, CLI_NAME, collectionDir, listCollections, listModuleDirs, instanceModuleDirs, git } from './collections.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = resolveRoot({ atelierRoot: process.env.ATELIER_ROOT, pwd: process.env.PWD, hostDir: HOST_DIR });
 
-const installedIds = () => {
-  const ids = new Set();
-  try {
-    for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
-      if (e.name.startsWith('$')) {
-        try { for (const w of fs.readdirSync(path.join(ROOT, e.name))) ids.add(w); } catch {}
-      } else ids.add(e.name);
-    }
-  } catch {}
-  return ids;
-};
+// installed = mounted anywhere: root folders, workspaces, config path-mounts
+const installedIds = () => new Set(instanceModuleDirs(ROOT).map((m) => m.id));
 
 const names = listCollections(ROOT);
 if (!names.length) {

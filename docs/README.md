@@ -125,6 +125,7 @@ All optional; resolved **defaults ← config ← environment** (env wins, so a P
 | `auth` | `false` | `ATELIER_AUTH` | path/id of the auth module, or `false` to run ungated (see [AUTH.md](./AUTH.md)) |
 | `revalidateMs` | `30000` | `ATELIER_REVALIDATE_MS` | how often live WebSocket sockets re-run `authenticate` (only when `auth` is set) — so logout/permission changes propagate without a reconnect; see [AUTH.md](./AUTH.md) |
 | `label` | `null` | `ATELIER_LABEL` | optional instance name a chrome may display |
+| `installPath` | _(the instance folder)_ | — | `{ "modules": "<path>", "chromes": "<path>" }` — where `atelier add` places **new** module working copies, chromes separately (keep them in different repos under different agent rules); external installs are path-mounted into `modules:` automatically, and `update` finds them there. Tooling-only — the server ignores it |
 | `modules` | _(all run)_ | — | the module filter below |
 
 #### Module filter — top-level entries

@@ -1,6 +1,6 @@
 {
   "name": "@pa1nd/atelier",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "type": "module",
   "description": "The Atelier app shell \u2014 discovers, mounts, and serves feature modules around one shared chrome: a single runtime hosting many small, context-window-sized apps. Install as a dependency, run with `atelier`, install modules with `atelier add`.",
   "bin": {

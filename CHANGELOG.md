@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.16.0
+
+**`installPath` — route new installs to your own folders, chromes separately.** Instances that keep module working trees outside the instance folder (a central modules repo, a separate chromes repo with its own agent rules so an app-focused agent can't restyle the chrome) can now declare it: `{ "installPath": { "modules": "~/work/modules", "chromes": "~/work/chromes" } }` in `atelier.config.json`. `add` reads the cut's own `meta.isChrome` to route each module, path-mounts external installs into the config automatically (live — path entries are filter-neutral), and `update`, `list`, and the duplicate sweep now reason over **everything the instance mounts** — root folders, workspaces, and config path-mounts — so externally-installed modules update in place, show ✓ in `list`, and are never silently duplicated. Modules that already exist elsewhere are never relocated; the paths route *new* installs only.
+
 ## 0.15.3
 
 **The channel is `origin/HEAD`; the mirror's local branch is your outbox.** Cutting into a subscribed collection (`package --to` — the contribution flow) used to make your unpublished commit the mirror's HEAD, which `update` treated as upstream: provenance could advance onto your own unpublished cut, your edits then looked like the baseline, and the next upstream cut could **silently overwrite unpublished work**. Reception (`add`/`update`) now fetches and reads the published channel ref exclusively — installs extract from it, provenance only ever references published commits — so local cuts can never become the merge baseline, a diverged mirror keeps receiving (with a `N unpublished local cut(s)` note instead of a misleading failure), and realigning the local branch can never invalidate a module's `.atelier` pointer.

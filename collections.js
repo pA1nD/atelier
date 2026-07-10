@@ -15,8 +15,64 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  GLOBAL_WORKSPACE, isWorkspaceDir,
+  loadConfig, loadModuleConfig, collectConfigPaths, resolvePathEntry,
+} from './discovery.js';
 
 export const COLLECTIONS_DIR = '_collections';
+
+/* ---- where things are, instance-wide ----------------------------------------
+ * The verbs reason about "every module this instance mounts" — root folders,
+ * $<ws>/ folders, AND atelier.config.json path-mounts (working trees can live
+ * anywhere on disk; many operators keep modules and chromes in separate repos
+ * with their own agent rules).
+ * ------------------------------------------------------------------------------ */
+export const isModuleFolder = (dir) =>
+  fs.existsSync(path.join(dir, 'frontend.jsx')) || fs.existsSync(path.join(dir, 'backend.js'));
+
+export function instanceModuleDirs(instanceRoot) {
+  const out = [];
+  const seen = new Set();
+  const consider = (dir, id, workspace, mounted) => {
+    const key = path.resolve(dir);
+    if (seen.has(key) || !isModuleFolder(dir)) return;
+    seen.add(key);
+    out.push({ dir, id, workspace, mounted });
+  };
+  let ents = [];
+  try { ents = fs.readdirSync(instanceRoot, { withFileTypes: true }); } catch {}
+  for (const e of ents) {
+    if (!e.isDirectory() || !/^[a-zA-Z0-9]/.test(e.name)) continue;
+    if (isWorkspaceDir(e.name)) {
+      let subs = [];
+      try { subs = fs.readdirSync(path.join(instanceRoot, e.name), { withFileTypes: true }); } catch {}
+      for (const s of subs) {
+        if (s.isDirectory() && /^[a-zA-Z0-9]/.test(s.name)) consider(path.join(instanceRoot, e.name, s.name), s.name, e.name.slice(1), false);
+      }
+    } else {
+      consider(path.join(instanceRoot, e.name), e.name, GLOBAL_WORKSPACE, false);
+    }
+  }
+  for (const entry of collectConfigPaths(loadModuleConfig(instanceRoot), { globalWorkspace: GLOBAL_WORKSPACE })) {
+    const abs = resolvePathEntry(entry.path, instanceRoot);
+    if (abs) consider(abs, entry.id || path.basename(abs), entry.workspace, true);
+  }
+  return out;
+}
+
+// atelier.config.json `installPath` — where `add` places NEW working copies:
+//   { "installPath": { "modules": "~/work/modules", "chromes": "~/work/chromes" } }
+// Both optional; unset → the instance folder itself. External installs are
+// path-mounted into the config automatically. Tooling-only — the server
+// discovers them through the resulting path-mounts like any other.
+export function installPathFor(instanceRoot, isChrome) {
+  const ip = loadConfig(instanceRoot).installPath;
+  if (!ip || typeof ip !== 'object') return null;
+  const raw = isChrome ? (ip.chromes ?? ip.modules) : ip.modules;
+  if (typeof raw !== 'string' || !raw) return null;
+  return resolvePathEntry(raw, instanceRoot);
+}
 
 // How to invoke the CLI *on this machine* — used in printed next-step hints.
 // Installed as a dependency → the bin is only reachable through npx; running
@@ -24,9 +80,6 @@ export const COLLECTIONS_DIR = '_collections';
 // cleanest. Hints for the RECEIVING side of a share always say `npx atelier`
 // (their setup is unknown; npx is the documented default).
 export const CLI_NAME = /[\\/]node_modules[\\/]/.test(fileURLToPath(import.meta.url)) ? 'npx atelier' : 'atelier';
-
-export const isModuleFolder = (dir) =>
-  fs.existsSync(path.join(dir, 'frontend.jsx')) || fs.existsSync(path.join(dir, 'backend.js'));
 
 export const readPkg = (dir) => {
   try { return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')); }

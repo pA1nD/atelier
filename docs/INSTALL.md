@@ -189,6 +189,7 @@ Bare words (`studio`, `studio/crm`) are never sources — they name your subscri
 
 - **Never on the wire:** `node_modules/` (the consumer's `npm install` rebuilds it — `add` runs it for them), the module's own `.git`, `.env*` (secrets stay home), and `.atelier` (see below).
 - **`data/` is runtime state.** It ships only when a cut says `--data` (point-in-time content, placed on first install); a `--force` reinstall always keeps the live `data/`.
+- **Where installs land:** by default, in the instance folder (or `$<ws>/` with `--workspace`). Set `installPath` in `atelier.config.json` — `{ "installPath": { "modules": "~/work/modules", "chromes": "~/work/chromes" } }` — and `add` places new working copies there instead (chromes separately: many operators keep them in a different repo, under different agent rules, so an agent hammering on an app can't restyle the chrome). External installs are path-mounted into the config automatically (live, no restart), `update` upgrades them in place wherever they live, and modules that already exist somewhere else are never relocated — the paths only route *new* installs.
 - **Provenance:** `add` writes a small `.atelier` file into each installed module — which collection, which mirror commit. That's the merge base `atelier update` reasons from, and it's stripped from any cut you package onward.
 - **System needs:** if a module declares an `atelier` block (below), `add` checks and reports what's missing; `--yes` also runs the author's install hints.
 

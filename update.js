@@ -39,7 +39,8 @@ import { fileURLToPath } from 'node:url';
 import { resolveRoot } from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, listCollections, readPkg, readModuleMeta,
-  copyModuleFiltered, git, gitErr, gitHead, channelHead, aheadOfChannel, extractTreeAt, CLI_NAME,
+  copyModuleFiltered, git, gitErr, gitHead, channelHead, aheadOfChannel, extractTreeAt,
+  instanceModuleDirs, CLI_NAME,
 } from './collections.js';
 import { buildProblems } from './gate.js';
 
@@ -70,28 +71,18 @@ for (let i = 0; i < args.length; i++) {
 const ROOT = resolveRoot({ atelierRoot: process.env.ATELIER_ROOT, pwd: process.env.PWD, hostDir: HOST_DIR });
 console.log(`\n  instance: ${ROOT}`);
 
-/* ---- installed modules, by provenance ---------------------------------------- */
+/* ---- installed modules, by provenance ------------------------------------------
+ * Sweeps everything the instance mounts — root folders, $<ws>/ folders, and
+ * config path-mounts — so a module installed (or linked) anywhere on disk
+ * updates in place. Membership = the .atelier file, wherever the folder is.
+ * ---------------------------------------------------------------------------------- */
 function installedModules() {
   const out = [];
-  const scan = (parent, workspace) => {
-    let ents;
-    try { ents = fs.readdirSync(parent, { withFileTypes: true }); } catch { return; }
-    for (const e of ents) {
-      if (!e.isDirectory() || !/^[a-zA-Z0-9]/.test(e.name)) continue;
-      const dir = path.join(parent, e.name);
-      try {
-        const prov = JSON.parse(fs.readFileSync(path.join(dir, '.atelier'), 'utf8'));
-        if (prov && prov.collection && prov.commit) out.push({ dir, id: e.name, workspace, prov });
-      } catch {}
-    }
-  };
-  scan(ROOT, 'global');
-  let roots;
-  try { roots = fs.readdirSync(ROOT, { withFileTypes: true }); } catch { roots = []; }
-  for (const e of roots) {
-    if (e.isDirectory() && e.name.startsWith('$') && /^\$[a-zA-Z0-9]/.test(e.name)) {
-      scan(path.join(ROOT, e.name), e.name.slice(1));
-    }
+  for (const m of instanceModuleDirs(ROOT)) {
+    try {
+      const prov = JSON.parse(fs.readFileSync(path.join(m.dir, '.atelier'), 'utf8'));
+      if (prov && prov.collection && prov.commit) out.push({ dir: m.dir, id: m.id, workspace: m.workspace, prov });
+    } catch {}
   }
   return out;
 }
