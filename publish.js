@@ -24,7 +24,8 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveRoot } from './discovery.js';
-import { COLLECTIONS_DIR, CLI_NAME, collectionDir, listCollections, isGitRepo, git, gitErr } from './collections.js';
+import readline from 'node:readline/promises';
+import { COLLECTIONS_DIR, CLI_NAME, collectionDir, listCollections, isGitRepo, git, gitErr, channelHead, aheadOfChannel } from './collections.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const fail = (msg) => { console.error(`\natelier publish: ${msg}\n`); process.exit(1); };
@@ -128,12 +129,68 @@ if (serve) {
   if (!pushUrl && !origin) fail(`collection "${name}" has no git origin yet — tell publish where to put it:\n  ${CLI_NAME} publish ${name} --to github:owner/repo   (or any git url, --serve, --bundle)`);
   const target = pushUrl || origin;
   try {
-    git(['push', '-u', target, 'HEAD'], dir, { stdio: ['ignore', 'inherit', 'inherit'] });
+    git(['push', '-u', target, 'HEAD'], dir);
   } catch (e) {
-    fail(`git push to ${target} failed — check the repo exists and you can push to it\n  ${gitErr(e)}`);
+    const rejected = /non-fast-forward|fetch first|\[rejected\]/i.test((e.stderr || '').toString());
+    if (!rejected) fail(`git push to ${target} failed — check the repo exists and you can push to it\n  ${gitErr(e)}`);
+    await handleDivergence();
   }
   if (pushUrl && !origin) { try { git(['remote', 'add', 'origin', pushUrl], dir); } catch {} }
   console.log(`\n  ✓ pushed ${COLLECTIONS_DIR}/${name}  →  ${target}`);
   if (to && to.startsWith('github:')) console.log(`    others install it with:  npx atelier add ${to}\n`);
   else console.log('');
+}
+
+/* ---- diverged mirror ------------------------------------------------------
+ * Someone else published while this mirror held unpublished cuts. There is
+ * nothing to merge HERE — collections only receive finished snapshots, and a
+ * cut is regenerated from a working tree in one command. So the path is
+ * realign → (update --merge if the same module moved) → recut → publish.
+ * Realigning is non-destructive: the discarded cuts stay reachable under
+ * refs/atelier/discarded/, and provenance is untouched (it only ever points
+ * at published commits).
+ * ---------------------------------------------------------------------------- */
+async function handleDivergence() {
+  try { git(['fetch', '-q'], dir); } catch {}
+  const channel = channelHead(dir);
+  const ahead = aheadOfChannel(dir);
+  const mods = [...new Set(
+    git(['log', '--format=%s', `${channel}..HEAD`], dir).trim().split('\n')
+      .flatMap((s) => { const m = /^package (.+)$/.exec(s); return m ? m[1].split(' + ').map((x) => x.split('@')[0]) : []; }),
+  )];
+  const recut = mods.length
+    ? mods.map((m) => `${CLI_NAME} package ${m} --to ${name}`).join('  &&  ')
+    : `${CLI_NAME} package <module> --to ${name}`;
+  console.log(`
+  ✗ upstream moved while this mirror holds ${ahead} unpublished local cut${ahead === 1 ? '' : 's'} — push rejected.
+
+  Nothing is lost and nothing needs merging here: a cut is regenerated from
+  your working tree in one command. The path is realign → recut → publish:
+
+    1. realign the mirror to the published channel   (offered below — your
+       local cuts stay recoverable under refs/atelier/discarded/)
+    2. only if others changed a module you also changed:
+         ${CLI_NAME} update ${name} --merge
+    3. ${recut}
+    4. ${CLI_NAME} publish ${name}
+`);
+  const ref = `refs/atelier/discarded/${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+    console.log(`  realign by hand (no terminal to offer it here):
+    git -C ${dir} update-ref ${ref} HEAD
+    git -C ${dir} reset --hard ${channel}
+`);
+    process.exit(1);
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const a = (await rl.question(`  realign now? (non-destructive — cuts kept under refs/atelier/discarded/) [Y/n] `)).trim();
+  rl.close();
+  if (!/^n/i.test(a)) {
+    git(['update-ref', ref, 'HEAD'], dir);
+    git(['reset', '--hard', channel], dir);
+    console.log(`\n  ✓ realigned to the published channel — your cuts are kept at ${ref}
+    next:  ${recut}  &&  ${CLI_NAME} publish ${name}
+    (${CLI_NAME} update ${name} --merge first if others changed the same modules)\n`);
+  }
+  process.exit(1);
 }

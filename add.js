@@ -29,7 +29,7 @@ import {
 } from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, collectionsRoot, listCollections, listModuleDirs,
-  isModuleFolder, readPkg, copyModuleFiltered, git, gitErr, gitHead, CLI_NAME,
+  isModuleFolder, readPkg, git, gitErr, channelHead, aheadOfChannel, extractTreeAt, CLI_NAME,
 } from './collections.js';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -120,13 +120,33 @@ async function subscribe(source) {
   return name;
 }
 
-/* ---- refresh a subscribed mirror (pull-pristine, so ff-only) ----------------- */
+/* ---- refresh a subscribed mirror --------------------------------------------
+ * Reception is FETCH-based and reads the channel ref (origin/HEAD) — a mirror
+ * whose local branch carries unpublished cuts (your outbox) still receives
+ * upstream's cuts without any reconciling. The branch is fast-forwarded along
+ * only when it can be; a diverged branch is simply left alone.
+ * ------------------------------------------------------------------------------ */
 function refresh(name) {
   const dir = collectionDir(ROOT, name);
   const hasRemote = (() => { try { git(['remote', 'get-url', 'origin'], dir); return true; } catch { return false; } })();
   if (!hasRemote) return;
-  try { git(['pull', '-q', '--ff-only'], dir); }
+  try { git(['fetch', '-q'], dir); }
   catch (e) { console.log(`  ! could not reach ${name}'s origin — installing from the local mirror\n    (${gitErr(e)})`); }
+  try { git(['merge', '-q', '--ff-only', channelHead(dir)], dir); } catch {}
+  const ahead = aheadOfChannel(dir);
+  if (ahead) console.log(`  · ${name}: ${ahead} unpublished local cut${ahead === 1 ? '' : 's'} on the mirror — installing from the published channel; ${CLI_NAME} publish ${name} when ready`);
+}
+
+// What the CHANNEL offers (module folders at origin/HEAD) — not the working
+// tree, which may hold unpublished local cuts.
+function channelOfferings(dir) {
+  const head = channelHead(dir);
+  if (!head) return [];
+  let names = [];
+  try { names = git(['ls-tree', '--name-only', head], dir).trim().split('\n').filter(Boolean); } catch { return []; }
+  return names.filter((n) => /^[a-zA-Z0-9]/.test(n) && ['frontend.jsx', 'backend.js'].some((f) => {
+    try { git(['cat-file', '-e', `${head}:${n}/${f}`], dir); return true; } catch { return false; }
+  }));
 }
 
 /* ---- install one module out of a mirror -------------------------------------- */
@@ -162,8 +182,7 @@ function existingElsewhere(id, dest) {
   return hits;
 }
 
-function installModule(collection, id) {
-  const src = path.join(collectionDir(ROOT, collection), id);
+function installModule(collection, id, head) {
   if (RESERVED_NAMES.has(id)) { console.log(`  ! skipping ${id} — a reserved name in atelier`); return false; }
   const destParent = workspace ? path.join(ROOT, '$' + workspace) : ROOT;
   const dest = path.join(destParent, id);
@@ -190,7 +209,9 @@ function installModule(collection, id) {
   const staging = path.join(destParent, `.add-${id}-${process.pid}`);
   fs.rmSync(staging, { recursive: true, force: true });
   pendingStagings.add(staging);
-  copyModuleFiltered(src, staging, { includeData: true });   // a cut's data/ is first-install content
+  // extract from the CHANNEL commit — cuts are already filtered at package
+  // time, and the ref (not the working tree) is what a subscription receives
+  extractTreeAt(collectionDir(ROOT, collection), head, id, staging);
 
   /* deps — the module's own package.json is the manifest */
   const pkg = readPkg(staging);
@@ -212,7 +233,7 @@ function installModule(collection, id) {
   // base a future update needs, and never distributed onward (the packaging
   // filter strips it).
   fs.writeFileSync(path.join(staging, '.atelier'), JSON.stringify({
-    collection, module: id, commit: gitHead(collectionDir(ROOT, collection)), installedAt: new Date().toISOString(),
+    collection, module: id, commit: head, installedAt: new Date().toISOString(),
   }, null, 2) + '\n');
 
   // --force: carry the LIVE module's data/ into the staged copy at the last
@@ -318,14 +339,15 @@ if (!fs.existsSync(dir)) {
 }
 if (!isSource(spec)) refresh(collection);   // a fresh subscription is already current
 
-const offered = listModuleDirs(dir);
+const offered = channelOfferings(dir);
 if (only && !offered.includes(only)) {
   fail(`no module "${only}" in collection "${collection}" — it offers: ${offered.join(', ') || '(nothing)'}`);
 }
 const targets = only ? [only] : offered;
 let installed = 0;
+const head = channelHead(dir);
 for (const id of targets) {
-  if (installModule(collection, id)) installed++;
+  if (installModule(collection, id, head)) installed++;
 }
 
 if (installed) {

@@ -11,6 +11,7 @@
  * from the server: nothing here runs in the serving process.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -72,6 +73,43 @@ export const isGitRepo = (dir) => fs.existsSync(path.join(dir, '.git'));
 export const gitHead = (dir) => {
   try { return git(['rev-parse', 'HEAD'], dir).trim(); } catch { return null; }
 };
+
+/* ---- the channel vs. the outbox ---------------------------------------------
+ * A subscription RECEIVES from the remote-tracking head (origin/HEAD) — the
+ * published channel. The mirror's local branch may sit ahead of it with
+ * unpublished cuts (`package --to` into a subscribed collection): that's the
+ * OUTBOX, and it is never what installs, updates, or provenance read from.
+ * This is what keeps `.atelier` pointers valid no matter what happens to the
+ * local branch (they only ever reference published commits), and what makes
+ * "your unpublished cut becomes the baseline and upstream silently overwrites
+ * your work" impossible. Authored/remoteless collections have no channel —
+ * their HEAD is it.
+ * ------------------------------------------------------------------------------ */
+export function channelHead(dir) {
+  for (const ref of ['origin/HEAD', 'origin/main', 'origin/master']) {
+    try { return git(['rev-parse', ref], dir).trim(); } catch {}
+  }
+  return gitHead(dir);
+}
+
+// How many local (unpublished) commits sit on the branch beyond the channel.
+export function aheadOfChannel(dir) {
+  try { return parseInt(git(['rev-list', '--count', `${channelHead(dir)}..HEAD`], dir).trim(), 10) || 0; }
+  catch { return 0; }
+}
+
+// Extract one folder of a repo AT A COMMIT into dest — reads the ref, never
+// the working tree (which may hold unpublished local cuts).
+let extractN = 0;
+export function extractTreeAt(repoDir, commit, subpath, dest) {
+  const buf = git(['archive', '--format=tar', commit, '--', subpath], repoDir,
+    { encoding: 'buffer', maxBuffer: 1 << 30 });
+  const t = path.join(os.tmpdir(), `atelier-x-${process.pid}-${++extractN}.tar`);
+  fs.writeFileSync(t, buf);
+  fs.mkdirSync(dest, { recursive: true });
+  execFileSync('tar', ['-xf', t, '--strip-components', '1', '-C', dest]);
+  fs.rmSync(t);
+}
 
 // Commit everything in `dir`. Returns the new short hash, or null when there
 // was nothing to commit. Falls back to a synthetic identity so packaging

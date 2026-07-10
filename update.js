@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveRoot } from './discovery.js';
 import {
   COLLECTIONS_DIR, collectionDir, listCollections, readPkg, readModuleMeta,
-  copyModuleFiltered, git, gitErr, gitHead, CLI_NAME,
+  copyModuleFiltered, git, gitErr, gitHead, channelHead, aheadOfChannel, extractTreeAt, CLI_NAME,
 } from './collections.js';
 import { buildProblems } from './gate.js';
 
@@ -106,16 +106,6 @@ if ((cont || abort) && !(wantColl && wantMod)) fail(`--${cont ? 'continue' : 'ab
 
 /* ---- scratch git — where merges happen (never the live module) --------------- */
 const sgit = (a, cwd, opts) => git(['-c', 'user.name=atelier', '-c', 'user.email=atelier@instance', ...a], cwd, opts);
-let tarN = 0;
-function extractAt(mirror, commit, mod, dest) {
-  const buf = execFileSync('git', ['archive', '--format=tar', commit, '--', mod],
-    { cwd: mirror, maxBuffer: 1 << 30 });
-  const t = path.join(os.tmpdir(), `atelier-x-${process.pid}-${++tarN}.tar`);
-  fs.writeFileSync(t, buf);
-  fs.mkdirSync(dest, { recursive: true });
-  execFileSync('tar', ['-xf', t, '--strip-components', '1', '-C', dest]);
-  fs.rmSync(t);
-}
 const treeExistsAt = (mirror, commit, mod) => {
   try { git(['rev-parse', '-q', '--verify', `${commit}:${mod}`], mirror); return true; } catch { return false; }
 };
@@ -134,17 +124,17 @@ process.on('exit', () => { for (const d of scratchDirs) { try { fs.rmSync(d, { r
 // Build the three-sided scratch repo. Returns everything a decision needs.
 function stageMerge(mirror, m) {
   const { prov } = m;
-  const targetSha = gitHead(mirror);
+  const targetSha = channelHead(mirror);   // theirs = the PUBLISHED channel, never local unpublished cuts
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-update-'));
   scratchDirs.push(scratch);
-  extractAt(mirror, prov.commit, prov.module, scratch);
+  extractTreeAt(mirror, prov.commit, prov.module, scratch);
   const baseVersion = readPkg(scratch).version || '0.0.0';
   sgit(['init', '-q'], scratch);
   sgit(['add', '-A', '--force'], scratch); sgit(['commit', '-q', '-m', 'base', '--allow-empty'], scratch);
   const baseSha = gitHead(scratch);
   sgit(['checkout', '-q', '-b', 'theirs'], scratch);
   clearWorkdir(scratch);
-  extractAt(mirror, targetSha, prov.module, scratch);
+  extractTreeAt(mirror, targetSha, prov.module, scratch);
   const newVersion = readPkg(scratch).version || '0.0.0';
   sgit(['add', '-A', '--force'], scratch); sgit(['commit', '-q', '-m', 'theirs', '--allow-empty'], scratch);
   sgit(['checkout', '-q', '-b', 'ours', baseSha], scratch);
@@ -315,14 +305,17 @@ for (const coll of collections) {
     if (wantColl) process.exit(1);
     continue;
   }
-  const before = gitHead(mirror);
+  const before = channelHead(mirror);
   const hasRemote = (() => { try { git(['remote', 'get-url', 'origin'], mirror); return true; } catch { return false; } })();
   if (hasRemote) {
-    try { git(['pull', '-q', '--ff-only'], mirror); }
+    try { git(['fetch', '-q'], mirror); }
     catch (e) { console.log(`  ! could not reach ${coll}'s origin — updating from the local mirror\n    (${gitErr(e)})`); }
+    try { git(['merge', '-q', '--ff-only', channelHead(mirror)], mirror); } catch {}   // keep the branch riding along when it can
   }
-  const head = gitHead(mirror);
+  const head = channelHead(mirror);
   console.log(`  pulled: ${coll}${head !== before ? `   (${before?.slice(0, 7)}..${head.slice(0, 7)})` : '   (already current)'}`);
+  const ahead = aheadOfChannel(mirror);
+  if (ahead) console.log(`  · ${coll}: ${ahead} unpublished local cut${ahead === 1 ? '' : 's'} on the mirror — receiving from the published channel; ${CLI_NAME} publish ${coll} when ready`);
 
   let mods = all.filter((m) => m.prov.collection === coll);
   if (wantMod) {

@@ -2,6 +2,12 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.15.3
+
+**The channel is `origin/HEAD`; the mirror's local branch is your outbox.** Cutting into a subscribed collection (`package --to` — the contribution flow) used to make your unpublished commit the mirror's HEAD, which `update` treated as upstream: provenance could advance onto your own unpublished cut, your edits then looked like the baseline, and the next upstream cut could **silently overwrite unpublished work**. Reception (`add`/`update`) now fetches and reads the published channel ref exclusively — installs extract from it, provenance only ever references published commits — so local cuts can never become the merge baseline, a diverged mirror keeps receiving (with a `N unpublished local cut(s)` note instead of a misleading failure), and realigning the local branch can never invalidate a module's `.atelier` pointer.
+
+**`publish` explains and offers the way out of divergence.** A rejected push (someone published first) now prints the whole recipe — realign → `update --merge` if the same module moved → recut → publish — with your affected modules named from the discarded commits, and offers to realign the mirror right there. Realigning is non-destructive: the discarded cuts stay reachable under `refs/atelier/discarded/<timestamp>`, and since a cut is regenerated from your working tree in one command, nothing of value ever lived only in the mirror.
+
 ## 0.15.2
 
 **`add` now sees the whole instance before installing.** The duplicate check used to look only at the literal destination folder — a module the instance already mounts *somewhere else* (a `$<ws>/` folder, or a working tree path-mounted via `atelier.config.json`) slipped past it, and installing a collection could quietly give you a second copy of something you already develop. Every install now sweeps root folders, workspace folders, and config path-mounts for the same module id: collisions are reported with their qualifiedId and mount path and skipped; an explicit `--force` still installs a separate copy alongside.
