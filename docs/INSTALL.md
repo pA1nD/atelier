@@ -49,7 +49,7 @@ $ npx atelier add http://studio.local:8787/kanban
   ✓ 2 modules installed — a running instance mounts them on the next request.
 ```
 
-One command each way, no infrastructure — `--serve` hosts the collection's git repo over plain http (git's dumb protocol), so the `add` is a real `git clone`. The coworker gets the app **themed and working**: the chrome traveled with it, and because a collection is a channel, they're now subscribed.
+One command each way, no infrastructure — `--serve` hosts the collection's git repo over plain http (git's dumb protocol) on port **8787** by default (`--port <n>` to change), so the `add` is a real `git clone`. The coworker gets the app **themed and working**: the chrome traveled with it, and because a collection is a channel, they're now subscribed.
 
 ## Example 2 — the working tree is a mess; distribution doesn't care
 
@@ -179,7 +179,7 @@ Step 2 was skippable here — they touched crm, you touched kanban. Had you both
 |---|---|
 | `github:owner/repo` | a public GitHub repo, cloned anonymously over https |
 | `git+ssh://…`, `git@host:…`, `https://….git` | any git remote — **private collections** ride your own ssh keys / credential helper |
-| `http://host:port/<name>` | a served collection (`atelier publish --serve`) — or any static host serving a collection's repo via git's dumb protocol |
+| `http://host:port/<name>` | a served collection (`atelier publish --serve`, port `8787` unless `--port` was passed) — or any static host serving a collection's repo via git's dumb protocol |
 | `./path`, `~/path`, `/abs/path` | a collection folder on disk or a shared drive (cloned, so it's still a channel) |
 | `something.bundle` | a single-file collection (`atelier publish --bundle`) — AirDrop it, USB it, chat it; cloning from it keeps full history |
 

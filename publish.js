@@ -13,7 +13,8 @@
  *   --serve   host the collection's git repo over plain http (git's dumb
  *             protocol: `git update-server-info` + static files) — the
  *             zero-infrastructure LAN share. Read-only; serves only committed
- *             cuts, never the working tree. Runs until Ctrl-C.
+ *             cuts, never the working tree. Runs until Ctrl-C. Listens on
+ *             port 8787 unless --port says otherwise.
  *   --bundle  a single file (git bundle) for AirDrop / USB / chat. Cloning
  *             from it keeps full history, so it's still a channel.
  */
@@ -103,13 +104,16 @@ if (serve) {
     return h ? `${h}.local` : null;
   };
   // Virtual interfaces (VM bridges, tunnels, AirDrop) are never the address a
-  // coworker reaches you on — only real NICs make the list.
+  // coworker reaches you on — only real NICs make the list. Exception: mesh
+  // VPNs (Tailscale etc.) live on a tunnel but assign CGNAT 100.64.0.0/10
+  // addresses that exist precisely to be dialed, so those pass.
   const VIRTUAL_IF = /^(bridge|utun|vmnet|awdl|llw|anpi|gif|stf|ap)\d*$/;
+  const CGNAT = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./; // 100.64.0.0/10
   server.listen(port, '0.0.0.0', () => {
     const ips = Object.entries(os.networkInterfaces())
-      .filter(([ifname]) => !VIRTUAL_IF.test(ifname))
-      .flatMap(([, addrs]) => addrs || [])
+      .flatMap(([ifname, addrs]) => (addrs || []).map((a) => ({ ifname, ...a })))
       .filter((i) => i.family === 'IPv4' && !i.internal)
+      .filter((i) => !VIRTUAL_IF.test(i.ifname) || CGNAT.test(i.address))
       .map((i) => i.address);
     console.log(`\n  serving ${COLLECTIONS_DIR}/${name}/ read-only (committed cuts only) — ctrl-c to stop`);
     for (const h of [...new Set([mdnsName(), ...ips].filter(Boolean))]) {
