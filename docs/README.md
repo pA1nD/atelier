@@ -77,7 +77,7 @@ There is no dev/prod mode. To run a second instance — a "production" one, stag
 
 1. **System defaults** — `port: 1844`, `hotReload: true`, `auth: false`, no chrome.
 2. **`atelier.config.json`** in the instance folder — the source of truth (see [Configuration](#configuration--discovery)).
-3. **Environment variables** at startup — they override the file, so a PaaS can inject a dynamic `PORT` / `BASE_URL`.
+3. **Environment variables** at startup — they override the file, so a PaaS can inject a dynamic `PORT` / `HOST` / `BASE_URL`.
 
 A typical "production" folder sets something like `{ "hotReload": false, "auth": "<auth-module>", "defaultChrome": "<chrome>", "port": 1844 }` and sits behind your own reverse proxy. atelier doesn't manage processes, TLS, or hostnames — that's your platform's job.
 
@@ -118,6 +118,7 @@ All optional; resolved **defaults ← config ← environment** (env wins, so a P
 | Key | Default | Env | Meaning |
 |---|---|---|---|
 | `port` | `1844` | `PORT` | listen port |
+| `host` | `127.0.0.1` | `HOST` | interface to bind. The default keeps the instance reachable only from this machine; `0.0.0.0` (all IPv4) or `::` (+ IPv6) exposes it to the network the machine is on — startup then lists the reachable addresses; a specific address (a LAN or VPN IP) binds just that interface. Expose only with `auth` set, or on a network where you trust everyone |
 | `baseUrl` | `http://localhost:<port>` | `BASE_URL` | external URL modules build links from |
 | `env` | `development` | `NODE_ENV` | frontend build mode — `development` (default, like an unset `NODE_ENV`) ships React + bundled-library dev warnings, unminified, with an inline sourcemap; `production` minifies the chrome bundle (dropping the inline sourcemap), strips bundled-library dev branches via the `process.env.NODE_ENV` define, and serves the minified React UMD. Independent of `hotReload`. |
 | `defaultChrome` | _(election)_ | `ATELIER_DEFAULT_CHROME` | path/id of the **default** chrome module; overrides alphabetical election among installed chromes. A module can pin a different installed chrome with `meta.chrome` ([Per-module chrome](./MODULES.md#per-module-chrome--metachrome)) |

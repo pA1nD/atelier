@@ -89,6 +89,12 @@ const envOr = (envKey, configKey, fallback) => {
 const toBool = (v) => v === true || v === 'true' || v === '1' || v === 'on';
 
 const PORT = Number(envOr('PORT', 'port', 1844));
+// Interface to bind. The default keeps an instance reachable only from this
+// machine; '0.0.0.0' (all IPv4) or '::' (+ IPv6) expose it to the network the
+// machine is on; a specific address (a LAN or VPN IP) binds just that
+// interface. Passed to server.listen verbatim.
+const HOST = String(envOr('HOST', 'host', '127.0.0.1'));
+const LOOPBACK_HOST = HOST === 'localhost' || HOST.startsWith('127.') || HOST === '::1';
 const BASE_URL = String(envOr('BASE_URL', 'baseUrl', `http://localhost:${PORT}`));
 // Frontend build mode. Universal concept → the bare `NODE_ENV` env var (like
 // `PORT`/`BASE_URL`), `env` in the config. 'development' (default, matching the
@@ -114,7 +120,9 @@ process.env.BASE_URL = BASE_URL;
 
 // Footgun guard: an ungated instance reachable somewhere other than localhost
 // is wide open. Auth is opt-in (config `auth`); this is just a startup nudge.
-if (!AUTH && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(BASE_URL)) {
+if (!AUTH && !LOOPBACK_HOST) {
+  console.warn(`  ! auth is off and host is ${HOST} — anyone who can reach this machine gets every module. Set "auth" in ${CONFIG_FILENAME} to gate it.`);
+} else if (!AUTH && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(BASE_URL)) {
   console.warn(`  ! auth is off and baseUrl is ${BASE_URL} — this instance is ungated. Set "auth" in ${CONFIG_FILENAME} to gate it.`);
 }
 
@@ -2295,9 +2303,33 @@ server.on('error', (e) => {
     console.error(`\n  Port ${PORT} is in use. Try: PORT=1845 npm run dev\n`);
     process.exit(1);
   }
+  if (e.code === 'EADDRNOTAVAIL') {
+    console.error(`\n  Can't bind ${HOST}:${PORT} — no interface on this machine has that address right now (VPN/tunnel down? typo in "host"?).\n`);
+    process.exit(1);
+  }
   throw e;
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`  http://localhost:${PORT}\n`);
+server.listen(PORT, HOST, () => {
+  // Print what's actually reachable. Loopback bind (the default): localhost,
+  // as always. A specific address: that address — localhost would be a lie.
+  // Wildcard: localhost plus the machine's dialable IPv4s — virtual
+  // interfaces (VM bridges, tunnels, AirDrop) are noise a visitor can't dial,
+  // except mesh-VPN CGNAT addresses (100.64.0.0/10, e.g. Tailscale), which
+  // exist precisely to be dialed.
+  if (LOOPBACK_HOST) {
+    console.log(`  http://localhost:${PORT}\n`);
+  } else if (HOST !== '0.0.0.0' && HOST !== '::') {
+    console.log(`  http://${HOST.includes(':') ? `[${HOST}]` : HOST}:${PORT}\n`);
+  } else {
+    const VIRTUAL_IF = /^(bridge|utun|vmnet|awdl|llw|anpi|gif|stf|ap)\d*$/;
+    const CGNAT = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./;
+    const ips = Object.entries(os.networkInterfaces())
+      .flatMap(([ifname, addrs]) => (addrs || []).map((a) => ({ ifname, ...a })))
+      .filter((i) => i.family === 'IPv4' && !i.internal)
+      .filter((i) => !VIRTUAL_IF.test(i.ifname) || CGNAT.test(i.address));
+    console.log(`  http://localhost:${PORT}`);
+    for (const i of ips) console.log(`  http://${i.address}:${PORT}`);
+    console.log('');
+  }
 });

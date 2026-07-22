@@ -2,6 +2,14 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.17.0
+
+**`host` — an instance can now be reachable beyond this machine.** New setting (`"host"` in `atelier.config.json`, `HOST` env, default `127.0.0.1`), passed verbatim to the listener. `0.0.0.0` exposes the instance to every network the machine is on — the startup line then lists the addresses people can actually dial (real NICs plus mesh-VPN CGNAT addresses like Tailscale's; virtual-interface noise filtered). `::` adds IPv6. A specific address (a LAN or VPN IP) binds just that interface, so an instance can be VPN-reachable without touching the local network. Guardrails: an ungated (`auth: false`) instance warns loudly on any non-loopback bind, and binding an address the machine doesn't currently have (VPN down, typo) exits with a named message instead of a raw stack. The default is unchanged — nothing is exposed unless you say so.
+
+**Request observability — see what's wedged (observe-only).** `GET /_atelier/inflight` (auth-gated) snapshots every in-flight request sorted by age, surfacing the long-unanswered "squatters" that eat a browser's per-origin socket budget; it's curl-able even when the browser is wedged. Responses slower than `ATELIER_SLOW_REQ_MS` (5s), client-abandoned requests, and requests unanswered after `ATELIER_WOULD_KILL_MS` (120s) append to `~/Library/Logs/atelier-requests.log` where that folder exists. Enforces nothing — it's the dry run for a future server-side response deadline.
+
+**`publish --serve` share list includes mesh-VPN addresses.** Tunnel interfaces were filtered wholesale, which dropped CGNAT (100.64.0.0/10) addresses — precisely the ones that exist to be dialed. The printed `npx atelier add http://…` lines now include them.
+
 ## 0.16.1
 
 **Forgot `--yes`? The way back now exists — and is printed.** The needs report used to end with "(re-run with --yes to run the install hints)", which was a dead end: re-running skipped the already-installed module before the needs check ever fired. Now the skip path re-checks a module's system needs every time (and with `--yes`, runs the author's install hints against the installed copy), and every needs report prints the exact copy-pasteable command — `atelier add <collection>/<module> --yes` — instead of vague advice.
