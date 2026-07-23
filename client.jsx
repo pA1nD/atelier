@@ -237,6 +237,60 @@ window.__atelier.useRoute = () => {
 };
 
 /* =========================================================================
+ * Client-error reporter — observe instances only.
+ *
+ * Browser tabs swallow uncaught errors and unhandled rejections silently;
+ * on an instance with the `observe` layer on, they're POSTed to the shell,
+ * which fans a {type:'client-error'} frame out on the shell topic for
+ * diagnostics modules to collect. Hard-throttled so an error loop can never
+ * become a request storm, and reporting itself must never throw.
+ * ========================================================================= */
+(() => {
+  if (!window.__ATELIER__?.observe) return;
+  let stamps = [];
+  const report = (kind, message, stack) => {
+    const now = Date.now();
+    stamps = stamps.filter((t) => now - t < 60000);
+    if (stamps.length >= 10) return;               // ≤10 reports/min/page
+    stamps.push(now);
+    try {
+      fetch('/_atelier/client-errors', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind,
+          message: String(message || 'unknown').slice(0, 300),
+          stack: String(stack || '').slice(0, 1500),
+          page: window.location.pathname,
+          ua: navigator.userAgent,
+        }),
+      }).catch(() => {});
+    } catch { /* never throw from the reporter */ }
+  };
+  window.addEventListener('error', (e) => report('error', e.message, e.error?.stack));
+  window.addEventListener('unhandledrejection', (e) => report('unhandledrejection', e.reason?.message || String(e.reason || 'unhandled rejection'), e.reason?.stack));
+  // The console lane — React dev warnings (and friends) never throw; they
+  // arrive as plain console.error calls, invisible to the events above. Only
+  // the FIRST occurrence of each distinct message reports (kind 'console'):
+  // React repeats identical warnings on every render, and without page-side
+  // dedupe one missing `key` would eat the whole 10/min budget. The original
+  // console.error always runs — devtools behavior is unchanged.
+  const seen = new Set();
+  const origError = console.error;
+  console.error = (...args) => {
+    try {
+      const msg = args.map((a) => (typeof a === 'string' ? a : (a && a.message) || String(a))).join(' ').slice(0, 300);
+      const key = msg.slice(0, 200);
+      if (msg && !seen.has(key)) {
+        seen.add(key);
+        report('console', msg, args.find((a) => a && a.stack)?.stack);
+      }
+    } catch { /* the reporter never breaks the console */ }
+    origError.apply(console, args);
+  };
+})();
+
+/* =========================================================================
  * Module bundle loader.
  *
  * Each module's compiled frontend lives at `/modules/<ws>/<id>/frontend.js`

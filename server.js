@@ -1610,6 +1610,9 @@ async function serveIndex(req, res) {
   const bootstrap = {
     mode: MODE,
     label: LABEL,
+    // The observe flag rides along so the client only installs its error
+    // reporter (and any other observe-layer hooks) when the layer exists.
+    observe: OBSERVE,
     user,
     chromeQid,
     defaultChromeQid,
@@ -2091,6 +2094,20 @@ const WOULD_KILL_MS = Number(process.env.ATELIER_WOULD_KILL_MS || 120000);
 const REQLOG_PATH = path.join(os.homedir(), 'Library/Logs/atelier-requests.log');
 const inflight = new Map(); // res → { method, url, t0, flagged }
 let totalRequests = 0;      // monotonic since boot (HTTP only, upgrades excluded)
+// Same-since-boot counters bucketed by who a request is FOR — the module id in
+// api/ and modules/ paths, coarse fixed buckets for the rest. Differenced per
+// tick this answers "which module is producing the traffic". Bounded: bucket
+// names derive from request paths, so past a cap new ones fold into 'other'
+// rather than letting URL garbage grow the map.
+const byRoute = new Map();  // bucket → requests since boot
+const routeBucket = (rawUrl) => {
+  const seg = rawUrl.split('?')[0].split('/').filter(Boolean);
+  if (seg[0] === 'api' && seg.length >= 3) return `api/${seg[1]}/${seg[2]}`;
+  if (seg[0] === 'modules' && seg.length >= 3) return `modules/${seg[1]}/${seg[2]}`;
+  if (seg[0] === 'assets') return 'assets';
+  if (seg[0] === '_atelier') return '_atelier';
+  return 'other';
+};
 const reqlog = (line) => {
   fs.appendFile(REQLOG_PATH, `${new Date().toISOString()} ${line}\n`, () => {});
 };
@@ -2107,6 +2124,9 @@ if (OBSERVE) setInterval(() => {
 const server = http.createServer(async (req, res) => {
   if (OBSERVE) {
     totalRequests += 1;
+    let bucket = routeBucket(req.url);
+    if (!byRoute.has(bucket) && byRoute.size >= 300) bucket = 'other';
+    byRoute.set(bucket, (byRoute.get(bucket) || 0) + 1);
     const track = { method: req.method, url: req.url, t0: Date.now(), flagged: false };
     inflight.set(res, track);
     // 'close' fires after 'finish' AND on client abort — exactly one removal per
@@ -2162,6 +2182,41 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Client-error ingest (observe only) — the browser reporter in client.jsx
+  // POSTs uncaught errors / unhandled rejections here; the shell stores
+  // nothing and fans a {type:'client-error', error} frame out on the shell
+  // topic for diagnostics modules to collect. Like backend-error frames,
+  // delivery respects the per-module ACL when the page belongs to a module —
+  // an error's stack/page never reaches a client that can't see that module.
+  if (OBSERVE && url.pathname === '/_atelier/client-errors' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => { if (raw.length < 40000) raw += c; });
+    req.on('end', () => {
+      try {
+        const e = JSON.parse(raw);
+        const error = {
+          kind: String(e.kind || 'error').slice(0, 24),
+          message: String(e.message || '').slice(0, 300),
+          stack: String(e.stack || '').slice(0, 1500),
+          page: String(e.page || '').slice(0, 200),
+          ua: String(e.ua || '').slice(0, 120),
+          at: Date.now(),
+        };
+        const m = /^\/([\w-]+)\/([\w-]+)/.exec(error.page);
+        const qid = m ? `${m[1]}/${m[2]}` : null;
+        const frame = JSON.stringify({ type: 'client-error', error, topic: 'shell' });
+        for (const ws of wsClients) {
+          if (ws.readyState !== 1) continue;
+          if (qid && ws.allowed && !ws.allowed.has(qid)) continue;
+          try { ws.send(frame); } catch { /* drop */ }
+        }
+      } catch { /* malformed → ignored; the observe layer never throws back */ }
+      res.writeHead(204);
+      res.end();
+    });
+    return;
+  }
+
   // Live in-flight snapshot — "is anything wedged right now?". Entries with a
   // large age_ms are requests no handler has answered: the squatters that eat
   // the browser's per-origin socket slots. Curl-able even when the browser is
@@ -2173,7 +2228,12 @@ const server = http.createServer(async (req, res) => {
       .map((r) => ({ method: r.method, url: r.url, age_ms: now - r.t0 }))
       .sort((a, b) => b.age_ms - a.age_ms);
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ count: list.length, total: totalRequests, inflight: list }, null, 2));
+    res.end(JSON.stringify({
+      count: list.length,
+      total: totalRequests,
+      byRoute: Object.fromEntries([...byRoute.entries()].sort((a, b) => b[1] - a[1])),
+      inflight: list,
+    }, null, 2));
     return;
   }
 

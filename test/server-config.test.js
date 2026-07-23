@@ -86,6 +86,10 @@ describe('observe flag', () => {
     test('/_atelier/inflight does not exist', async () => {
       assert.equal((await fetch(`${server.base}/_atelier/inflight`)).status, 404)
     })
+
+    test('client-error ingest does not exist', async () => {
+      assert.equal((await fetch(`${server.base}/_atelier/client-errors`, { method: 'POST', body: '{}' })).status, 404)
+    })
   })
 
   describe('ATELIER_OBSERVE=1', () => {
@@ -99,6 +103,22 @@ describe('observe flag', () => {
       assert.ok(Array.isArray(a.inflight))
       const b = await (await fetch(`${server.base}/_atelier/inflight`)).json()
       assert.ok(b.total > a.total, `total should grow (${a.total} → ${b.total})`)
+    })
+
+    test('client-error ingest answers 204', async () => {
+      const r = await fetch(`${server.base}/_atelier/client-errors`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'error', message: 'test', page: '/global/epsilon' }),
+      })
+      assert.equal(r.status, 204)
+    })
+
+    test('byRoute buckets requests by module', async () => {
+      await fetch(`${server.base}/api/global/epsilon/nope`)   // counted even though it 404s
+      const j = await (await fetch(`${server.base}/_atelier/inflight`)).json()
+      assert.equal(typeof j.byRoute['api/global/epsilon'], 'number')
+      assert.equal(typeof j.byRoute._atelier, 'number')
     })
   })
 })
