@@ -68,7 +68,7 @@ export default {
 };
 ```
 
-`ctx` exposes exactly: `id`, `name`, `workspace`, `qualifiedId` (`'<workspace>/<id>'`), `label`, `port`, `baseUrl`, `dataDir`, `log`, `broadcast`, `module` — and nothing else (no CORS or auth helpers; a module that needs CORS sets its own response headers). URLs you return in response bodies — for clients to follow — should be built off the module's mount point (`/api/${ctx.qualifiedId}/...`), never hardcoded.
+`ctx` exposes exactly: `id`, `name`, `workspace`, `qualifiedId` (`'<workspace>/<id>'`), `label`, `port`, `host`, `baseUrl`, `dataDir`, `log`, `broadcast`, `module` — and nothing else (no CORS or auth helpers; a module that needs CORS sets its own response headers). URLs you return in response bodies — for clients to follow — should be built off the module's mount point (`/api/${ctx.qualifiedId}/...`), never hardcoded. A module that opens its own listener (a sidecar) should bind `ctx.host` (also published as `process.env.HOST`) so it's never more exposed than the instance itself — that pattern, plus reader-relative links and frontends reaching sidecar ports, is in [Recipes](./RECIPES.md).
 
 The router gives handlers `req.params`, `req.query`, `req.json()` (memoized, async; rejects with a `413` past a 10 MB body cap), `req.user` (see [AUTH.md](./AUTH.md)), and `res.json(data, status?)`.
 

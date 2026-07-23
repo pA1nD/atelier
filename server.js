@@ -111,11 +111,15 @@ const AUTH = (() => {                                     // auth module path/na
 })();
 const REVALIDATE_MS = Number(envOr('ATELIER_REVALIDATE_MS', 'revalidateMs', 30000)); // WS session re-check interval
 
-// Publish the resolved port/baseUrl so modules (and processes they spawn) read
-// the same values. atelier reads NODE_ENV only as the frontend build-mode `env`
+// Publish the resolved port/host/baseUrl so modules (and processes they spawn)
+// read the same values. HOST lets a module's sidecar listener follow the
+// instance's exposure — loopback by default, wider only when the operator
+// deliberately widened the instance itself.
+// atelier reads NODE_ENV only as the frontend build-mode `env`
 // setting (above); it does NOT re-assign process.env.NODE_ENV for spawned child
 // processes — a library that wants one reads its own.
 process.env.PORT = String(PORT);
+process.env.HOST = HOST;
 process.env.BASE_URL = BASE_URL;
 
 // Footgun guard: an ungated instance reachable somewhere other than localhost
@@ -709,6 +713,7 @@ function makeCtx(m) {
     qualifiedId: m.qualifiedId,    // '<workspace>/<id>'
     label: LABEL,
     port: PORT,
+    host: HOST,                    // the instance's bind — a sidecar that follows it is never more exposed than the shell
     baseUrl: BASE_URL,
     dataDir: path.join(m.dir, 'data'),
     log: (...args) => console.log(`[${m.qualifiedId}]`, ...args),
