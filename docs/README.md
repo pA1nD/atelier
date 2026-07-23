@@ -43,6 +43,7 @@ The split above is enforced by *how each layer is built and loaded* — so the m
 - **[Modules](./MODULES.md)** — building a module (shape, `ctx`, real-time, hot-reload, slots), plus the special modules: the **chrome** and a pointer to auth.
 - **[Workspaces](./WORKSPACES.md)** — the multi-tenant model: `global` + `$<ws>/`, the `qualifiedId`, the rail and picker.
 - **[Auth](./AUTH.md)** — the trusted auth slot: `authenticate` / `authorize`, the `user` object, request gating across all three surfaces.
+- **[Recipes](./RECIPES.md)** — proven shapes for common module-authoring situations: links that work from wherever the reader is, live data without polling, sidecars that follow the instance's exposure, frontends reaching a sidecar port.
 
 This page is the shell itself: running an instance, what lives in `atelier/`, and configuration.
 
@@ -118,11 +119,12 @@ All optional; resolved **defaults ← config ← environment** (env wins, so a P
 | Key | Default | Env | Meaning |
 |---|---|---|---|
 | `port` | `1844` | `PORT` | listen port |
-| `host` | `127.0.0.1` | `HOST` | interface to bind. The default keeps the instance reachable only from this machine; `0.0.0.0` (all IPv4) or `::` (+ IPv6) exposes it to the network the machine is on — startup then lists the reachable addresses; a specific address (a LAN or VPN IP) binds just that interface. Expose only with `auth` set, or on a network where you trust everyone |
+| `host` | `127.0.0.1` | `HOST` | interface to bind. The default keeps the instance reachable only from this machine; `0.0.0.0` (all IPv4) or `::` (+ IPv6) exposes it to the network the machine is on — startup then lists the reachable addresses; a specific address (a LAN or VPN IP) binds just that interface. Expose only on a network you trust or behind an auth-terminating proxy — see the [pre-1.0 recommendation in Auth](./AUTH.md) |
 | `baseUrl` | `http://localhost:<port>` | `BASE_URL` | external URL modules build links from |
 | `env` | `development` | `NODE_ENV` | frontend build mode — `development` (default, like an unset `NODE_ENV`) ships React + bundled-library dev warnings, unminified, with an inline sourcemap; `production` minifies the chrome bundle (dropping the inline sourcemap), strips bundled-library dev branches via the `process.env.NODE_ENV` define, and serves the minified React UMD. Independent of `hotReload`. |
 | `defaultChrome` | _(election)_ | `ATELIER_DEFAULT_CHROME` | path/id of the **default** chrome module; overrides alphabetical election among installed chromes. A module can pin a different installed chrome with `meta.chrome` ([Per-module chrome](./MODULES.md#per-module-chrome--metachrome)) |
 | `hotReload` | `true` | `ATELIER_HOT_RELOAD` | file watchers + backend hot-swap; set `false` when deployed |
+| `observe` | `false` | `ATELIER_OBSERVE` | request observability, for debugging a live instance: tracks in-flight requests, serves `GET /_atelier/inflight` (auth-gated; includes `total`, a requests-since-boot counter), and logs slow/abandoned/long-unanswered requests to `~/Library/Logs/atelier-requests.log` where that folder exists. Observe-only — enforces nothing; off = none of it runs |
 | `auth` | `false` | `ATELIER_AUTH` | path/id of the auth module, or `false` to run ungated (see [AUTH.md](./AUTH.md)) |
 | `revalidateMs` | `30000` | `ATELIER_REVALIDATE_MS` | how often live WebSocket sockets re-run `authenticate` (only when `auth` is set) — so logout/permission changes propagate without a reconnect; see [AUTH.md](./AUTH.md) |
 | `label` | `null` | `ATELIER_LABEL` | optional instance name a chrome may display |
@@ -191,3 +193,12 @@ The `modules` filter is re-read **per request**, so editing it is live: when `ho
 ### What counts as a module
 
 `discoverModules` walks the instance root and treats any sibling directory with a `frontend.jsx` or `backend.js` as a module — skipping reserved names, `_`/`.`-prefixed folders, and recursing into `$<ws>/` workspaces. The complete set of special names, prefixes, and files is in **[Modules → Folder & file conventions](./MODULES.md)**.
+
+## Debugging a live instance — `observe`
+
+Off by default: a normal instance runs **none** of this. Setting `"observe": true` (env `ATELIER_OBSERVE`) turns on the shell's request-observability layer — observe-only, it enforces nothing:
+
+- **`GET /_atelier/inflight`** (auth-gated; `404` when off, like older shells) — a live snapshot of every request the shell hasn't answered yet, oldest first: `{ count, total, inflight: [{ method, url, age_ms }] }`. Old entries are the "squatters" that eat a browser's ~6-per-origin socket budget — curl it even when the browser is wedged, since curl opens its own connection. `total` is a monotonic requests-since-boot counter: difference it on an interval and you have requests-per-time for free.
+- **`~/Library/Logs/atelier-requests.log`** (written where that folder exists; silent elsewhere) — one line per noteworthy request: `slow` (answered, but slower than `ATELIER_SLOW_REQ_MS`, default 5000), `gone` (client gave up before the answer), `WOULD-KILL` (still unanswered after `ATELIER_WOULD_KILL_MS`, default 120000 — what a future server-side response deadline *would* have killed).
+
+Trust note: the snapshot shows every in-flight request's URL to any authed user, across workspaces — turn it on for instances whose users are trusted operators, off for multi-tenant deployments.

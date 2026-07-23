@@ -2,6 +2,18 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.18.0
+
+**The CSS build no longer walks your disk.** Tailwind's native scanner was handed `{base, pattern}` sources whose patterns escaped the base (path-mounted modules) — to resolve them it walked the whole common-ancestor directory tree **synchronously on the main thread**, freezing every request for seconds (minutes, cold) on every `styles.css` rebuild and driving unbounded allocations. The shell now reads the scan sources itself (async) and feeds their contents to the scanner directly — a rebuild over hundreds of source files is ~250 ms — and concurrent `styles.css` requests share one build instead of stacking rebuilds. Also more correct: only declared module sources feed class extraction, so stray files outside the instance can no longer leak utility classes into the chrome's CSS.
+
+**Request observability is now opt-in — and counts.** 0.17.0 shipped the observe layer always-on; it's now behind `"observe"` in `atelier.config.json` (env `ATELIER_OBSERVE`), **default off** — a normal instance runs none of it: no per-request tracking, no log writes, and `/_atelier/inflight` 404s exactly like pre-0.17.0 shells. When on, the snapshot now also carries `total`, a monotonic requests-since-boot counter — difference it on an interval for a real requests-per-time series with zero extra polling. Documented in [Debugging a live instance](./docs/README.md#debugging-a-live-instance--observe).
+
+**Sidecars can follow the instance's exposure.** The resolved `host` is now published to modules as `ctx.host` and `process.env.HOST` — a module's own listener that binds it is never more exposed than the instance itself: loopback by default, wider only when the operator deliberately widened the whole instance.
+
+**New: [Recipes](./docs/RECIPES.md).** Proven shapes for module authors, each traced to a real incident: links that work from wherever the reader is (request-derived bases for served `skill.md` files), live data without polling (watch + diff + broadcast, and what legitimately stays a poll), sidecars that follow the instance's exposure, and frontends reaching a sidecar port.
+
+**Auth guidance, stated honestly.** [Auth](./docs/AUTH.md) now leads with the pre-1.0 recommendation: terminate authentication *outside* atelier for now — keep the instance on a trusted network (loopback, a controlled LAN, a mesh VPN) or behind an identity-aware proxy — and run the auth slot behind that wall as the identity layer (e.g. mapping the proxy's authenticated-user header to `user.workspaces`), not as the perimeter. Temporary posture; the slot graduates as it hardens.
+
 ## 0.17.0
 
 **`host` — an instance can now be reachable beyond this machine.** New setting (`"host"` in `atelier.config.json`, `HOST` env, default `127.0.0.1`), passed verbatim to the listener. `0.0.0.0` exposes the instance to every network the machine is on — the startup line then lists the addresses people can actually dial (real NICs plus mesh-VPN CGNAT addresses like Tailscale's; virtual-interface noise filtered). `::` adds IPv6. A specific address (a LAN or VPN IP) binds just that interface, so an instance can be VPN-reachable without touching the local network. Guardrails: an ungated (`auth: false`) instance warns loudly on any non-loopback bind, and binding an address the machine doesn't currently have (VPN down, typo) exits with a named message instead of a raw stack. The default is unchanged — nothing is exposed unless you say so.
