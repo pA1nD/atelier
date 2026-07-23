@@ -53,7 +53,7 @@ Supported keys:
 - `chrome` — string; the **id of a chrome** this module should render inside, instead of the instance default (see [Per-module chrome](#per-module-chrome--metachrome)). Optional but **recommended for any module that imports `@atelier/kit`**; if the named chrome isn't installed the page shows a clear "chrome not installed" error **inside the default chrome** (no silent fallback — see [Per-module chrome](#per-module-chrome--metachrome)).
 - `color` — reserved for future use.
 
-`meta` is optional; the rail falls back to `icon: 'square'` and `name: <dir>`. It's read server-side at discovery and shipped in the HTML bootstrap, so grouping renders on first paint with no flicker. A **pure object literal is the fast path** — read straight from source, nothing executes. A *computed* meta (a template literal, a module-scope constant, a spread) also works: the shell evaluates the module in a **disposable sandbox process** — browser globals and every import stubbed with inert proxies, the process killed after the read — so top-level side effects never touch the server. If neither path can read it, discovery logs a warning naming the module and the reason, and the meta is ignored (never half-applied). Prefer the literal: it's instant, deterministic, and can't fail.
+`meta` is optional; the rail falls back to `icon: 'square'` and `name: <dir>`. It's read server-side at discovery and shipped in the HTML bootstrap, so grouping renders on first paint with no flicker. Frontend bundles load **lazily** — a page load fetches the chrome plus the module being viewed, and other modules load on first visit. A module whose frontend must be live on *every* page (it exports a `TopBarCenter` topbar slot, or runs a global listener at import) declares `eager: true` in its meta; without the flag its slot never renders, because its bundle is simply never fetched. A **pure object literal is the fast path** — read straight from source, nothing executes. A *computed* meta (a template literal, a module-scope constant, a spread) also works: the shell evaluates the module in a **disposable sandbox process** — browser globals and every import stubbed with inert proxies, the process killed after the read — so top-level side effects never touch the server. If neither path can read it, discovery logs a warning naming the module and the reason, and the meta is ignored (never half-applied). Prefer the literal: it's instant, deterministic, and can't fail.
 
 ### Backend — `backend.js`
 
@@ -364,7 +364,7 @@ The shell calls `chrome(props)` with:
 | `workspace` | the currently-routed workspace id |
 | `activeQid` | the active module's qualifiedId, or `null` |
 | `active` | `{ kind: 'none' \| 'loading' \| 'error' \| 'ready', element?, err?, qid? }` — what to put in the content area |
-| `loadedModules` | `{ [qid]: { hasDefault, TopBarCenter, meta, status, err } }` |
+| `loadedModules` | `{ [qid]: { hasDefault, TopBarCenter, meta, status, err } }` — **lazily populated**: the active module plus any module with `meta.eager` (see below); other modules appear here on their first visit |
 | `navigate(qid)` | SPA-navigate to a module |
 | `pickWorkspace(wsId)` | switch workspace |
 

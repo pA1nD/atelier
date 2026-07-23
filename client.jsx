@@ -544,20 +544,20 @@ function App() {
     return () => { cancelled = true; };
   }, [chromeQid]);
 
-  // Load every accessible module's bundle (parallel). Chrome bundle is
-  // loaded separately above; module bundles populate `loaded` as they
-  // resolve so chrome can re-render with live meta / slot exports.
+  // Bundle loading is LAZY: a page load costs the chrome plus the module being
+  // viewed, not the whole instance. The one exception is modules that declared
+  // `meta.eager` — they contribute UI or listeners to every page (a topbar
+  // slot claimer must set it, or its slot never renders), so they load at boot,
+  // in parallel. Everything else loads on first visit and stays loaded for the
+  // rest of the SPA session. `loadingRef` dedupes across effects and re-renders.
+  const loadingRef = React.useRef(new Set());
+  const loadOne = (qid) => {
+    if (!qid || loadingRef.current.has(qid)) return;
+    loadingRef.current.add(qid);
+    loadModuleBundle(qid).then((res) => setLoaded((l) => ({ ...l, [qid]: res })));
+  };
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      for (const m of allModules) {
-        if (!m.hasFrontend) continue;
-        const res = await loadModuleBundle(m.qid);
-        if (cancelled) return;
-        setLoaded((l) => ({ ...l, [m.qid]: res }));
-      }
-    })();
-    return () => { cancelled = true; };
+    for (const m of allModules) if (m.hasFrontend && m.meta?.eager) loadOne(m.qid);
   }, []);
 
   // popstate / programmatic sub-route nav → re-parse URL. `atelier:route` is
@@ -579,6 +579,12 @@ function App() {
     ? allModules.find((m) => m.workspace === urlState.ws && m.id === urlState.id)
     : null;
   const activeQid = activeMod?.qid || null;
+
+  // Lazy half of the loading strategy: the module being viewed loads on
+  // demand — initial landing and every SPA navigation to a first visit.
+  useEffect(() => {
+    if (activeMod?.hasFrontend) loadOne(activeMod.qid);
+  }, [activeQid]);
 
   // URL points somewhere that doesn't exist → tidy back to a real place.
   //   • /<ws>/<id> with no such module → workspace home (if the ws exists) else root.
@@ -642,6 +648,10 @@ function App() {
         return;
       }
       if (!allModules.some((m) => m.qid === id)) { window.location.reload(); return; }
+      // Never imported in this document (lazy loading) → nothing to swap; its
+      // first visit imports fresh code anyway. The stylesheet may still need
+      // the edit's new classes, so refresh that half only.
+      if (!loadingRef.current.has(id)) { refreshChromeStyles(); return; }
       // Known module: re-import its bundle in the background, then merge it.
       // The token guards against an out-of-order resolution clobbering newer
       // code if two edits land close together.
