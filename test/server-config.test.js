@@ -76,3 +76,29 @@ describe('host setting', () => {
     })
   })
 })
+
+describe('observe flag', () => {
+  describe('default off', () => {
+    let server
+    before(async () => { server = await startServer(FIXTURE) })
+    after(async () => { await server?.stop() })
+
+    test('/_atelier/inflight does not exist', async () => {
+      assert.equal((await fetch(`${server.base}/_atelier/inflight`)).status, 404)
+    })
+  })
+
+  describe('ATELIER_OBSERVE=1', () => {
+    let server
+    before(async () => { server = await startServer(FIXTURE, { ATELIER_OBSERVE: '1' }) })
+    after(async () => { await server?.stop() })
+
+    test('/_atelier/inflight serves a snapshot with a monotonic total', async () => {
+      const a = await (await fetch(`${server.base}/_atelier/inflight`)).json()
+      assert.equal(typeof a.total, 'number')
+      assert.ok(Array.isArray(a.inflight))
+      const b = await (await fetch(`${server.base}/_atelier/inflight`)).json()
+      assert.ok(b.total > a.total, `total should grow (${a.total} → ${b.total})`)
+    })
+  })
+})

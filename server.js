@@ -2054,8 +2054,9 @@ async function serveAsset(req, res, url) {
 // Server
 // ------------------------------------------------------------------------
 
-// ── Request observability — observe-only, enforces nothing ─────────────────
-// Tracks every in-flight HTTP request. Two outputs:
+// ── Request observability — observe-only, enforces nothing, OFF by default ──
+// Opt-in via the `observe` setting (`ATELIER_OBSERVE` env): a normal instance
+// runs none of this — no tracking, no log writes, no endpoint. When on:
 //   • ~/Library/Logs/atelier-requests.log — responses slower than SLOW_REQ_MS
 //     ("slow"), requests the client abandoned before we answered ("gone"),
 //     and requests still unanswered after WOULD_KILL_MS ("WOULD-KILL") — the
@@ -2063,15 +2064,19 @@ async function serveAsset(req, res, url) {
 //     are what freeze the browser's ~6-per-origin socket budget, so WOULD-KILL
 //     lines are the routes that need a job-pattern or `slow` exemption before
 //     any real deadline ships.
-//   • GET /_atelier/inflight — live snapshot (in the auth-gated lane below).
+//   • GET /_atelier/inflight — live snapshot (in the auth-gated lane below),
+//     plus `total`, a monotonic requests-since-boot counter a watcher can
+//     difference into requests-per-interval without any extra polling cost.
+const OBSERVE = toBool(envOr('ATELIER_OBSERVE', 'observe', false));
 const SLOW_REQ_MS = Number(process.env.ATELIER_SLOW_REQ_MS || 5000);
 const WOULD_KILL_MS = Number(process.env.ATELIER_WOULD_KILL_MS || 120000);
 const REQLOG_PATH = path.join(os.homedir(), 'Library/Logs/atelier-requests.log');
 const inflight = new Map(); // res → { method, url, t0, flagged }
+let totalRequests = 0;      // monotonic since boot (HTTP only, upgrades excluded)
 const reqlog = (line) => {
   fs.appendFile(REQLOG_PATH, `${new Date().toISOString()} ${line}\n`, () => {});
 };
-setInterval(() => {
+if (OBSERVE) setInterval(() => {
   const now = Date.now();
   for (const r of inflight.values()) {
     if (!r.flagged && now - r.t0 >= WOULD_KILL_MS) {
@@ -2082,15 +2087,18 @@ setInterval(() => {
 }, 30_000).unref();
 
 const server = http.createServer(async (req, res) => {
-  const track = { method: req.method, url: req.url, t0: Date.now(), flagged: false };
-  inflight.set(res, track);
-  // 'close' fires after 'finish' AND on client abort — exactly one removal per
-  // request either way. `writableEnded` tells the two apart.
-  res.on('close', () => {
-    inflight.delete(res);
-    const ms = Date.now() - track.t0;
-    if (ms >= SLOW_REQ_MS) reqlog(`${res.writableEnded ? 'slow' : 'gone'} ${ms}ms ${track.method} ${track.url}`);
-  });
+  if (OBSERVE) {
+    totalRequests += 1;
+    const track = { method: req.method, url: req.url, t0: Date.now(), flagged: false };
+    inflight.set(res, track);
+    // 'close' fires after 'finish' AND on client abort — exactly one removal per
+    // request either way. `writableEnded` tells the two apart.
+    res.on('close', () => {
+      inflight.delete(res);
+      const ms = Date.now() - track.t0;
+      if (ms >= SLOW_REQ_MS) reqlog(`${res.writableEnded ? 'slow' : 'gone'} ${ms}ms ${track.method} ${track.url}`);
+    });
+  }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
@@ -2139,14 +2147,15 @@ const server = http.createServer(async (req, res) => {
   // Live in-flight snapshot — "is anything wedged right now?". Entries with a
   // large age_ms are requests no handler has answered: the squatters that eat
   // the browser's per-origin socket slots. Curl-able even when the browser is
-  // wedged, since curl opens its own fresh connection.
-  if (url.pathname === '/_atelier/inflight') {
+  // wedged, since curl opens its own fresh connection. Absent (404, like older
+  // shells) unless the `observe` setting is on.
+  if (OBSERVE && url.pathname === '/_atelier/inflight') {
     const now = Date.now();
     const list = [...inflight.values()]
       .map((r) => ({ method: r.method, url: r.url, age_ms: now - r.t0 }))
       .sort((a, b) => b.age_ms - a.age_ms);
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ count: list.length, inflight: list }, null, 2));
+    res.end(JSON.stringify({ count: list.length, total: totalRequests, inflight: list }, null, 2));
     return;
   }
 
