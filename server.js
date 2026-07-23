@@ -2018,6 +2018,7 @@ async function serveAsset(req, res, url) {
   try {
     const headers = {};
     let body;
+    let etag = null;
     if (asset.kind === 'jsx') {
       const bundleRoot = await chromeBundleRootFor(asset.src);
       const isModuleFrontend = !bundleRoot && !url.pathname.startsWith('/assets/');
@@ -2033,13 +2034,30 @@ async function serveAsset(req, res, url) {
       // Cold loads carry no `?v`, so this is inert for normal serving.
       const v = isModuleFrontend && url.searchParams.get('v');
       body = (v && /^\d+$/.test(v)) ? versionRelativeImports(built.content, v) : built.content;
+      etag = `"${built.mtimeMs}${v ? `-${v}` : ''}"`;
     } else if (asset.kind === 'css') {
       const built = await getCss(asset.src, cssScanSources(), HOST_DIR);
       headers['Content-Type'] = built.contentType;
       body = built.content;
+      etag = `"${built.mtimeMs}"`;
     } else {
       headers['Content-Type'] = asset.contentType;
       body = fs.readFileSync(asset.src);
+      try { etag = `"${fs.statSync(asset.src).mtimeMs}"`; } catch {}
+    }
+    // Conditional serving — the builds are mtime-keyed already, so the key IS
+    // the validator. `no-cache` means "revalidate every time": a repeat page
+    // load costs a 304 instead of re-downloading multi-MB dev bundles, while
+    // an edited file (new mtime → new ETag) ships fresh bytes immediately —
+    // hot-reload semantics untouched.
+    if (etag) {
+      headers['ETag'] = etag;
+      headers['Cache-Control'] = 'no-cache';
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' });
+        res.end();
+        return;
+      }
     }
     res.writeHead(200, headers);
     res.end(body);
