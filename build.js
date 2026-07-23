@@ -46,14 +46,18 @@ async function runCss(srcPath, scanSources, scanBase) {
     base: scanBase,
     onDependency: () => {},
   });
-  const scanner = new Scanner({
-    sources: scanSources.map((abs) => ({
-      base: scanBase,
-      pattern: path.relative(scanBase, abs),
-      negated: false,
-    })),
-  });
-  return compiler.build(scanner.scan());
+  // Feed the scanner explicit file contents (scanFiles) — never let oxide
+  // discover sources itself. With {base, pattern} sources whose patterns
+  // escape base via `../..`, its native walker traverses the common ancestor
+  // (all of ~/pro) synchronously on the main thread: 6 s warm, 60+ s cold,
+  // per styles.css rebuild. Reading the files here is async; the remaining
+  // sync parse is ~200 ms.
+  const contents = await Promise.all(scanSources.map(async (abs) => ({
+    content: await fs.promises.readFile(abs, 'utf8').catch(() => ''),
+    extension: path.extname(abs).slice(1) || 'js',
+  })));
+  const scanner = new Scanner({ sources: [] });
+  return compiler.build(scanner.scanFiles(contents));
 }
 
 export async function getJsx(srcPath) {
@@ -164,17 +168,34 @@ export async function getJsxBundle(srcPath, absWorkingDir, nodeEnv = 'developmen
   return entry;
 }
 
+const inflightCss = new Map();   // srcPath → { mtimeMs, promise }
+
 export async function getCss(srcPath, scanSources, scanBase) {
   // scanSources are absolute paths; they drive both mtime checks and the
-  // scanner's pattern list.
+  // scanner's content list.
   const mtime = maxMtime([srcPath, ...scanSources]);
   const cached = cache.get(srcPath);
   if (cached && cached.mtimeMs === mtime) return cached;
-  const entry = {
-    mtimeMs: mtime,
-    content: await runCss(srcPath, scanSources, scanBase),
-    contentType: 'text/css; charset=utf-8',
-  };
-  cache.set(srcPath, entry);
-  return entry;
+  // After an invalidation every open tab re-requests styles.css at once; they
+  // must share ONE build, not run serial rebuilds back-to-back.
+  const running = inflightCss.get(srcPath);
+  if (running && running.mtimeMs === mtime) return running.promise;
+  const promise = (async () => {
+    try {
+      const entry = {
+        mtimeMs: mtime,
+        content: await runCss(srcPath, scanSources, scanBase),
+        contentType: 'text/css; charset=utf-8',
+      };
+      cache.set(srcPath, entry);
+      return entry;
+    } finally {
+      // Only clear our own entry — an edit mid-build means a newer build may
+      // have replaced it, and deleting that one would let a third concurrent
+      // request start a duplicate.
+      if (inflightCss.get(srcPath)?.promise === promise) inflightCss.delete(srcPath);
+    }
+  })();
+  inflightCss.set(srcPath, { mtimeMs: mtime, promise });
+  return promise;
 }
