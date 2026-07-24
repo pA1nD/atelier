@@ -113,6 +113,12 @@ const scratchDirs = [];
 process.on('exit', () => { for (const d of scratchDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } });
 
 // Build the three-sided scratch repo. Returns everything a decision needs.
+// package-lock.json is machine-owned: the staged npm install that add/update
+// run rewrites it (normalization differs across npm versions), so a freshly
+// installed module can differ from its cut without anyone editing anything.
+// It's kept out of base and ours — it can never count as a local edit or
+// conflict — while theirs keeps it, so a landing still carries the published
+// cut's lockfile.
 function stageMerge(mirror, m) {
   const { prov } = m;
   const targetSha = channelHead(mirror);   // theirs = the PUBLISHED channel, never local unpublished cuts
@@ -120,6 +126,7 @@ function stageMerge(mirror, m) {
   scratchDirs.push(scratch);
   extractTreeAt(mirror, prov.commit, prov.module, scratch);
   const baseVersion = readPkg(scratch).version || '0.0.0';
+  fs.rmSync(path.join(scratch, 'package-lock.json'), { force: true });
   sgit(['init', '-q'], scratch);
   sgit(['add', '-A', '--force'], scratch); sgit(['commit', '-q', '-m', 'base', '--allow-empty'], scratch);
   const baseSha = gitHead(scratch);
@@ -136,6 +143,7 @@ function stageMerge(mirror, m) {
       const rel = path.relative(m.dir, p);
       if (!rel) return true;
       const top = rel.split(path.sep)[0];
+      if (top === 'package-lock.json') return false;
       return !['node_modules', 'data', '.git', '.atelier', '.update-merge'].includes(top) && !top.startsWith('.env');
     },
   });

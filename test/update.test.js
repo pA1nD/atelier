@@ -89,6 +89,25 @@ test('local edits + no flag + no TTY → skipped and reported, module untouched'
   assert.match(backendOf(c), /my local tweak/)
 })
 
+test('npm-rewritten package-lock.json is not a local edit — update lands the published lockfile', () => {
+  const p = producer()
+  fs.writeFileSync(path.join(p.dir, 'package-lock.json'),
+    JSON.stringify({ name: 'app', lockfileVersion: 3 }))
+  p.cut()
+  const c = consumerOf(p)
+  // simulate the staged npm install rewriting the lockfile (npm-version normalization)
+  fs.writeFileSync(path.join(c, 'app', 'package-lock.json'),
+    JSON.stringify({ name: 'app', version: '1.0.0', lockfileVersion: 3 }))
+  p.write('1.1.0', 'v2', 'v1'); p.cut()
+  const r = cli(c, ['update', 'app'])
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /no local edits/)
+  assert.match(frontendOf(c), /v2/)
+  assert.equal(fs.readFileSync(path.join(c, 'app', 'package-lock.json'), 'utf8'),
+    fs.readFileSync(path.join(p.coll, 'app', 'package-lock.json'), 'utf8'),
+    'landed lockfile = the published cut’s')
+})
+
 test('--merge lands a clean merge: upstream change + local edit both survive', () => {
   const p = producer()
   const c = consumerOf(p)

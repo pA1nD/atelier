@@ -76,7 +76,7 @@ $ npx atelier update kanban
   · global/my-chrome up to date
 ```
 
-`update` reasons from the provenance `add` recorded (which cut you installed), so it knows whether you've edited a module since. Untouched modules swap to the new cut silently (build-gated, atomically — live `data/` and `.env*` always survive). Edited modules are **your** call: interactively you're asked — merge (your edits stay on top), overwrite, skip, or show the edits first — and `--merge` / `--overwrite` decide without a prompt. Real conflicts are never auto-resolved and never leave markers in a running module; the half-merged tree is staged next to it instead, ready to hand to your agent:
+`update` reasons from the provenance `add` recorded (which cut you installed), so it knows whether you've edited a module since. (`package-lock.json` is machine-owned — npm rewrites it during the staged install — so it never counts as a local edit; a landing always carries the published cut's lockfile.) Untouched modules swap to the new cut silently (build-gated, atomically — live `data/` and `.env*` always survive). Edited modules are **your** call: interactively you're asked — merge (your edits stay on top), overwrite, skip, or show the edits first — and `--merge` / `--overwrite` decide without a prompt. Real conflicts are never auto-resolved and never leave markers in a running module; the half-merged tree is staged next to it instead, ready to hand to your agent:
 
 ```console
 $ npx atelier update kanban --merge
