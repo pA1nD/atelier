@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 0.19.1
+
+**`update` stopped mistaking lockfiles for your edits.** The staged `npm install` that `add`/`update` run rewrites `package-lock.json` (normalization differs across npm versions), so an installed module could differ from its cut without anyone editing anything — and every later `update` stopped to ask about "local edits" in a file no human touched. `package-lock.json` is now machine-owned in the three-way merge: it can never register as a local edit or a conflict, while a landing still carries the published cut's lockfile.
+
 ## 0.19.0
 
 **A page load stopped fetching the whole instance.** The client used to import **every** mounted module's frontend on every page load — on a large instance that's ~80+ requests to view one page. Bundles now load lazily: the chrome plus the module being viewed, everything else on first visit (and it stays loaded for the SPA session). The one contract change: a module whose frontend must be live on *every* page — it exports a `TopBarCenter` topbar slot, or runs a global listener at import — must declare **`eager: true` in its meta**; without the flag its bundle is never fetched, so its slot never renders. Hot reload is unaffected (never-loaded modules skip the re-import and get fresh code on first visit).
