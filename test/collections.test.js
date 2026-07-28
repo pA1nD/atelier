@@ -72,6 +72,47 @@ test('package cuts a filtered, committed snapshot', () => {
   assert.match(r.out, /✓ packaged  →/)
 })
 
+test('package honors the module .gitignore — ignored build output never travels, untracked sources do', () => {
+  const root = mkInstance()
+  const dir = mkModule(root, 'native-app', {
+    backend: 'export default { mountRoutes(router, ctx) {} };\n',
+    extras: {
+      '.gitignore': 'native/.build/\n',
+      'native/Sources/main.swift': 'print(1)\n',
+      'native/.build/release/binary': 'compiled junk',
+    },
+  })
+  spawnSync('git', ['init', '-q'], { cwd: dir })
+  const r = cli(root, ['package', 'native-app', '--yes'])
+  assert.equal(r.code, 0, r.out)
+  const cut = path.join(root, '_collections', 'native-app', 'native-app')
+  assert.ok(fs.existsSync(path.join(cut, 'native', 'Sources', 'main.swift')), 'untracked-but-not-ignored ships')
+  assert.ok(fs.existsSync(path.join(cut, '.gitignore')), 'the ignore file itself travels')
+  assert.ok(!fs.existsSync(path.join(cut, 'native', '.build')), 'gitignored build output never travels')
+})
+
+test('package --data ships data/ even when the module repo gitignores it', () => {
+  const root = mkInstance()
+  const dir = mkModule(root, 'journal', { data: { 'j.md': 'hello' }, extras: { '.gitignore': 'data/\n' } })
+  spawnSync('git', ['init', '-q'], { cwd: dir })
+  const r = cli(root, ['package', 'journal', '--data', '--yes'])
+  assert.equal(r.code, 0, r.out)
+  assert.equal(fs.readFileSync(path.join(root, '_collections', 'journal', 'journal', 'data', 'j.md'), 'utf8'), 'hello',
+    '--data is explicit — it beats the module .gitignore')
+})
+
+test('the cut report counts files and shows growth vs the previous cut (tripwire)', () => {
+  const root = mkInstance()
+  mkModule(root, 'counter', {})
+  let r = cli(root, ['package', 'counter', '--yes'])
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /✓ counter 1\.0\.0 · 2 files/)   // frontend.jsx + package.json; no delta on a first cut
+  fs.writeFileSync(path.join(root, 'counter', 'helper.js'), 'export const x = 1\n')
+  r = cli(root, ['package', 'counter', '--yes'])
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /✓ counter 1\.0\.0 · 3 files \(\+1\)/)
+})
+
 test('package refuses a module that does not build — collection unchanged', () => {
   const root = mkInstance()
   mkModule(root, 'broken', { backend: 'export default { mountRoutes(r, c) {\n' })  // unclosed brace

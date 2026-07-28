@@ -238,18 +238,55 @@ export function readModuleMeta(dir) {
  *   data/         — runtime state; a cut includes it only with --data, an
  *                   install copies whatever the cut carries (first-install
  *                   content), and --force reinstalls preserve the live copy
+ * On top of that, the module's own .gitignore shapes a cut (gitKeepSet below):
+ * build output the author ignored never travels. data/ is the one exception —
+ * --data is an explicit request and wins over the ignore.
  * ---------------------------------------------------------------------------- */
+
+/* What the module's own repo would keep: tracked files plus untracked files
+ * not excluded by IN-TREE .gitignore rules. Per-directory ignores only — the
+ * operator's global excludes must not make a cut machine-dependent. Returns
+ * null when git can't see the folder (not a repo, no git) or can't see the
+ * module's defining files (e.g. an enclosing repo ignores the whole folder):
+ * there the caller copies unfiltered — filtering to nothing would be worse
+ * than not filtering at all.
+ */
+export function gitKeepSet(src) {
+  let listed;
+  try {
+    listed = git(['ls-files', '-z', '-co', '--exclude-per-directory=.gitignore'], src, { maxBuffer: 1 << 26 });
+  } catch { return null; }
+  const files = new Set(listed.split('\0').filter(Boolean));
+  if (!files.has('frontend.jsx') && !files.has('backend.js')) return null;
+  const dirs = new Set();
+  for (const f of files) {
+    for (let d = path.posix.dirname(f); d !== '.'; d = path.posix.dirname(d)) dirs.add(d);
+  }
+  return { files, dirs };
+}
+
 export function copyModuleFiltered(src, dest, { includeData = true } = {}) {
+  const keep = gitKeepSet(src);
   fs.cpSync(src, dest, {
     recursive: true,
     filter: (p) => {
       if (path.basename(p) === '.DS_Store') return false;   // any depth — force-add would commit it
       const rel = path.relative(src, p);
       if (!rel) return true;
-      const top = rel.split(path.sep)[0];
+      const parts = rel.split(path.sep);
+      const top = parts[0];
       if (top === 'node_modules' || top === '.git' || top === '.atelier') return false;
       if (top.startsWith('.env')) return false;
-      if (top === 'data' && !includeData) return false;
+      if (top === 'data') return includeData;   // explicit --data beats the module's .gitignore
+      if (keep) {
+        const posix = parts.join('/');
+        if (keep.files.has(posix) || keep.dirs.has(posix)) return true;
+        // under a tracked gitlink (submodule): ls-files lists only the link itself
+        for (let d = path.posix.dirname(posix); d !== '.'; d = path.posix.dirname(d)) {
+          if (keep.files.has(d)) return true;
+        }
+        return false;
+      }
       return true;
     },
   });

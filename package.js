@@ -7,7 +7,8 @@
  * often mid-refactor), so distribution NEVER reads them — it reads cuts. A cut
  * only lands if the module builds: frontend sources must esbuild-transform,
  * backend.js must bundle, a chrome must bundle whole. The cut is a filtered
- * copy (no node_modules / .git / .env* / provenance; data/ only with --data)
+ * copy (no node_modules / .git / .env* / provenance; data/ only with --data;
+ * when the working tree is a git repo, its own .gitignore is honored too)
  * committed into `_collections/<collection>/<module>/` — a collection is
  * always a git repo, which is what makes it publishable and subscribable.
  *
@@ -183,6 +184,14 @@ for (const m of toCut) {
   const version = readPkg(m.dir).version || '0.0.0';
   const target = path.join(collDir, m.id);
   const prevVersion = fs.existsSync(target) ? (readPkg(target).version || '0.0.0') : null;
+  // Tripwire baseline: how many files the previous cut carried (from the
+  // collection's HEAD, so a dirty tree can't skew it). The report prints the
+  // new count and the delta — a cut that suddenly balloons is visible.
+  let prevFiles = null;
+  try {
+    const n = git(['ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', m.id], collDir).split('\0').filter(Boolean).length;
+    if (n) prevFiles = n;
+  } catch {}
   fs.rmSync(target, { recursive: true, force: true });
   copyModuleFiltered(m.dir, target, { includeData: m.data });
   const snapped = m.data ? snapshotDatabases(path.join(m.dir, 'data'), path.join(target, 'data')) : [];
@@ -201,7 +210,7 @@ for (const m of toCut) {
       snapped: snapped.length > 0,
     };
   }
-  cutNames.push({ id: m.id, version, prevVersion, changed, data });
+  cutNames.push({ id: m.id, version, prevVersion, changed, data, files: listFiles(target).length, prevFiles });
 }
 
 const message = 'package ' + cutNames.map((c) => `${c.id}@${c.version}`).join(' + ');
@@ -211,7 +220,9 @@ const hash = gitCommitAll(collDir, message);
 // line, with its own changed/unchanged verdict.
 console.log('');
 for (const c of cutNames) {
-  console.log(`  ${c.changed ? '✓' : '·'} ${c.id} ${c.version}${c.changed ? '' : '   (unchanged)'}`);
+  const d = c.prevFiles === null ? null : c.files - c.prevFiles;
+  const delta = d === null ? '' : ` (${d > 0 ? '+' : ''}${d || '±0'})`;
+  console.log(`  ${c.changed ? '✓' : '·'} ${c.id} ${c.version}${c.changed ? ` · ${c.files} files${delta}` : '   (unchanged)'}`);
   if (c.data) {
     console.log(`      data: ${c.data.label} — ${c.data.changed ? 'changed' : 'unchanged'}${c.data.snapped ? ' · live sqlite snapshot' : ''}`);
   }

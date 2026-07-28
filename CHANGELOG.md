@@ -2,6 +2,12 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## Unreleased
+
+**A cut now honors the module's own `.gitignore`.** `atelier package` copied everything a fixed denylist didn't catch, then force-staged it — so a module's ignored build output (`native/.build/`, caches, compiled binaries) shipped in cuts (observed: a cut carrying 1,363 build files). When the working tree is a git repo, the packager now keeps exactly what the repo would: tracked files plus untracked files not excluded by in-tree `.gitignore` rules (global excludes are ignored, so cuts stay machine-independent; an ignored-but-tracked file still ships — tracking it means you meant it). `--data` remains the explicit override: `data/` ships when asked even if the module ignores it. Modules not under git cut unfiltered, exactly as before.
+
+**The packager report counts the cut.** Each cut line now prints its file count and the delta vs. the previous cut (`✓ kanban 1.2.0 · 49 files (+2)`) — a snapshot that suddenly balloons announces itself instead of slipping into the collection.
+
 ## 0.19.1
 
 **`update` stopped mistaking lockfiles for your edits.** The staged `npm install` that `add`/`update` run rewrites `package-lock.json` (normalization differs across npm versions), so an installed module could differ from its cut without anyone editing anything — and every later `update` stopped to ask about "local edits" in a file no human touched. `package-lock.json` is now machine-owned in the three-way merge: it can never register as a local edit or a conflict, while a landing still carries the published cut's lockfile.
