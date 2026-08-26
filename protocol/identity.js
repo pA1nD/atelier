@@ -6,7 +6,16 @@
 //   - asymmetry: the shell mints 30 s, the host accepts exp − now ≤ 60 s, both with ±5 s skew.
 //     "mint 60 / cap 60" rejects EVERY assertion on a host clock 1 s behind.
 //   - iat: a host restart empties the nonce cache; an assertion captured in its last ≤60 s
-//     would replay once. The host refuses iat < its own start (registration) time.
+//     would replay once. The host refuses iat < its own start (registration) time — with the
+//     same ±5 s skew as every other clock comparison (review 2026-08-26: iat is the shell's
+//     clock, hostStartedAt the host's; a shell 2 s behind made every assertion minted in the
+//     first seconds after a fleet ship — 14 hosts restarting together — `iat-before-host`).
+//     The skew reopens a ≤5 s replay window for a nonce captured just before the restart;
+//     accepted, and recorded here. `hostStartedAt` is MANDATORY: a host that omits it silently
+//     loses the fence, so verify() throws instead.
+//   - person is exactly {id, name, claims?} (§4.4: workers see `req.user = {id, name, claims}`
+//     only); any other key under person is `schema`. The assertion carries no epoch field —
+//     revocation reaches it through the shell's session (membership.checkSession).
 // Ed25519 signatures are deterministic in node (RFC 8032, no per-signature randomness), so the
 // vectors in vectors/identity.json are byte-stable across runs and implementations.
 import { createPrivateKey, createPublicKey, sign, verify as cryptoVerify, randomBytes } from 'node:crypto'
@@ -16,13 +25,14 @@ export const HEADER = 'x-atelier-identity'
 export const MAX_HEADER_BYTES = 4096
 export const MINT_TTL_S = 30          // what the shell mints
 export const MAX_EXP_S = 60           // what the host accepts (exp − now), before skew
-export const SKEW_S = 5               // ± tolerance on every clock comparison
+export const SKEW_S = 5               // ± tolerance on every clock comparison (exp, iat-future, iat-before-host)
 export const NONCE_CACHE_MAX = 10000  // prune trigger for the per-host nonce map
 // PKCS8 DER prefix for a raw 32-byte Ed25519 seed (RFC 8410) — lets a vector carry the seed as hex.
 export const PKCS8_ED25519_PREFIX = '302e020100300506032b657004220420'
 export const SPKI_ED25519_PREFIX = '302a300506032b6570032100'
 
 const TOP_KEYS = ['typ', 'aud', 'app', 'method', 'path', 'nonce', 'iat', 'exp', 'person']
+export const PERSON_KEYS = ['id', 'name', 'claims']
 
 export function keyFromSeed(seedHex) {
   if (!/^[0-9a-f]{64}$/.test(seedHex)) throw new Error('seed must be 32 bytes hex')
@@ -54,6 +64,7 @@ export function decode(value) {
 // Check order (C3, locked): signature → schema → non-canonical → aud → app → method/path →
 // exp → iat → nonce. Every failure is a 401 to the caller; the reason is logged host-side only.
 export function verify(pub, value, { hostId, instanceId, method, path, now, hostStartedAt, nonces, maxExp = MAX_EXP_S, skew = SKEW_S }) {
+  if (!Number.isInteger(hostStartedAt)) throw new Error('verify: hostStartedAt (unix seconds, the host\'s registration time) is required — it is the restart-replay fence')
   const bad = (reason) => ({ ok: false, reason })
   if (typeof value !== 'string' || value.length === 0) return bad('missing')
   if (value.length > MAX_HEADER_BYTES) return bad('too-long')
@@ -72,15 +83,16 @@ export function verify(pub, value, { hostId, instanceId, method, path, now, host
   for (const k of ['aud', 'app', 'method', 'path', 'nonce']) if (typeof p[k] !== 'string' || !p[k]) return bad('schema')
   if (!Number.isInteger(p.iat) || !Number.isInteger(p.exp)) return bad('schema')
   if (!p.person || typeof p.person !== 'object' || Array.isArray(p.person)) return bad('schema')
+  for (const k of Object.keys(p.person)) if (!PERSON_KEYS.includes(k)) return bad('schema')   // closed set: {id, name, claims?}
   if (typeof p.person.id !== 'string' || !p.person.id || typeof p.person.name !== 'string') return bad('schema')
-  // extra keys under person (claims, epoch) pass through — membership.js reads person.epoch.
+  if (p.person.claims !== undefined && (!p.person.claims || typeof p.person.claims !== 'object' || Array.isArray(p.person.claims))) return bad('schema')
   if (!Buffer.from(canonical(p), 'utf8').equals(bytes)) return bad('non-canonical')
   if (p.aud !== hostId) return bad('wrong-aud')
   if (p.app !== instanceId) return bad('wrong-app')
   if (p.method !== method || p.path !== path) return bad('method-path-mismatch')
   if (p.exp <= now - skew) return bad('expired')
   if (p.exp - now > maxExp + skew) return bad('exp-too-far')
-  if (Number.isInteger(hostStartedAt) && p.iat < hostStartedAt) return bad('iat-before-host')
+  if (p.iat < hostStartedAt - skew) return bad('iat-before-host')
   if (p.iat > now + skew) return bad('iat-future')
   if (nonces) {
     if (nonces.has(p.nonce)) return bad('replay')

@@ -1,12 +1,13 @@
 {
   "module": "protocol/events.js",
   "spike": "C4",
-  "constants": { "RING": 256, "MAX_BATCH": 128, "PING_MS": 1000 },
-  "note": "Two case kinds. `steps` cases drive one fresh EventRing({ring}) in order: op ∈ register{topic,epoch} | append{ev} | ingest{hostId, events | generate:{stream,topic,from,to}} | head{topic} | since{topic,cursor} | epochOf{topic}; each step's `expect` is deep-compared, except `since`, whose expect is {gap, streamChange, count, first?, last?}. `frame` cases: fn ∈ isFrame | isClientMessage, expect boolean. PING_MS is loopback-tuned, not protocol.",
+  "constants": { "RING": 256, "MAX_BATCH": 128, "PING_MS": 1000, "SERVER_PING_MS": 10000, "SERVER_PING_MISSES": 2, "SOCKET_BUDGET": 8, "CLOSE_EVICTED": 4001 },
+  "note": "Two case kinds. `steps` cases drive one fresh EventRing({ring, adoptFirst}) in order (adoptFirst defaults to false = fleet mode: an append on a topic with no registered epoch is `unregistered`): op ∈ register{topic,epoch} | append{ev} | ingest{hostId, events | generate:{stream,topic,from,to}} | head{topic} | since{topic,cursor} | epochOf{topic}; each step's `expect` is deep-compared, except `since`, whose expect is {gap, streamChange, count, first?, last?}. `frame` cases: fn ∈ isFrame | isClientMessage, expect boolean. PING_MS is the tab's loopback-tuned ping, not protocol; SERVER_PING_* / SOCKET_BUDGET / CLOSE_EVICTED are §4.5's server-side numbers and are protocol.",
   "cases": [
     {
       "name": "300 events on one topic: a subscriber at seq 10 gets exactly one gap, no events",
       "steps": [
+        { "op": "register", "topic": "inst-A", "epoch": "e1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 1, "to": 128 }, "expect": { "ok": true, "accepted": 128, "rejected": [] } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 129, "to": 256 }, "expect": { "ok": true, "accepted": 128, "rejected": [] } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 257, "to": 300 }, "expect": { "ok": true, "accepted": 44, "rejected": [] } },
@@ -17,6 +18,7 @@
     {
       "name": "ring boundary (head 300, ring 256): cursor 44 → 45..300 no gap; 43 → gap; 45 → 46..300",
       "steps": [
+        { "op": "register", "topic": "inst-A", "epoch": "e1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 1, "to": 100 }, "expect": { "ok": true, "accepted": 100, "rejected": [] } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 101, "to": 200 }, "expect": { "ok": true, "accepted": 100, "rejected": [] } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 201, "to": 300 }, "expect": { "ok": true, "accepted": 100, "rejected": [] } },
@@ -32,6 +34,7 @@
     {
       "name": "ingest batch: 129 events rejected as batch-too-large, 128 accepted (C4 surprise 2)",
       "steps": [
+        { "op": "register", "topic": "inst-A", "epoch": "e1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 1, "to": 129 }, "expect": { "ok": false, "reason": "batch-too-large", "max": 128 } },
         { "op": "head", "topic": "inst-A", "expect": null },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 1, "to": 128 }, "expect": { "ok": true, "accepted": 128, "rejected": [] } },
@@ -39,23 +42,32 @@
       ]
     },
     {
-      "name": "host2 pushing a host1:1 stream is an envelope rejection for the whole batch (C4 test 4)",
+      "name": "host2 pushing a host1:1 stream is a foreign-host rejection for the whole batch — a 403 class distinct from a malformed envelope (C4 test 4)",
       "steps": [
+        { "op": "register", "topic": "inst-B", "epoch": "1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "ingest", "hostId": "host2", "events": [
           { "stream": "host2:1", "topic": "inst-B", "seq": 1, "type": "invalidate" },
           { "stream": "host1:1", "topic": "inst-A", "seq": 1, "type": "invalidate" }
+        ], "expect": { "ok": false, "reason": "foreign-host", "index": 1 } },
+        { "op": "ingest", "hostId": "host2", "events": [
+          { "stream": "host2:1", "topic": "inst-B", "seq": 1, "type": "invalidate" },
+          { "stream": "nocolon", "topic": "inst-B", "seq": 2, "type": "invalidate" }
         ], "expect": { "ok": false, "reason": "envelope", "index": 1 } },
         { "op": "head", "topic": "inst-B", "expect": null }
       ]
     },
     {
-      "name": "epoch at registration: after registerEpoch(inst-A, '2') a host1:1 event is stale-epoch before any epoch-2 event (C4 surprise 5)",
+      "name": "epoch at registration: after registerEpoch(inst-A, '2') a host1:1 event is stale-epoch before any epoch-2 event, and an old-epoch cursor is streamChange before any epoch-2 event (C4 surprise 5)",
       "steps": [
+        { "op": "register", "topic": "inst-A", "epoch": "1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "append", "ev": { "stream": "host1:1", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": true } },
         { "op": "epochOf", "topic": "inst-A", "expect": { "epoch": "1", "epochSeq": 1 } },
+        { "op": "since", "topic": "inst-A", "cursor": { "stream": "host1:1", "seq": 1 }, "expect": { "gap": false, "streamChange": false, "count": 0 } },
         { "op": "register", "topic": "inst-A", "epoch": "2", "expect": { "ok": true, "epochSeq": 2 } },
         { "op": "append", "ev": { "stream": "host1:1", "topic": "inst-A", "seq": 2, "type": "invalidate" }, "expect": { "ok": false, "reason": "stale-epoch" } },
         { "op": "head", "topic": "inst-A", "expect": null },
+        { "op": "since", "topic": "inst-A", "cursor": { "stream": "host1:1", "seq": 1 }, "expect": { "gap": false, "streamChange": true, "count": 0 } },
+        { "op": "since", "topic": "inst-A", "cursor": { "stream": "host1:2", "seq": 0 }, "expect": { "gap": false, "streamChange": false, "count": 0 } },
         { "op": "append", "ev": { "stream": "host1:2", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": true } },
         { "op": "head", "topic": "inst-A", "expect": { "stream": "host1:2", "seq": 1 } },
         { "op": "since", "topic": "inst-A", "cursor": { "stream": "host1:1", "seq": 1 }, "expect": { "gap": false, "streamChange": true, "count": 1, "first": 1, "last": 1 } },
@@ -77,6 +89,7 @@
     {
       "name": "seq non-monotonic rejected; ingest reports per-event rejections",
       "steps": [
+        { "op": "register", "topic": "inst-A", "epoch": "1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "ingest", "hostId": "host1", "events": [
           { "stream": "host1:1", "topic": "inst-A", "seq": 1, "type": "invalidate" },
           { "stream": "host1:1", "topic": "inst-A", "seq": 3, "type": "invalidate" },
@@ -89,6 +102,8 @@
     {
       "name": "two topics on one stream keep independent seq (C4 surprise 1)",
       "steps": [
+        { "op": "register", "topic": "inst-A", "epoch": "1", "expect": { "ok": true, "epochSeq": 1 } },
+        { "op": "register", "topic": "inst-C", "epoch": "1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "ingest", "hostId": "host1", "events": [
           { "stream": "host1:1", "topic": "inst-A", "seq": 1, "type": "invalidate" },
           { "stream": "host1:1", "topic": "inst-C", "seq": 1, "type": "invalidate" },
@@ -114,12 +129,41 @@
       "name": "small ring (ring 4): batch cap is ring/2 and the gap follows the ring size",
       "ring": 4,
       "steps": [
+        { "op": "register", "topic": "t", "epoch": "1", "expect": { "ok": true, "epochSeq": 1 } },
         { "op": "ingest", "hostId": "h", "generate": { "stream": "h:1", "topic": "t", "from": 1, "to": 3 }, "expect": { "ok": false, "reason": "batch-too-large", "max": 2 } },
         { "op": "ingest", "hostId": "h", "generate": { "stream": "h:1", "topic": "t", "from": 1, "to": 2 }, "expect": { "ok": true, "accepted": 2, "rejected": [] } },
         { "op": "ingest", "hostId": "h", "generate": { "stream": "h:1", "topic": "t", "from": 3, "to": 4 }, "expect": { "ok": true, "accepted": 2, "rejected": [] } },
         { "op": "ingest", "hostId": "h", "generate": { "stream": "h:1", "topic": "t", "from": 5, "to": 6 }, "expect": { "ok": true, "accepted": 2, "rejected": [] } },
         { "op": "since", "topic": "t", "cursor": { "stream": "h:1", "seq": 2 }, "expect": { "gap": false, "streamChange": false, "count": 4, "first": 3, "last": 6 } },
         { "op": "since", "topic": "t", "cursor": { "stream": "h:1", "seq": 1 }, "expect": { "gap": true, "streamChange": false, "count": 0 } }
+      ]
+    },
+    {
+      "name": "fleet mode: no implicit adoption — an append before registerEpoch is unregistered; a fresh ring cannot vouch for any cursor (spine restart), and an epoch-only match with no events is contiguous",
+      "steps": [
+        { "op": "append", "ev": { "stream": "host1:e1", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": false, "reason": "unregistered" } },
+        { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 1, "to": 2 }, "expect": { "ok": true, "accepted": 0, "rejected": [{ "index": 0, "reason": "unregistered" }, { "index": 1, "reason": "unregistered" }] } },
+        { "op": "head", "topic": "inst-A", "expect": null },
+        { "op": "epochOf", "topic": "inst-A", "expect": { "epoch": null, "epochSeq": 0 } },
+        { "op": "since", "topic": "inst-A", "cursor": { "stream": "host9:x", "seq": 5 }, "expect": { "gap": false, "streamChange": true, "count": 0 } },
+        { "op": "since", "topic": "never-seen", "cursor": { "stream": "host9:x", "seq": 5 }, "expect": { "gap": false, "streamChange": true, "count": 0 } },
+        { "op": "since", "topic": "inst-A", "cursor": null, "expect": { "gap": false, "streamChange": true, "count": 0 } },
+        { "op": "register", "topic": "inst-A", "epoch": "e1", "expect": { "ok": true, "epochSeq": 1 } },
+        { "op": "since", "topic": "inst-A", "cursor": { "stream": "host9:x", "seq": 5 }, "expect": { "gap": false, "streamChange": true, "count": 0 } },
+        { "op": "since", "topic": "inst-A", "cursor": { "stream": "host1:e1", "seq": 0 }, "expect": { "gap": false, "streamChange": false, "count": 0 } },
+        { "op": "append", "ev": { "stream": "host1:e1", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": true } },
+        { "op": "since", "topic": "inst-A", "cursor": { "stream": "host1:e1", "seq": 0 }, "expect": { "gap": false, "streamChange": false, "count": 1, "first": 1, "last": 1 } }
+      ]
+    },
+    {
+      "name": "local mode: adoptFirst adopts the first stream seen as the topic's epoch (no registrar in the loop)",
+      "adoptFirst": true,
+      "steps": [
+        { "op": "append", "ev": { "stream": "host1:1", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": true } },
+        { "op": "epochOf", "topic": "inst-A", "expect": { "epoch": "1", "epochSeq": 1 } },
+        { "op": "append", "ev": { "stream": "host1:2", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": false, "reason": "stale-epoch" } },
+        { "op": "register", "topic": "inst-A", "epoch": "2", "expect": { "ok": true, "epochSeq": 2 } },
+        { "op": "append", "ev": { "stream": "host1:2", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": true } }
       ]
     },
     { "name": "frame: subscribed", "fn": "isFrame", "input": { "type": "subscribed", "topic": "inst-A", "stream": "host1:1", "seq": 12 }, "expect": true },

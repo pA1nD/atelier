@@ -72,11 +72,19 @@ add('too-long: header over 4096 bytes', bad('too-long'), { header: valid + 'A'.r
   const payload = { ...base, typ: 'id', nonce: nonce(n), iat: NOW, exp: NOW + 30, person: { id: 'p1' } }
   add('schema: person.name missing', bad('schema'), { header: encode(payload, shell.privateKey) })
 }
-add('person.claims passthrough: extra keys under person are allowed', ok, { claims: { person: { ...person, claims: { role: 'admin' }, epoch: 3 } } })
+add('person.claims: the closed person set {id, name, claims} passes', ok, { claims: { person: { ...person, claims: { role: 'admin' } } } })
+add('schema: unknown key under person (admin/role) rejected — workers see req.user = {id, name, claims} only', bad('schema'), { claims: { person: { ...person, admin: true, role: 'root' } } })
+add('schema: person.epoch is not a field (§4.4: the assertion carries no epoch)', bad('schema'), { claims: { person: { ...person, epoch: 3 } } })
+add('schema: person.claims must be an object', bad('schema'), { claims: { person: { ...person, claims: 'admin' } } })
 {
   n++
-  const payload = { ...base, typ: 'id', nonce: nonce(n), iat: HOST_STARTED_AT - 1, exp: NOW + 30 }
-  add('iat before host start (C3 surprise 2: restart replay window)', bad('iat-before-host'), { header: encode(payload, shell.privateKey) })
+  const payload = { ...base, typ: 'id', nonce: nonce(n), iat: HOST_STARTED_AT - 6, exp: NOW + 30 }
+  add('iat 6 s before host start (C3 surprise 2: restart replay window, outside skew)', bad('iat-before-host'), { header: encode(payload, shell.privateKey) })
+}
+{
+  n++
+  const payload = { ...base, typ: 'id', nonce: nonce(n), iat: HOST_STARTED_AT - 5, exp: NOW + 30 }
+  add('iat 5 s before host start: inside skew (a shell clock behind the host on a fleet ship is not a 401 burst)', ok, { header: encode(payload, shell.privateKey) })
 }
 add('iat 6 s in the future', bad('iat-future'), { now: NOW + 6 })
 add('iat 5 s in the future: inside skew', ok, { now: NOW + 5 })
@@ -113,7 +121,7 @@ const out = {
   foreignSeed: FOREIGN_SEED,
   foreignPublicKey: publicKeyHex(foreign.publicKey),
   constants: { MINT_TTL_S: 30, MAX_EXP_S: 60, SKEW_S: 5, MAX_HEADER_BYTES: 4096 },
-  note: 'Each case: verify(publicKey, header, verify) → expect. `before` lists headers verified first on the same nonce cache. `mintedWith` + `claims` let a second implementation re-mint and compare `header` byte for byte.',
+  note: 'Each case: verify(publicKey, header, verify) → expect. `before` lists headers verified first on the same nonce cache. `mintedWith` + `claims` let a second implementation re-mint and compare `header` byte for byte. `verify.hostStartedAt` is mandatory (the restart-replay fence; verify() throws without it) and is compared with the same ±SKEW_S as every other clock check. person is exactly {id, name, claims?}.',
   canonicalSample: { input: { b: 1, a: { d: [1, { z: 0, y: 1 }], c: 'x' } }, output: canonical({ b: 1, a: { d: [1, { z: 0, y: 1 }], c: 'x' } }) },
   cases,
 }

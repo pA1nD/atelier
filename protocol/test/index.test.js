@@ -8,7 +8,7 @@ test('protocol/ names the wire format', () => {
 
 test('index.js re-exports every module (one name per module, no collisions)', () => {
   for (const name of ['canonical', 'mint', 'verify', 'filterRequestHeaders', 'filterResponseHeaders', 'EventRing', 'isFrame',
-    'authorizeWrite', 'allowMeta', 'reclaimRule', 'checkSession', 'MembershipModel', 'coalesce', 'formatForAgent']) {
+    'authorizeWrite', 'allowMeta', 'reclaimRule', 'checkSession', 'MembershipModel', 'coalesce', 'setRunning', 'formatForAgent']) {
     assert.equal(typeof protocol[name], 'function', name)
   }
 })

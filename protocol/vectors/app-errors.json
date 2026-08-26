@@ -4,11 +4,19 @@
   "constants": {
     "FOLD_WINDOW_MS": 600000,
     "HOURLY_CAP": 6,
+    "CHAT_HOURLY_CAP": 12,
     "HOUR_MS": 3600000,
     "MESSAGE_HEAD_CHARS": 80,
-    "MAX_AGENT_TEXT": 2000
+    "MAX_AGENT_TEXT": 2000,
+    "MAX_PENDING": 20,
+    "MAX_OPEN": 200,
+    "MAX_MESSAGE_CHARS": 1000,
+    "MAX_STACK_CHARS": 4000,
+    "MAX_URL_CHARS": 1024,
+    "MAX_HINT_CHARS": 200,
+    "MAX_UA_CHARS": 200
   },
-  "note": "Coalescing cases: start from emptyState(); for each entry in `events` (ordered by `at`, ms after now0) call coalesce(state, ev, now0 + at) — or flush(state, now0 + at) when the entry is `{at, flush:true}` — and compare with the same-index `expect`: delivered (deliver !== null), reason (the returned reason), summary (deliver.summary), records (deliver.records.length), instance (deliver.instance), count / newCount (when delivered: the last delivered record; otherwise the open record for ev.fingerprint). Other cases: fn ∈ fingerprint | fromFrontendReport(input, now) | formatForAgent(delivery, opts) with `contains` substrings and `maxLength`.",
+  "note": "Coalescing cases: one state (= one chat) from emptyState(); for each entry in `events` (ordered by `at`, ms after now0) call coalesce(state, ev, now0 + at) — or flush(state, now0 + at) when the entry is `{at, flush:true}`, or setRunning(state, instance, rev) (no delivery) when it is `{at, setRunning:{instance, rev}}` — and compare with the same-index `expect`: delivered (deliver !== null), reason (the returned reason), summary (deliver.summary), records (deliver.records.length), instance (deliver.instance), count / newCount (when delivered: the last delivered record; otherwise the open record for ev.fingerprint), pending ({instance → state.pending[instance].length, missing = 0}), overflow ({instance → state.overflow[instance], missing = 0}). Other cases: fn ∈ fingerprint(input) | fromFrontendReport(input, now, opts) → {ok, ev} | {ok, reason} | formatForAgent(delivery, opts) with `contains` substrings and `maxLength`.",
   "cases": [
     {
       "name": "three same-fingerprint build errors in 2 min → one delivery (count 1), the rest fold (record count 3)",
@@ -249,7 +257,7 @@
       ]
     },
     {
-      "name": "eight distinct fingerprints in 5 min → six deliveries, two capped, one \"+2 more\" when the hour reopens",
+      "name": "eight distinct fingerprints in 5 min → six deliveries, two capped, a flush while still capped is a no-op (pending kept), one \"+2 more\" when the hour reopens",
       "now0": 1700000000000,
       "events": [
         {
@@ -423,22 +431,34 @@
         {
           "at": 240000,
           "delivered": false,
-          "reason": "capped"
+          "reason": "capped",
+          "pending": {
+            "i-todo": 1
+          }
         },
         {
           "at": 280000,
           "delivered": false,
-          "reason": "capped"
+          "reason": "capped",
+          "pending": {
+            "i-todo": 2
+          }
         },
         {
           "at": 1800000,
-          "delivered": false
+          "delivered": false,
+          "pending": {
+            "i-todo": 2
+          }
         },
         {
           "at": 3600000,
           "delivered": true,
           "summary": "+2 more",
-          "records": 2
+          "records": 2,
+          "pending": {
+            "i-todo": 0
+          }
         }
       ]
     },
@@ -932,7 +952,184 @@
       ]
     },
     {
-      "name": "the cap is per instance: a second app keeps its own six",
+      "name": "setRunning is the registration fact: a rev that built clean is silence, and a late error from the older rev is stale-rev",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "setRunning": {
+            "instance": "i-todo",
+            "rev": 5
+          }
+        },
+        {
+          "at": 1000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000001000,
+            "lastAt": 1700000001000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 2000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 5,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000002000,
+            "lastAt": 1700000002000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": false
+        },
+        {
+          "at": 1000,
+          "delivered": false,
+          "reason": "stale-rev"
+        },
+        {
+          "at": 2000,
+          "delivered": true,
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "rev contract: a host restart re-registers its persisted rev (no reset, the fold holds); a host that lost its counter re-registers lower and is still heard (registration is authoritative, never a silent channel)",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 41,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 10000,
+          "setRunning": {
+            "instance": "i-todo",
+            "rev": 41
+          }
+        },
+        {
+          "at": 60000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 41,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000060000,
+            "lastAt": 1700000060000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 120000,
+          "setRunning": {
+            "instance": "i-todo",
+            "rev": 1
+          }
+        },
+        {
+          "at": 180000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 1,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000180000,
+            "lastAt": 1700000180000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 240000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 1,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000240000,
+            "lastAt": 1700000240000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 10000,
+          "delivered": false
+        },
+        {
+          "at": 60000,
+          "delivered": false,
+          "reason": "folded",
+          "count": 2
+        },
+        {
+          "at": 120000,
+          "delivered": false
+        },
+        {
+          "at": 180000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 240000,
+          "delivered": false,
+          "reason": "folded",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "name": "the cap is per instance: a second app keeps its own six, and its event leaves the first app's pending untouched",
       "now0": 1700000000000,
       "events": [
         {
@@ -1098,13 +1295,1347 @@
         {
           "at": 6000,
           "delivered": false,
-          "reason": "capped"
+          "reason": "capped",
+          "pending": {
+            "i-todo": 1
+          }
         },
         {
           "at": 10000,
           "delivered": true,
           "count": 1,
-          "instance": "i-wiki"
+          "instance": "i-wiki",
+          "pending": {
+            "i-todo": 1,
+            "i-wiki": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "the chat cap (12/h across apps): two apps × 7 fill it; a third app's first error is chat-capped; every pending drains one flush at a time when the hour reopens",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:10|error 0",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 0",
+            "file": "backend.js",
+            "line": 10,
+            "col": 1
+          }
+        },
+        {
+          "at": 1000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:11|error 1",
+            "count": 1,
+            "firstAt": 1700000001000,
+            "lastAt": 1700000001000,
+            "message": "error 1",
+            "file": "backend.js",
+            "line": 11,
+            "col": 1
+          }
+        },
+        {
+          "at": 2000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:12|error 2",
+            "count": 1,
+            "firstAt": 1700000002000,
+            "lastAt": 1700000002000,
+            "message": "error 2",
+            "file": "backend.js",
+            "line": 12,
+            "col": 1
+          }
+        },
+        {
+          "at": 3000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:13|error 3",
+            "count": 1,
+            "firstAt": 1700000003000,
+            "lastAt": 1700000003000,
+            "message": "error 3",
+            "file": "backend.js",
+            "line": 13,
+            "col": 1
+          }
+        },
+        {
+          "at": 4000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:14|error 4",
+            "count": 1,
+            "firstAt": 1700000004000,
+            "lastAt": 1700000004000,
+            "message": "error 4",
+            "file": "backend.js",
+            "line": 14,
+            "col": 1
+          }
+        },
+        {
+          "at": 5000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:15|error 5",
+            "count": 1,
+            "firstAt": 1700000005000,
+            "lastAt": 1700000005000,
+            "message": "error 5",
+            "file": "backend.js",
+            "line": 15,
+            "col": 1
+          }
+        },
+        {
+          "at": 6000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000006000,
+            "lastAt": 1700000006000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 10000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:10|error 0",
+            "count": 1,
+            "firstAt": 1700000010000,
+            "lastAt": 1700000010000,
+            "message": "error 0",
+            "file": "backend.js",
+            "line": 10,
+            "col": 1
+          }
+        },
+        {
+          "at": 11000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:11|error 1",
+            "count": 1,
+            "firstAt": 1700000011000,
+            "lastAt": 1700000011000,
+            "message": "error 1",
+            "file": "backend.js",
+            "line": 11,
+            "col": 1
+          }
+        },
+        {
+          "at": 12000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:12|error 2",
+            "count": 1,
+            "firstAt": 1700000012000,
+            "lastAt": 1700000012000,
+            "message": "error 2",
+            "file": "backend.js",
+            "line": 12,
+            "col": 1
+          }
+        },
+        {
+          "at": 13000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:13|error 3",
+            "count": 1,
+            "firstAt": 1700000013000,
+            "lastAt": 1700000013000,
+            "message": "error 3",
+            "file": "backend.js",
+            "line": 13,
+            "col": 1
+          }
+        },
+        {
+          "at": 14000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:14|error 4",
+            "count": 1,
+            "firstAt": 1700000014000,
+            "lastAt": 1700000014000,
+            "message": "error 4",
+            "file": "backend.js",
+            "line": 14,
+            "col": 1
+          }
+        },
+        {
+          "at": 15000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:15|error 5",
+            "count": 1,
+            "firstAt": 1700000015000,
+            "lastAt": 1700000015000,
+            "message": "error 5",
+            "file": "backend.js",
+            "line": 15,
+            "col": 1
+          }
+        },
+        {
+          "at": 16000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000016000,
+            "lastAt": 1700000016000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 20000,
+          "ev": {
+            "instance": "i-crm",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:1|third app",
+            "count": 1,
+            "firstAt": 1700000020000,
+            "lastAt": 1700000020000,
+            "message": "third app",
+            "file": "backend.js",
+            "line": 1,
+            "col": 1
+          }
+        },
+        {
+          "at": 3660000,
+          "flush": true
+        },
+        {
+          "at": 3661000,
+          "flush": true
+        },
+        {
+          "at": 3662000,
+          "flush": true
+        },
+        {
+          "at": 3663000,
+          "flush": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 1000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 2000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 3000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 4000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 5000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 6000,
+          "delivered": false,
+          "reason": "capped"
+        },
+        {
+          "at": 10000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 11000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 12000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 13000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 14000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 15000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 16000,
+          "delivered": false,
+          "reason": "capped"
+        },
+        {
+          "at": 20000,
+          "delivered": false,
+          "reason": "chat-capped",
+          "pending": {
+            "i-crm": 1
+          }
+        },
+        {
+          "at": 3660000,
+          "delivered": true,
+          "instance": "i-todo",
+          "summary": "+1 more",
+          "records": 1
+        },
+        {
+          "at": 3661000,
+          "delivered": true,
+          "instance": "i-wiki",
+          "summary": "+1 more",
+          "records": 1
+        },
+        {
+          "at": 3662000,
+          "delivered": true,
+          "instance": "i-crm",
+          "summary": "+1 more",
+          "records": 1
+        },
+        {
+          "at": 3663000,
+          "delivered": false
+        }
+      ]
+    },
+    {
+      "name": "bounded pending: a storm of 36 distinct fingerprints → 6 delivered, 20 pending + 10 overflow, one \"+30 more\" with 20 records when the hour reopens",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:10|error 0",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 0",
+            "file": "backend.js",
+            "line": 10,
+            "col": 1
+          }
+        },
+        {
+          "at": 100,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:11|error 1",
+            "count": 1,
+            "firstAt": 1700000000100,
+            "lastAt": 1700000000100,
+            "message": "error 1",
+            "file": "backend.js",
+            "line": 11,
+            "col": 1
+          }
+        },
+        {
+          "at": 200,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:12|error 2",
+            "count": 1,
+            "firstAt": 1700000000200,
+            "lastAt": 1700000000200,
+            "message": "error 2",
+            "file": "backend.js",
+            "line": 12,
+            "col": 1
+          }
+        },
+        {
+          "at": 300,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:13|error 3",
+            "count": 1,
+            "firstAt": 1700000000300,
+            "lastAt": 1700000000300,
+            "message": "error 3",
+            "file": "backend.js",
+            "line": 13,
+            "col": 1
+          }
+        },
+        {
+          "at": 400,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:14|error 4",
+            "count": 1,
+            "firstAt": 1700000000400,
+            "lastAt": 1700000000400,
+            "message": "error 4",
+            "file": "backend.js",
+            "line": 14,
+            "col": 1
+          }
+        },
+        {
+          "at": 500,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:15|error 5",
+            "count": 1,
+            "firstAt": 1700000000500,
+            "lastAt": 1700000000500,
+            "message": "error 5",
+            "file": "backend.js",
+            "line": 15,
+            "col": 1
+          }
+        },
+        {
+          "at": 600,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000000600,
+            "lastAt": 1700000000600,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 700,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:17|error 7",
+            "count": 1,
+            "firstAt": 1700000000700,
+            "lastAt": 1700000000700,
+            "message": "error 7",
+            "file": "backend.js",
+            "line": 17,
+            "col": 1
+          }
+        },
+        {
+          "at": 800,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:18|error 8",
+            "count": 1,
+            "firstAt": 1700000000800,
+            "lastAt": 1700000000800,
+            "message": "error 8",
+            "file": "backend.js",
+            "line": 18,
+            "col": 1
+          }
+        },
+        {
+          "at": 900,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:19|error 9",
+            "count": 1,
+            "firstAt": 1700000000900,
+            "lastAt": 1700000000900,
+            "message": "error 9",
+            "file": "backend.js",
+            "line": 19,
+            "col": 1
+          }
+        },
+        {
+          "at": 1000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:20|error 10",
+            "count": 1,
+            "firstAt": 1700000001000,
+            "lastAt": 1700000001000,
+            "message": "error 10",
+            "file": "backend.js",
+            "line": 20,
+            "col": 1
+          }
+        },
+        {
+          "at": 1100,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:21|error 11",
+            "count": 1,
+            "firstAt": 1700000001100,
+            "lastAt": 1700000001100,
+            "message": "error 11",
+            "file": "backend.js",
+            "line": 21,
+            "col": 1
+          }
+        },
+        {
+          "at": 1200,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:22|error 12",
+            "count": 1,
+            "firstAt": 1700000001200,
+            "lastAt": 1700000001200,
+            "message": "error 12",
+            "file": "backend.js",
+            "line": 22,
+            "col": 1
+          }
+        },
+        {
+          "at": 1300,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:23|error 13",
+            "count": 1,
+            "firstAt": 1700000001300,
+            "lastAt": 1700000001300,
+            "message": "error 13",
+            "file": "backend.js",
+            "line": 23,
+            "col": 1
+          }
+        },
+        {
+          "at": 1400,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:24|error 14",
+            "count": 1,
+            "firstAt": 1700000001400,
+            "lastAt": 1700000001400,
+            "message": "error 14",
+            "file": "backend.js",
+            "line": 24,
+            "col": 1
+          }
+        },
+        {
+          "at": 1500,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:25|error 15",
+            "count": 1,
+            "firstAt": 1700000001500,
+            "lastAt": 1700000001500,
+            "message": "error 15",
+            "file": "backend.js",
+            "line": 25,
+            "col": 1
+          }
+        },
+        {
+          "at": 1600,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:26|error 16",
+            "count": 1,
+            "firstAt": 1700000001600,
+            "lastAt": 1700000001600,
+            "message": "error 16",
+            "file": "backend.js",
+            "line": 26,
+            "col": 1
+          }
+        },
+        {
+          "at": 1700,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:27|error 17",
+            "count": 1,
+            "firstAt": 1700000001700,
+            "lastAt": 1700000001700,
+            "message": "error 17",
+            "file": "backend.js",
+            "line": 27,
+            "col": 1
+          }
+        },
+        {
+          "at": 1800,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:28|error 18",
+            "count": 1,
+            "firstAt": 1700000001800,
+            "lastAt": 1700000001800,
+            "message": "error 18",
+            "file": "backend.js",
+            "line": 28,
+            "col": 1
+          }
+        },
+        {
+          "at": 1900,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:29|error 19",
+            "count": 1,
+            "firstAt": 1700000001900,
+            "lastAt": 1700000001900,
+            "message": "error 19",
+            "file": "backend.js",
+            "line": 29,
+            "col": 1
+          }
+        },
+        {
+          "at": 2000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:30|error 20",
+            "count": 1,
+            "firstAt": 1700000002000,
+            "lastAt": 1700000002000,
+            "message": "error 20",
+            "file": "backend.js",
+            "line": 30,
+            "col": 1
+          }
+        },
+        {
+          "at": 2100,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:31|error 21",
+            "count": 1,
+            "firstAt": 1700000002100,
+            "lastAt": 1700000002100,
+            "message": "error 21",
+            "file": "backend.js",
+            "line": 31,
+            "col": 1
+          }
+        },
+        {
+          "at": 2200,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:32|error 22",
+            "count": 1,
+            "firstAt": 1700000002200,
+            "lastAt": 1700000002200,
+            "message": "error 22",
+            "file": "backend.js",
+            "line": 32,
+            "col": 1
+          }
+        },
+        {
+          "at": 2300,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:33|error 23",
+            "count": 1,
+            "firstAt": 1700000002300,
+            "lastAt": 1700000002300,
+            "message": "error 23",
+            "file": "backend.js",
+            "line": 33,
+            "col": 1
+          }
+        },
+        {
+          "at": 2400,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:34|error 24",
+            "count": 1,
+            "firstAt": 1700000002400,
+            "lastAt": 1700000002400,
+            "message": "error 24",
+            "file": "backend.js",
+            "line": 34,
+            "col": 1
+          }
+        },
+        {
+          "at": 2500,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:35|error 25",
+            "count": 1,
+            "firstAt": 1700000002500,
+            "lastAt": 1700000002500,
+            "message": "error 25",
+            "file": "backend.js",
+            "line": 35,
+            "col": 1
+          }
+        },
+        {
+          "at": 2600,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:36|error 26",
+            "count": 1,
+            "firstAt": 1700000002600,
+            "lastAt": 1700000002600,
+            "message": "error 26",
+            "file": "backend.js",
+            "line": 36,
+            "col": 1
+          }
+        },
+        {
+          "at": 2700,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:37|error 27",
+            "count": 1,
+            "firstAt": 1700000002700,
+            "lastAt": 1700000002700,
+            "message": "error 27",
+            "file": "backend.js",
+            "line": 37,
+            "col": 1
+          }
+        },
+        {
+          "at": 2800,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:38|error 28",
+            "count": 1,
+            "firstAt": 1700000002800,
+            "lastAt": 1700000002800,
+            "message": "error 28",
+            "file": "backend.js",
+            "line": 38,
+            "col": 1
+          }
+        },
+        {
+          "at": 2900,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:39|error 29",
+            "count": 1,
+            "firstAt": 1700000002900,
+            "lastAt": 1700000002900,
+            "message": "error 29",
+            "file": "backend.js",
+            "line": 39,
+            "col": 1
+          }
+        },
+        {
+          "at": 3000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:40|error 30",
+            "count": 1,
+            "firstAt": 1700000003000,
+            "lastAt": 1700000003000,
+            "message": "error 30",
+            "file": "backend.js",
+            "line": 40,
+            "col": 1
+          }
+        },
+        {
+          "at": 3100,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:41|error 31",
+            "count": 1,
+            "firstAt": 1700000003100,
+            "lastAt": 1700000003100,
+            "message": "error 31",
+            "file": "backend.js",
+            "line": 41,
+            "col": 1
+          }
+        },
+        {
+          "at": 3200,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:42|error 32",
+            "count": 1,
+            "firstAt": 1700000003200,
+            "lastAt": 1700000003200,
+            "message": "error 32",
+            "file": "backend.js",
+            "line": 42,
+            "col": 1
+          }
+        },
+        {
+          "at": 3300,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:43|error 33",
+            "count": 1,
+            "firstAt": 1700000003300,
+            "lastAt": 1700000003300,
+            "message": "error 33",
+            "file": "backend.js",
+            "line": 43,
+            "col": 1
+          }
+        },
+        {
+          "at": 3400,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:44|error 34",
+            "count": 1,
+            "firstAt": 1700000003400,
+            "lastAt": 1700000003400,
+            "message": "error 34",
+            "file": "backend.js",
+            "line": 44,
+            "col": 1
+          }
+        },
+        {
+          "at": 3500,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:45|error 35",
+            "count": 1,
+            "firstAt": 1700000003500,
+            "lastAt": 1700000003500,
+            "message": "error 35",
+            "file": "backend.js",
+            "line": 45,
+            "col": 1
+          }
+        },
+        {
+          "at": 3660000,
+          "flush": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 100,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 200,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 300,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 400,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 500,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 600,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 1
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 700,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 2
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 800,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 3
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 900,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 4
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1000,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 5
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1100,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 6
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1200,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 7
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1300,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 8
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1400,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 9
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1500,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 10
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1600,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 11
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1700,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 12
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1800,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 13
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 1900,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 14
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 2000,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 15
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 2100,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 16
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 2200,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 17
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 2300,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 18
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 2400,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 19
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 2500,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 0
+          }
+        },
+        {
+          "at": 2600,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 1
+          }
+        },
+        {
+          "at": 2700,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 2
+          }
+        },
+        {
+          "at": 2800,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 3
+          }
+        },
+        {
+          "at": 2900,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 4
+          }
+        },
+        {
+          "at": 3000,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 5
+          }
+        },
+        {
+          "at": 3100,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 6
+          }
+        },
+        {
+          "at": 3200,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 7
+          }
+        },
+        {
+          "at": 3300,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 8
+          }
+        },
+        {
+          "at": 3400,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 9
+          }
+        },
+        {
+          "at": 3500,
+          "delivered": false,
+          "reason": "capped",
+          "pending": {
+            "i-todo": 20
+          },
+          "overflow": {
+            "i-todo": 10
+          }
+        },
+        {
+          "at": 3660000,
+          "delivered": true,
+          "summary": "+30 more",
+          "records": 20,
+          "pending": {
+            "i-todo": 0
+          },
+          "overflow": {
+            "i-todo": 0
+          }
         }
       ]
     },
@@ -1190,7 +2721,60 @@
             "message": "Unexpected end of file",
             "file": "frontend.jsx",
             "line": 4,
+            "col": 1,
+            "hint": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        },
+        {
+          "at": 5000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000005000,
+            "lastAt": 1700000005000,
+            "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "file": "frontend.jsx",
+            "line": 4,
             "col": 1
+          }
+        },
+        {
+          "at": 6000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000006000,
+            "lastAt": 1700000006000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1,
+            "sample": {
+              "url": "https://x/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+            }
+          }
+        },
+        {
+          "at": 7000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000007000,
+            "lastAt": 1700000007000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1,
+            "hint": "close the <div> opened on line 3 before the return"
           }
         }
       ],
@@ -1217,13 +2801,28 @@
         },
         {
           "at": 4000,
+          "delivered": false,
+          "reason": "schema:hint"
+        },
+        {
+          "at": 5000,
+          "delivered": false,
+          "reason": "schema:message"
+        },
+        {
+          "at": 6000,
+          "delivered": false,
+          "reason": "schema:sample"
+        },
+        {
+          "at": 7000,
           "delivered": true,
           "count": 1
         }
       ]
     },
     {
-      "name": "a frontend report normalises to kind frontend with the fingerprint from the url-less message head; no person data",
+      "name": "a frontend report normalises to kind frontend with the fingerprint from the url-less message head; no person data; rev is the host's running rev",
       "fn": "fromFrontendReport",
       "now": 1700000000000,
       "input": {
@@ -1237,20 +2836,104 @@
         "ip": "1.2.3.4",
         "cookie": "x"
       },
+      "opts": {
+        "rev": 4
+      },
       "expect": {
+        "ok": true,
+        "ev": {
+          "instance": "i-todo",
+          "rev": 4,
+          "kind": "frontend",
+          "fingerprint": "frontend|-:-|TypeError: Cannot read properties of undefined (reading 'map')",
+          "count": 1,
+          "firstAt": 1700000000000,
+          "lastAt": 1700000000000,
+          "message": "TypeError: Cannot read properties of undefined (reading 'map')\n  at List (todo.js:12:3)",
+          "sample": {
+            "url": "https://acme.portal.pa1nd.de/acme/todo/list?x=1",
+            "ua": "Mozilla/5.0 (iPhone)"
+          },
+          "stack": "TypeError: Cannot read properties of undefined\n    at List (https://acme.portal.pa1nd.de/modules/acme/todo/frontend.js:12:3)"
+        }
+      }
+    },
+    {
+      "name": "a frontend report with a foreign rev is dropped (rev-mismatch): a client rev never advances `running` or mints a delivery",
+      "fn": "fromFrontendReport",
+      "now": 1700000000000,
+      "input": {
+        "instance": "i-todo",
+        "rev": 57,
+        "url": "https://acme.portal.pa1nd.de/acme/todo/list?x=1",
+        "ua": "Mozilla/5.0 (iPhone)",
+        "message": "TypeError: Cannot read properties of undefined (reading 'map')\n  at List (todo.js:12:3)",
+        "stack": "TypeError: Cannot read properties of undefined\n    at List (https://acme.portal.pa1nd.de/modules/acme/todo/frontend.js:12:3)",
+        "person": "p1",
+        "ip": "1.2.3.4",
+        "cookie": "x"
+      },
+      "opts": {
+        "rev": 7
+      },
+      "expect": {
+        "ok": false,
+        "reason": "rev-mismatch"
+      }
+    },
+    {
+      "name": "a frontend report without a running rev (instance unknown to the host) is dropped",
+      "fn": "fromFrontendReport",
+      "now": 1700000000000,
+      "input": {
         "instance": "i-todo",
         "rev": 4,
-        "kind": "frontend",
-        "fingerprint": "frontend|-:-|TypeError: Cannot read properties of undefined (reading 'map')",
-        "count": 1,
-        "firstAt": 1700000000000,
-        "lastAt": 1700000000000,
+        "url": "https://acme.portal.pa1nd.de/acme/todo/list?x=1",
+        "ua": "Mozilla/5.0 (iPhone)",
         "message": "TypeError: Cannot read properties of undefined (reading 'map')\n  at List (todo.js:12:3)",
-        "sample": {
-          "url": "https://acme.portal.pa1nd.de/acme/todo/list?x=1",
-          "ua": "Mozilla/5.0 (iPhone)"
-        },
-        "stack": "TypeError: Cannot read properties of undefined\n    at List (https://acme.portal.pa1nd.de/modules/acme/todo/frontend.js:12:3)"
+        "stack": "TypeError: Cannot read properties of undefined\n    at List (https://acme.portal.pa1nd.de/modules/acme/todo/frontend.js:12:3)",
+        "person": "p1",
+        "ip": "1.2.3.4",
+        "cookie": "x"
+      },
+      "opts": {},
+      "expect": {
+        "ok": false,
+        "reason": "no-running-rev"
+      }
+    },
+    {
+      "name": "a frontend report is truncated to the wire caps: message 1000, url 1024, ua 200, stack 4000",
+      "fn": "fromFrontendReport",
+      "now": 1700000000000,
+      "input": {
+        "instance": "i-todo",
+        "rev": 4,
+        "url": "https://x/uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu",
+        "ua": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "message": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "stack": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+      },
+      "opts": {
+        "rev": 4
+      },
+      "expect": {
+        "ok": true,
+        "ev": {
+          "instance": "i-todo",
+          "rev": 4,
+          "kind": "frontend",
+          "fingerprint": "frontend|-:-|mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "count": 1,
+          "firstAt": 1700000000000,
+          "lastAt": 1700000000000,
+          "message": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "sample": {
+            "url": "https://x/uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu",
+            "ua": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "stack": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+        }
       }
     },
     {
@@ -1285,7 +2968,7 @@
       "expect": "http|backend.js:7|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     },
     {
-      "name": "formatForAgent: a build error carries app, rev, file:line:col, the message and the build hint",
+      "name": "formatForAgent: a build error carries app, rev, file:line:col, the message and the generic build hint when the host sent none",
       "fn": "formatForAgent",
       "delivery": {
         "instance": "i-todo",
@@ -1315,6 +2998,41 @@
         "app-error todo rev 4 build",
         "frontend.jsx:4:1 Unexpected end of file",
         "fix: fix frontend.jsx:4:1 and save"
+      ],
+      "maxLength": 2000
+    },
+    {
+      "name": "formatForAgent: the host's hint (agent-contract-1's `<file>:<line>:<col> <message> — <fix>` classification) travels verbatim and replaces the generic hint",
+      "fn": "formatForAgent",
+      "delivery": {
+        "instance": "i-todo",
+        "rev": 4,
+        "at": 1700000000000,
+        "records": [
+          {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:9|Unexpected token \"}\"",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected token \"}\"",
+            "file": "frontend.jsx",
+            "line": 9,
+            "col": 1,
+            "hint": "the <div> opened on line 3 is never closed — close it before the return",
+            "newCount": 1
+          }
+        ]
+      },
+      "opts": {
+        "appName": "todo"
+      },
+      "contains": [
+        "app-error todo rev 4 build",
+        "frontend.jsx:9:1 Unexpected token \"}\"",
+        "fix: the <div> opened on line 3 is never closed — close it before the return"
       ],
       "maxLength": 2000
     },
@@ -1357,13 +3075,14 @@
       "maxLength": 2000
     },
     {
-      "name": "formatForAgent: a \"+N more\" summary lists one line per record and stays under 2000 chars",
+      "name": "formatForAgent: a \"+N more\" summary lists one line per record, names the unlisted overflow, and stays under 2000 chars",
       "fn": "formatForAgent",
       "delivery": {
         "instance": "i-todo",
         "rev": 4,
         "at": 1700000000000,
-        "summary": "+2 more",
+        "summary": "+5 more",
+        "folded": 5,
         "records": [
           {
             "instance": "i-todo",
@@ -1396,7 +3115,8 @@
         ]
       },
       "contains": [
-        "app-error i-todo rev 4: +2 more (folded — 6/h cap",
+        "app-error i-todo rev 4: +5 more (folded — 6/h per app, 12/h per chat",
+        "3 not listed",
         "- backend.js:16:1 error 6",
         "- backend.js:17:1 error 7"
       ],

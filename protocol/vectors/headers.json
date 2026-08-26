@@ -1,7 +1,8 @@
 {
   "module": "protocol/headers.js",
   "spike": "C3 + B6",
-  "note": "fn ∈ request|response|framing. request: filterRequestHeaders(input) → expect {headers, stripped, dropped}. response: filterResponseHeaders(input, opts) → expect {headers, stripped}. framing: rejectFraming(input) → expect boolean. Header names compare lowercase; the shell sets `host` itself from its own dial — it is on no list.",
+  "constants": { "BODY_CAP_DEFAULT": 67108864 },
+  "note": "fn ∈ request|response|framing. request: filterRequestHeaders(input) → expect {headers, stripped, dropped}. response: filterResponseHeaders(input, opts) → expect {headers, stripped}. framing: rejectFraming(input) → expect boolean — the proxy calls it on the RAW headers BEFORE either filter (after filtering, transfer-encoding is gone and a CL+TE conflict is invisible). Header names compare lowercase; the shell sets `host` itself from its own dial — it is on no list. Tokens named by the message's own `connection` header are hop-by-hop (RFC 7230 §6.1) and stripped both ways.",
   "cases": [
     {
       "name": "C3 forged set: only accept and user-agent reach the worker",
@@ -84,25 +85,38 @@
       "expect": { "headers": { "location": "https://acme.portal.pa1nd.de/acme/todo/" }, "stripped": [] }
     },
     {
-      "name": "location: foreign absolute, protocol-relative and relative are stripped",
+      "name": "location: foreign absolute passes unchanged (OR7: an app may send a person to its OAuth provider)",
       "fn": "response",
-      "input": { "location": "https://evil.example/" },
+      "input": { "location": "https://accounts.example/oauth/authorize?client=x" },
       "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
-      "expect": { "headers": {}, "stripped": ["location"] }
+      "expect": { "headers": { "location": "https://accounts.example/oauth/authorize?client=x" }, "stripped": [] }
     },
     {
-      "name": "location: protocol-relative //evil is stripped",
+      "name": "location: protocol-relative //host is stripped (B6 surprise 1: it collides with the root-absolute rewrite)",
       "fn": "response",
       "input": { "location": "//evil.example/x" },
       "opts": { "cookieCredentialed": false, "companyOrigin": "https://acme.portal.pa1nd.de" },
       "expect": { "headers": {}, "stripped": ["location"] }
     },
     {
-      "name": "location: relative path is stripped (the shell cannot resolve it safely)",
+      "name": "location: relative path passes unchanged (the browser resolves it against the company-origin request URL)",
       "fn": "response",
       "input": { "location": "next/" },
       "opts": { "cookieCredentialed": false, "companyOrigin": "https://acme.portal.pa1nd.de" },
-      "expect": { "headers": {}, "stripped": ["location"] }
+      "expect": { "headers": { "location": "next/" }, "stripped": [] }
+    },
+    {
+      "name": "connection-named tokens are hop-by-hop inbound (RFC 7230 §6.1): x-custom-hop is stripped, not dropped",
+      "fn": "request",
+      "input": { "connection": "close, X-Custom-Hop", "x-custom-hop": "1", "accept": "*/*" },
+      "expect": { "headers": { "accept": "*/*" }, "stripped": ["connection", "x-custom-hop"], "dropped": [] }
+    },
+    {
+      "name": "connection-named tokens are hop-by-hop outbound: an allow-listed header named in connection is still cut",
+      "fn": "response",
+      "input": { "connection": "etag", "etag": "\"abc\"", "content-type": "text/plain" },
+      "opts": { "cookieCredentialed": false },
+      "expect": { "headers": { "content-type": "text/plain" }, "stripped": ["connection", "etag"] }
     },
     { "name": "framing: content-length alone is fine", "fn": "framing", "input": { "content-length": "10" }, "expect": false },
     { "name": "framing: transfer-encoding alone is fine", "fn": "framing", "input": { "transfer-encoding": "chunked" }, "expect": false },

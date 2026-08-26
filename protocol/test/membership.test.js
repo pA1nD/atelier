@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { checkSession, assertionEpochCheck, hostEpochCheck, MembershipModel } from '../membership.js'
+import { checkSession, hostEpochCheck, MembershipModel } from '../membership.js'
 import vectors from '../vectors/membership.json' with { type: 'json' }
 
 const epochTable = (epochs) => (personId) => epochs[personId]
@@ -8,7 +8,6 @@ for (const c of vectors.cases) {
   test(`vector: ${c.name}`, () => {
     switch (c.fn) {
       case 'checkSession': return assert.deepEqual(checkSession(c.input, epochTable(c.epochs)), c.expect)
-      case 'assertionEpochCheck': return assert.deepEqual(assertionEpochCheck(c.input, epochTable(c.epochs)), c.expect)
       case 'hostEpochCheck': return assert.deepEqual(hostEpochCheck(...c.input), c.expect)
       case 'present': {
         const m = new MembershipModel(vectors.model)
@@ -34,7 +33,12 @@ for (const c of vectors.cases) {
 test('currentEpochOf may be a plain integer; an integer epoch of 0 is a valid epoch', () => {
   assert.deepEqual(checkSession({ personId: 'p1', epoch: 0 }, 0), { ok: true })
   assert.deepEqual(checkSession({ personId: 'p1', epoch: 0 }, 1), { ok: false, reason: 'epoch-moved' })
-  assert.deepEqual(assertionEpochCheck({ person: { id: 'p1', name: 'A', epoch: 5 } }, 5), { ok: true })
+})
+
+test('OR20: the model has no visibility — an app object carrying one changes nothing (presence is chat membership only)', () => {
+  const m = new MembershipModel(vectors.model)
+  assert.equal(m.present('p3', { ...m.resolveApp('acme', 'todo'), visibility: 'company' }), false)
+  assert.equal(m.present('p1', { ...m.resolveApp('acme', 'todo'), visibility: 'company' }), true)
 })
 
 test('the model does not mutate the vector file\'s model object', () => {

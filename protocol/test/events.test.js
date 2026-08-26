@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { EventRing, frames, messages, isFrame, isClientMessage, RING, MAX_BATCH, PING_MS, companyTopic, isReservedTopic, splitStream } from '../events.js'
+import { EventRing, frames, messages, isFrame, isClientMessage, RING, MAX_BATCH, PING_MS, SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED, companyTopic, isReservedTopic, splitStream } from '../events.js'
 import vectors from '../vectors/events.json' with { type: 'json' }
 
 const gen = ({ stream, topic, from, to }) => Array.from({ length: to - from + 1 }, (_, i) => ({ stream, topic, seq: from + i, type: 'invalidate' }))
@@ -8,7 +8,7 @@ const gen = ({ stream, topic, from, to }) => Array.from({ length: to - from + 1 
 for (const c of vectors.cases) {
   test(`vector: ${c.name}`, () => {
     if (c.fn) return assert.equal({ isFrame, isClientMessage }[c.fn](c.input), c.expect)
-    const ring = new EventRing({ ring: c.ring ?? RING })
+    const ring = new EventRing({ ring: c.ring ?? RING, adoptFirst: c.adoptFirst ?? false })
     c.steps.forEach((s, i) => {
       const at = `step ${i} (${s.op})`
       switch (s.op) {
@@ -31,8 +31,9 @@ for (const c of vectors.cases) {
 }
 
 test('constants and topic helpers', () => {
-  assert.deepEqual(vectors.constants, { RING, MAX_BATCH, PING_MS })
+  assert.deepEqual(vectors.constants, { RING, MAX_BATCH, PING_MS, SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED })
   assert.equal(MAX_BATCH, RING / 2)
+  assert.deepEqual([SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED], [10_000, 2, 8, 4001])   // §4.5 verbatim
   assert.equal(companyTopic('acme'), 'company:acme')
   assert.ok(isReservedTopic('shell') && isReservedTopic('company:acme') && !isReservedTopic('inst-A'))
   assert.deepEqual(splitStream('host1:abc:def'), { hostId: 'host1', epoch: 'abc:def' })

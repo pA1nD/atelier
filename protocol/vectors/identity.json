@@ -12,7 +12,7 @@
     "SKEW_S": 5,
     "MAX_HEADER_BYTES": 4096
   },
-  "note": "Each case: verify(publicKey, header, verify) → expect. `before` lists headers verified first on the same nonce cache. `mintedWith` + `claims` let a second implementation re-mint and compare `header` byte for byte.",
+  "note": "Each case: verify(publicKey, header, verify) → expect. `before` lists headers verified first on the same nonce cache. `mintedWith` + `claims` let a second implementation re-mint and compare `header` byte for byte. `verify.hostStartedAt` is mandatory (the restart-replay fence; verify() throws without it) and is compared with the same ±SKEW_S as every other clock check. person is exactly {id, name, claims?}.",
   "canonicalSample": {
     "input": {
       "b": 1,
@@ -481,8 +481,8 @@
       }
     },
     {
-      "name": "person.claims passthrough: extra keys under person are allowed",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkdCZ1lHQmdZR0JnWUdCZ1lHQmdZR0EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImNsYWltcyI6eyJyb2xlIjoiYWRtaW4ifSwiZXBvY2giOjMsImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.0vndzc_Izv6M0uHFHnkhxPjrnW6jpxTbjtAtahA2CDhbT7nOKtAsd5ERn5m2-rOeWNPHwtVlKakCQEz1re_lAg",
+      "name": "person.claims: the closed person set {id, name, claims} passes",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkdCZ1lHQmdZR0JnWUdCZ1lHQmdZR0EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImNsYWltcyI6eyJyb2xlIjoiYWRtaW4ifSwiaWQiOiJwMSIsIm5hbWUiOiJBZGEifSwidHlwIjoiaWQifQ.n8DOq_KbPGPFRUrdk2V57ZeK-XYmPy9pc1MAhUPjPrVghpPoxxJ1Le-Bkjk5YsVe2gQIjAZECnlmuHgMV-agCw",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",
@@ -510,14 +510,113 @@
           "name": "Ada",
           "claims": {
             "role": "admin"
-          },
+          }
+        }
+      }
+    },
+    {
+      "name": "schema: unknown key under person (admin/role) rejected — workers see req.user = {id, name, claims} only",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkdSa1pHUmtaR1JrWkdSa1pHUmtaR1EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImFkbWluIjp0cnVlLCJpZCI6InAxIiwibmFtZSI6IkFkYSIsInJvbGUiOiJyb290In0sInR5cCI6ImlkIn0.v-n-oEuK0ho6hgYB4D7kJZfocYM97DmQ557Bcx83I8qHVe2bSEWEwFunlosgXZnxADb41xugzVqwvxCmmTpbAA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "schema"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "GRkZGRkZGRkZGRkZGRkZGQ"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada",
+          "admin": true,
+          "role": "root"
+        }
+      }
+    },
+    {
+      "name": "schema: person.epoch is not a field (§4.4: the assertion carries no epoch)",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikdob2FHaG9hR2hvYUdob2FHaG9hR2ciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImVwb2NoIjozLCJpZCI6InAxIiwibmFtZSI6IkFkYSJ9LCJ0eXAiOiJpZCJ9.8IOW6VZHoCKAm2Qc6vA3YpHMFmuaNq_qfCBEmnRaue4MCftnWBXmFsOze_Occ0NFPuZ-WHchFJNT41ZQ4r35Ag",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "schema"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "GhoaGhoaGhoaGhoaGhoaGg"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada",
           "epoch": 3
         }
       }
     },
     {
-      "name": "iat before host start (C3 surprise 2: restart replay window)",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNjk5OTk4OTk5LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkdSa1pHUmtaR1JrWkdSa1pHUmtaR1EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.GoWPzmwUVNuMXbzlqHZnhm5Z3XAsBjSDfjEZ1gO9uHwRoOvB8iuc9fGgnzHYKeIDXlggHuRyr-ZDmcmSS-bwDw",
+      "name": "schema: person.claims must be an object",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikd4c2JHeHNiR3hzYkd4c2JHeHNiR3ciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImNsYWltcyI6ImFkbWluIiwiaWQiOiJwMSIsIm5hbWUiOiJBZGEifSwidHlwIjoiaWQifQ.-gSmCIOuMaYb93EBd59q2xCLOAntQZPR1QQRc2TH8ED-pd5r_TrFSJMQ0WtJ3b1QVIzM4HBusNzYkrlAfzi0CA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "schema"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "GxsbGxsbGxsbGxsbGxsbGw"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada",
+          "claims": "admin"
+        }
+      }
+    },
+    {
+      "name": "iat 6 s before host start (C3 surprise 2: restart replay window, outside skew)",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNjk5OTk4OTk0LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkhCd2NIQndjSEJ3Y0hCd2NIQndjSEEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.UBgyUYPtmpOgZUuozt_Tu7XRm5BftreRz2dSpAkmkZKU17LKRWHs-YvoeEQXeiKWu_141N6VQdMKMJ_gMTvlBA",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",
@@ -532,8 +631,23 @@
       }
     },
     {
+      "name": "iat 5 s before host start: inside skew (a shell clock behind the host on a fleet ship is not a 401 burst)",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNjk5OTk4OTk1LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkhoNGVIaDRlSGg0ZUhoNGVIaDRlSGciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.nyu52DtIEFeEAF8-fgAv83M3V7Y-n3i5tIVdmlUvqkY-DrDhYqY0pGIHkPfatoyTbpC7DKeOF47KiMMDlclEAw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
       "name": "iat 6 s in the future",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzNiwiaWF0IjoxNzAwMDAwMDA2LCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikd4c2JHeHNiR3hzYkd4c2JHeHNiR3ciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.y7-4O4VqhO0Xg9ef17UJm59btZDuMKl1-ieveDbnx-PRtc0y-aJfGmx5zHScdisnFzhTrN-ih_KqID98LgZiCg",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzNiwiaWF0IjoxNzAwMDAwMDA2LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IklDQWdJQ0FnSUNBZ0lDQWdJQ0FnSUEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.jRIJStBLMzV0qnLJY2Zo0TwjVCxk9oz6Ol_l7mTpRyVckwJjC3k0qhwPxE9HqEPNXv0x-eqnm5rhp4pMyKbyDQ",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",
@@ -550,7 +664,7 @@
         "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "now": 1700000006,
         "ttl": 30,
-        "nonce": "GxsbGxsbGxsbGxsbGxsbGw"
+        "nonce": "ICAgICAgICAgICAgICAgIA"
       },
       "claims": {
         "aud": "h-comp-1",
@@ -565,7 +679,7 @@
     },
     {
       "name": "iat 5 s in the future: inside skew",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzNSwiaWF0IjoxNzAwMDAwMDA1LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkhCd2NIQndjSEJ3Y0hCd2NIQndjSEEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.8aXLRxOq1f7QayRDlfIwXNnNiJ0JgR-eKP_5jlBtNHGGWa3nHIPZLcK_7zBHw27JyNT86AhOPhuVg6aVLzKaBw",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzNSwiaWF0IjoxNzAwMDAwMDA1LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IklTRWhJU0VoSVNFaElTRWhJU0VoSVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.8ZMZchS8OxjqI95BLmdGqcIpYG_S6ghYfL4pkf629DjULAgnHUPYVpRAlh6dyDpxRhb7sStmZfRBqzqyNRAKAw",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",
@@ -581,7 +695,7 @@
         "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "now": 1700000005,
         "ttl": 30,
-        "nonce": "HBwcHBwcHBwcHBwcHBwcHA"
+        "nonce": "ISEhISEhISEhISEhISEhIQ"
       },
       "claims": {
         "aud": "h-comp-1",
@@ -596,7 +710,7 @@
     },
     {
       "name": "skew boundary: exp = now + 60 + 5 accepted",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDA2NSwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkhSMGRIUjBkSFIwZEhSMGRIUjBkSFEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.iBylvmzE4s2b7UM6tkuBsRHkbcIw_hvTl0K5EvK1oW5eC8X2ZlKoqwiffVA25hZu1XhQjuLDMFb3hJ2TMdJ1CA",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDA2NSwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IklpSWlJaUlpSWlJaUlpSWlJaUlpSWciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.lM8LMn13sMWZmA4dWJIAdz8rdjwwa_3RY0lulTAPiUaliMbolw5bYfLxx4xaolpQDOSHeQkxDzPnPicSXYRCBw",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",
@@ -611,7 +725,7 @@
     },
     {
       "name": "skew boundary: exp = now + 60 + 6 rejected",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDA2NiwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikh4OGZIeDhmSHg4Zkh4OGZIeDhmSHciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.hkYfIK2BObinHzDoVZkDXjOCVG_tn66LxuGn79z2m28x0wA9b4rnNysOkzZaozqtD2SWwXe1ydkoRIx1EBoPCw",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDA2NiwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkpDUWtKQ1FrSkNRa0pDUWtKQ1FrSkEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.sa32VQ67AmYPCsomtwUrxUM5dmsD7qHGBS5ZX8WanvTAdnEehLXry6KfkZkN3We6s1LWXwvWXe8sjT0gD88CBQ",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",
@@ -627,7 +741,7 @@
     },
     {
       "name": "skew boundary: exp = now − 4 still accepted",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTk5NiwiaWF0IjoxNjk5OTk5OTY2LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IklTRWhJU0VoSVNFaElTRWhJU0VoSVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.K5_ygPkLPJlilHU7jGZh_9orfO_hxIOxnF2kAyceZiDkBrslXKYp3ZxzjKu8BdOs1-frITjTozznAmKw5eiHAw",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTk5NiwiaWF0IjoxNjk5OTk5OTY2LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkppWW1KaVltSmlZbUppWW1KaVltSmciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.tDOaPvdzySAm-fabuKoA0FfqWSCz1sacySpLYYWKRBSJI0g8KyrfB4ZDRVGxzWtYVKas2iaixX98xBXXD6QiCA",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",
@@ -642,7 +756,7 @@
     },
     {
       "name": "skew boundary: exp = now − 5 expired",
-      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTk5NSwiaWF0IjoxNjk5OTk5OTY1LCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikl5TWpJeU1qSXlNakl5TWpJeU1qSXciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.M-sFXJs_X1-MKvYC1nDcmvRmCPIQLjFmM-7PwvfXwMRgCvmwEaYjtll5zsX2GT6Mqr767BugLs_vewl1ba8mDA",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTk5NSwiaWF0IjoxNjk5OTk5OTY1LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IktDZ29LQ2dvS0Nnb0tDZ29LQ2dvS0EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.mTjV7LqF6LEeY9vcYm8-vaVFPtxKAg32s5EfwKI-GmWzhDkj3llCIN4doIy_zmRAL0XvL8GCDVzkzIPtSzeTCA",
       "verify": {
         "hostId": "h-comp-1",
         "instanceId": "i-todo",

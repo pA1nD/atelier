@@ -3,13 +3,18 @@
 // §0.1 R5; §10 Q2 confirmed by spike C3: a chat member is a company member by derivation, a
 // company member outside the app's chat gets the same 404 as a stranger). Seed spike-c3/common.mjs:63-90.
 //
-// Three epochs, three checks, all store-agnostic (where each epoch lives is the spine's step-1
+// Two epochs, two checks, all store-agnostic (where each epoch lives is the spine's step-1
 // follow-up: sessions table, computers table):
 //   personEpoch  — an integer the spine bumps whenever a person's memberships change (added to /
-//                  removed from a chat, company left, deactivated). A session or assertion minted
-//                  under an older epoch is refused: the presence cache it fed is stale.
+//                  removed from a chat, company left, deactivated). A session minted under an
+//                  older epoch is refused: the presence cache it fed is stale.
 //   host epoch   — the registrar's random epoch per host start; a host bearer token from an
 //                  older epoch is refused after re-registration.
+// The identity assertion carries NO epoch (§4.4: "the assertion carries no epoch field") — the
+// shell mints only from a session that passed checkSession, so revocation reaches assertions
+// through the session. (Review 2026-08-26: the earlier `assertionEpochCheck` on a `person.epoch`
+// extension is gone; identity.js now closes the person key set. A person-epoch inside the
+// assertion is a pending ruling — README "Deliberately open".)
 // `currentEpochOf` is either an integer or a function(personId) → integer | undefined
 // (undefined = unknown person → refused).
 
@@ -24,19 +29,6 @@ export function checkSession(session, currentEpochOf) {
   return { ok: true }
 }
 
-// assertionEpochCheck(payload, currentEpochOf): an optional person.epoch in the identity
-// assertion (identity.js lets extra keys through under person). Absent = accepted — the shell
-// mints from a session that already passed checkSession. Present and stale = refused.
-export function assertionEpochCheck(payload, currentEpochOf) {
-  const person = payload?.person
-  if (!person || typeof person.id !== 'string') return { ok: false, reason: 'schema' }
-  if (person.epoch === undefined) return { ok: true }
-  if (!Number.isInteger(person.epoch)) return { ok: false, reason: 'schema' }
-  const current = resolve(currentEpochOf, person.id)
-  if (!Number.isInteger(current)) return { ok: false, reason: 'unknown-person' }
-  return person.epoch === current ? { ok: true } : { ok: false, reason: 'epoch-moved' }
-}
-
 // hostEpochCheck(tokenEpoch, registeredEpoch): host bearer tokens are bound to (computer, epoch).
 export function hostEpochCheck(tokenEpoch, registeredEpoch) {
   if (typeof tokenEpoch !== 'string' || !tokenEpoch) return { ok: false, reason: 'no-epoch' }
@@ -45,9 +37,11 @@ export function hostEpochCheck(tokenEpoch, registeredEpoch) {
 }
 
 // The in-memory model (the registry + spine view the shell caches). Company membership is
-// DERIVED: in any chat of the company. Presence on an app instance: chat-visible → in that
-// chat; company-visible → any chat of the company (reserved for the dyno target, OR20).
-// join/leave bump the person's epoch — the Q2 rule and the revocation rule in one object.
+// DERIVED: in any chat of the company. Presence on an app instance = membership of the app's
+// chat, nothing else (OR20: in v1 an app is its chat's; company-wide apps arrive with the dyno
+// target, PLAN §12). join/leave bump the person's epoch — the Q2 rule and the revocation rule
+// in one object. §4.2's membership TABLE (chat participation + accepted portal invites) and the
+// company epoch of §4.5 are not modelled here — pending the §4.2 decision (README).
 export class MembershipModel {
   constructor({ persons = {}, companies = {}, apps = {} } = {}) {
     this.persons = structuredClone(persons)
@@ -65,9 +59,7 @@ export class MembershipModel {
   isCompanyMember(company, personId) { return this.chatsOf(company, personId).length > 0 }
   present(personId, app) {
     if (!app) return false
-    if (app.visibility === 'chat') return (this.companies[app.company]?.chats[app.chat] ?? []).includes(personId)
-    if (app.visibility === 'company') return this.isCompanyMember(app.company, personId)
-    return false
+    return (this.companies[app.company]?.chats[app.chat] ?? []).includes(personId)
   }
   resolveApp(company, slug) { const app = this.apps[slug]; return app && app.company === company ? app : null }
   join(company, chat, personId) {

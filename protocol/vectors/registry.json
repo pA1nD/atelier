@@ -10,16 +10,16 @@
       "expect": { "meta": { "name": "Todo", "icon": "✅", "group": "Work", "color": "#0af" }, "requested": { "primary": true }, "dropped": ["trusted", "eager", "isChrome", "chrome", "hidden"], "invalid": [] }
     },
     {
-      "name": "visibility in module.json is a request, never meta (OR12)",
+      "name": "OR20: visibility in module.json is an unknown key in v1 — dropped like any other, never a request",
       "fn": "allowMeta",
       "input": { "name": "Wiki", "visibility": "company" },
-      "expect": { "meta": { "name": "Wiki" }, "requested": { "visibility": "company" }, "dropped": [], "invalid": [] }
+      "expect": { "meta": { "name": "Wiki" }, "requested": {}, "dropped": ["visibility"], "invalid": [] }
     },
     {
-      "name": "type/length limits: name > 64, group > 32, icon 9 codepoints, color not hex, primary not boolean, visibility unknown → invalid",
+      "name": "type/length limits: name > 64, group > 32, icon 9 codepoints, color not hex, primary not boolean → invalid",
       "fn": "allowMeta",
-      "input": { "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "group": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "icon": "🎉🎉🎉🎉🎉🎉🎉🎉🎉", "color": "red", "primary": "yes", "visibility": "everyone" },
-      "expect": { "meta": {}, "requested": {}, "dropped": [], "invalid": ["name", "group", "icon", "color", "primary", "visibility"] }
+      "input": { "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "group": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "icon": "🎉🎉🎉🎉🎉🎉🎉🎉🎉", "color": "red", "primary": "yes" },
+      "expect": { "meta": {}, "requested": {}, "dropped": [], "invalid": ["name", "group", "icon", "color", "primary"] }
     },
     {
       "name": "icon as a ≤64-char token passes; color 6-hex passes; empty name invalid",
@@ -38,7 +38,7 @@
       "name": "happy path: company derived from the computer row, primary recorded as a request",
       "fn": "authorizeWrite",
       "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "computer": "comp-9", "meta": { "name": "Todo", "primary": true, "trusted": true } } },
-      "expect": { "ok": true, "row": { "company": "acme", "slug": "todo", "computer": "comp-1", "visibility": "chat", "meta": { "name": "Todo" }, "requested_primary": true, "requested_visibility": null }, "dropped": ["trusted"], "invalid": [] }
+      "expect": { "ok": true, "row": { "company": "acme", "slug": "todo", "computer": "comp-1", "meta": { "name": "Todo" }, "requested_primary": true }, "dropped": ["trusted"], "invalid": [] }
     },
     {
       "name": "body company ≠ computer's company → 409 company-is-fixed",
@@ -52,12 +52,16 @@
       "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": { "instance_id": "i-1", "company": "beta", "slug": "todo", "computer": "comp-1" }, "body": { "slug": "todo" } },
       "expect": { "ok": false, "code": 409, "error": "company-is-fixed", "company": "beta" }
     },
-    {
-      "name": "reserved company id go refused",
-      "fn": "authorizeWrite",
-      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "go" }, "existingRow": null, "body": { "slug": "todo" } },
-      "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "go" }
-    },
+    { "name": "reserved company id api refused (§2)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "api" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "api" } },
+    { "name": "reserved company id assets refused (§2)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "assets" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "assets" } },
+    { "name": "reserved company id modules refused (§2, B6 surprise 7)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "modules" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "modules" } },
+    { "name": "reserved company id global refused (§2)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "global" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "global" } },
+    { "name": "reserved company id atelier refused (§2)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "atelier" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "atelier" } },
+    { "name": "reserved company id portal refused (§2)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "portal" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "portal" } },
+    { "name": "reserved company id apps refused (§2)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "apps" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "apps" } },
+    { "name": "reserved company id www refused (§2)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "www" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "www" } },
+    { "name": "reserved company id go refused (§2, the portal's /go route)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "go" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "go" } },
+    { "name": "shell is NOT a reserved company id (it is a reserved events topic, not in §2's list)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "shell" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": true, "row": { "company": "shell", "slug": "todo", "computer": "comp-1", "meta": {}, "requested_primary": null }, "dropped": [], "invalid": [] } },
     {
       "name": "reserved p- prefix refused (personal spaces are minted by the spine)",
       "fn": "authorizeWrite",
@@ -71,16 +75,22 @@
       "expect": { "ok": false, "code": 400, "error": "bad-slug" }
     },
     {
-      "name": "visibility everyone refused",
+      "name": "slug with a trailing dash refused (§2: no leading/trailing -)",
       "fn": "authorizeWrite",
-      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "visibility": "everyone" } },
-      "expect": { "ok": false, "code": 400, "error": "bad-visibility" }
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo-" } },
+      "expect": { "ok": false, "code": 400, "error": "bad-slug" }
     },
     {
-      "name": "OR20: visibility company is a valid wire value but refused in v1 with the §12 pointer",
+      "name": "OR20: a visibility field in the body is not on the v1 wire — 400 unknown-field, never a promotion verdict",
       "fn": "authorizeWrite",
       "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "visibility": "company" } },
-      "expect": { "ok": false, "code": 403, "error": "no-promotion-in-v1", "see": "PLAN §12 — company-wide apps arrive with the dyno deploy target" }
+      "expect": { "ok": false, "code": 400, "error": "unknown-field", "field": "visibility" }
+    },
+    {
+      "name": "any other unknown body key is 400 unknown-field (primary belongs in meta, where it becomes a request)",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "primary": true } },
+      "expect": { "ok": false, "code": 400, "error": "unknown-field", "field": "primary" }
     },
     {
       "name": "no token → 401",
