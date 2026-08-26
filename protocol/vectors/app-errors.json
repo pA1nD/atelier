@@ -1,0 +1,1406 @@
+{
+  "module": "protocol/app-errors.js",
+  "source": "PLAN §0 OR19 + §4.3 \"App errors reach the agent, always\"",
+  "constants": {
+    "FOLD_WINDOW_MS": 600000,
+    "HOURLY_CAP": 6,
+    "HOUR_MS": 3600000,
+    "MESSAGE_HEAD_CHARS": 80,
+    "MAX_AGENT_TEXT": 2000
+  },
+  "note": "Coalescing cases: start from emptyState(); for each entry in `events` (ordered by `at`, ms after now0) call coalesce(state, ev, now0 + at) — or flush(state, now0 + at) when the entry is `{at, flush:true}` — and compare with the same-index `expect`: delivered (deliver !== null), reason (the returned reason), summary (deliver.summary), records (deliver.records.length), instance (deliver.instance), count / newCount (when delivered: the last delivered record; otherwise the open record for ev.fingerprint). Other cases: fn ∈ fingerprint | fromFrontendReport(input, now) | formatForAgent(delivery, opts) with `contains` substrings and `maxLength`.",
+  "cases": [
+    {
+      "name": "three same-fingerprint build errors in 2 min → one delivery (count 1), the rest fold (record count 3)",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 60000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000060000,
+            "lastAt": 1700000060000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 120000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000120000,
+            "lastAt": 1700000120000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 60000,
+          "delivered": false,
+          "count": 2,
+          "reason": "folded"
+        },
+        {
+          "at": 120000,
+          "delivered": false,
+          "count": 3,
+          "reason": "folded"
+        }
+      ]
+    },
+    {
+      "name": "a fourth at +11 min (past the 10-min fold window) → a new delivery carrying count 4",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 60000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000060000,
+            "lastAt": 1700000060000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 120000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000120000,
+            "lastAt": 1700000120000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 660000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000660000,
+            "lastAt": 1700000660000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 60000,
+          "delivered": false,
+          "count": 2
+        },
+        {
+          "at": 120000,
+          "delivered": false,
+          "count": 3
+        },
+        {
+          "at": 660000,
+          "delivered": true,
+          "count": 4,
+          "newCount": 3
+        }
+      ]
+    },
+    {
+      "name": "the fold window counts from the last DELIVERY, not the last event: 0, 9, 18 min → two deliveries",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 540000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000540000,
+            "lastAt": 1700000540000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 1080000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700001080000,
+            "lastAt": 1700001080000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 540000,
+          "delivered": false,
+          "count": 2,
+          "reason": "folded"
+        },
+        {
+          "at": 1080000,
+          "delivered": true,
+          "count": 3
+        }
+      ]
+    },
+    {
+      "name": "eight distinct fingerprints in 5 min → six deliveries, two capped, one \"+2 more\" when the hour reopens",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:10|error 0",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 0",
+            "file": "backend.js",
+            "line": 10,
+            "col": 1
+          }
+        },
+        {
+          "at": 40000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:11|error 1",
+            "count": 1,
+            "firstAt": 1700000040000,
+            "lastAt": 1700000040000,
+            "message": "error 1",
+            "file": "backend.js",
+            "line": 11,
+            "col": 1
+          }
+        },
+        {
+          "at": 80000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:12|error 2",
+            "count": 1,
+            "firstAt": 1700000080000,
+            "lastAt": 1700000080000,
+            "message": "error 2",
+            "file": "backend.js",
+            "line": 12,
+            "col": 1
+          }
+        },
+        {
+          "at": 120000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:13|error 3",
+            "count": 1,
+            "firstAt": 1700000120000,
+            "lastAt": 1700000120000,
+            "message": "error 3",
+            "file": "backend.js",
+            "line": 13,
+            "col": 1
+          }
+        },
+        {
+          "at": 160000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:14|error 4",
+            "count": 1,
+            "firstAt": 1700000160000,
+            "lastAt": 1700000160000,
+            "message": "error 4",
+            "file": "backend.js",
+            "line": 14,
+            "col": 1
+          }
+        },
+        {
+          "at": 200000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:15|error 5",
+            "count": 1,
+            "firstAt": 1700000200000,
+            "lastAt": 1700000200000,
+            "message": "error 5",
+            "file": "backend.js",
+            "line": 15,
+            "col": 1
+          }
+        },
+        {
+          "at": 240000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000240000,
+            "lastAt": 1700000240000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 280000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:17|error 7",
+            "count": 1,
+            "firstAt": 1700000280000,
+            "lastAt": 1700000280000,
+            "message": "error 7",
+            "file": "backend.js",
+            "line": 17,
+            "col": 1
+          }
+        },
+        {
+          "at": 1800000,
+          "flush": true
+        },
+        {
+          "at": 3600000,
+          "flush": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 40000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 80000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 120000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 160000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 200000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 240000,
+          "delivered": false,
+          "reason": "capped"
+        },
+        {
+          "at": 280000,
+          "delivered": false,
+          "reason": "capped"
+        },
+        {
+          "at": 1800000,
+          "delivered": false
+        },
+        {
+          "at": 3600000,
+          "delivered": true,
+          "summary": "+2 more",
+          "records": 2
+        }
+      ]
+    },
+    {
+      "name": "a capped fingerprint seen again folds into its pending record; the summary carries the count",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:10|error 0",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 0",
+            "file": "backend.js",
+            "line": 10,
+            "col": 1
+          }
+        },
+        {
+          "at": 10000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:11|error 1",
+            "count": 1,
+            "firstAt": 1700000010000,
+            "lastAt": 1700000010000,
+            "message": "error 1",
+            "file": "backend.js",
+            "line": 11,
+            "col": 1
+          }
+        },
+        {
+          "at": 20000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:12|error 2",
+            "count": 1,
+            "firstAt": 1700000020000,
+            "lastAt": 1700000020000,
+            "message": "error 2",
+            "file": "backend.js",
+            "line": 12,
+            "col": 1
+          }
+        },
+        {
+          "at": 30000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:13|error 3",
+            "count": 1,
+            "firstAt": 1700000030000,
+            "lastAt": 1700000030000,
+            "message": "error 3",
+            "file": "backend.js",
+            "line": 13,
+            "col": 1
+          }
+        },
+        {
+          "at": 40000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:14|error 4",
+            "count": 1,
+            "firstAt": 1700000040000,
+            "lastAt": 1700000040000,
+            "message": "error 4",
+            "file": "backend.js",
+            "line": 14,
+            "col": 1
+          }
+        },
+        {
+          "at": 50000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:15|error 5",
+            "count": 1,
+            "firstAt": 1700000050000,
+            "lastAt": 1700000050000,
+            "message": "error 5",
+            "file": "backend.js",
+            "line": 15,
+            "col": 1
+          }
+        },
+        {
+          "at": 60000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000060000,
+            "lastAt": 1700000060000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 80000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000080000,
+            "lastAt": 1700000080000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 3660000,
+          "flush": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 10000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 20000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 30000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 40000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 50000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 60000,
+          "delivered": false,
+          "reason": "capped",
+          "count": 1
+        },
+        {
+          "at": 80000,
+          "delivered": false,
+          "reason": "folded-pending",
+          "count": 2
+        },
+        {
+          "at": 3660000,
+          "delivered": true,
+          "summary": "+1 more",
+          "records": 1,
+          "count": 2
+        }
+      ]
+    },
+    {
+      "name": "a new event arriving as the hour reopens rides along in the \"+N more\" delivery (merged), never waits",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:10|error 0",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 0",
+            "file": "backend.js",
+            "line": 10,
+            "col": 1
+          }
+        },
+        {
+          "at": 10000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:11|error 1",
+            "count": 1,
+            "firstAt": 1700000010000,
+            "lastAt": 1700000010000,
+            "message": "error 1",
+            "file": "backend.js",
+            "line": 11,
+            "col": 1
+          }
+        },
+        {
+          "at": 20000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:12|error 2",
+            "count": 1,
+            "firstAt": 1700000020000,
+            "lastAt": 1700000020000,
+            "message": "error 2",
+            "file": "backend.js",
+            "line": 12,
+            "col": 1
+          }
+        },
+        {
+          "at": 30000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:13|error 3",
+            "count": 1,
+            "firstAt": 1700000030000,
+            "lastAt": 1700000030000,
+            "message": "error 3",
+            "file": "backend.js",
+            "line": 13,
+            "col": 1
+          }
+        },
+        {
+          "at": 40000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:14|error 4",
+            "count": 1,
+            "firstAt": 1700000040000,
+            "lastAt": 1700000040000,
+            "message": "error 4",
+            "file": "backend.js",
+            "line": 14,
+            "col": 1
+          }
+        },
+        {
+          "at": 50000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:15|error 5",
+            "count": 1,
+            "firstAt": 1700000050000,
+            "lastAt": 1700000050000,
+            "message": "error 5",
+            "file": "backend.js",
+            "line": 15,
+            "col": 1
+          }
+        },
+        {
+          "at": 60000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000060000,
+            "lastAt": 1700000060000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 3660000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:99|late error",
+            "count": 1,
+            "firstAt": 1700003660000,
+            "lastAt": 1700003660000,
+            "message": "late error",
+            "file": "backend.js",
+            "line": 99,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 10000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 20000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 30000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 40000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 50000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 60000,
+          "delivered": false,
+          "reason": "capped"
+        },
+        {
+          "at": 3660000,
+          "delivered": true,
+          "summary": "+2 more",
+          "records": 2,
+          "reason": "merged"
+        }
+      ]
+    },
+    {
+      "name": "rev 3 after rev 4 → dropped (stale-rev): a fleet ship restarting every host is not news",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 5000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 3,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000005000,
+            "lastAt": 1700000005000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 5000,
+          "delivered": false,
+          "reason": "stale-rev"
+        }
+      ]
+    },
+    {
+      "name": "a newer rev resets the fold and the cap: the same file:line failing at rev 5 lands at once",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 30000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 5,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000030000,
+            "lastAt": 1700000030000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 40000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 5,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000040000,
+            "lastAt": 1700000040000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 30000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 40000,
+          "delivered": false,
+          "count": 2,
+          "reason": "folded"
+        }
+      ]
+    },
+    {
+      "name": "the cap is per instance: a second app keeps its own six",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:10|error 0",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 0",
+            "file": "backend.js",
+            "line": 10,
+            "col": 1
+          }
+        },
+        {
+          "at": 1000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:11|error 1",
+            "count": 1,
+            "firstAt": 1700000001000,
+            "lastAt": 1700000001000,
+            "message": "error 1",
+            "file": "backend.js",
+            "line": 11,
+            "col": 1
+          }
+        },
+        {
+          "at": 2000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:12|error 2",
+            "count": 1,
+            "firstAt": 1700000002000,
+            "lastAt": 1700000002000,
+            "message": "error 2",
+            "file": "backend.js",
+            "line": 12,
+            "col": 1
+          }
+        },
+        {
+          "at": 3000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:13|error 3",
+            "count": 1,
+            "firstAt": 1700000003000,
+            "lastAt": 1700000003000,
+            "message": "error 3",
+            "file": "backend.js",
+            "line": 13,
+            "col": 1
+          }
+        },
+        {
+          "at": 4000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:14|error 4",
+            "count": 1,
+            "firstAt": 1700000004000,
+            "lastAt": 1700000004000,
+            "message": "error 4",
+            "file": "backend.js",
+            "line": 14,
+            "col": 1
+          }
+        },
+        {
+          "at": 5000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:15|error 5",
+            "count": 1,
+            "firstAt": 1700000005000,
+            "lastAt": 1700000005000,
+            "message": "error 5",
+            "file": "backend.js",
+            "line": 15,
+            "col": 1
+          }
+        },
+        {
+          "at": 6000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000006000,
+            "lastAt": 1700000006000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1
+          }
+        },
+        {
+          "at": 10000,
+          "ev": {
+            "instance": "i-wiki",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:1|other app",
+            "count": 1,
+            "firstAt": 1700000010000,
+            "lastAt": 1700000010000,
+            "message": "other app",
+            "file": "backend.js",
+            "line": 1,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 1000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 2000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 3000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 4000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 5000,
+          "delivered": true,
+          "count": 1
+        },
+        {
+          "at": 6000,
+          "delivered": false,
+          "reason": "capped"
+        },
+        {
+          "at": 10000,
+          "delivered": true,
+          "count": 1,
+          "instance": "i-wiki"
+        }
+      ]
+    },
+    {
+      "name": "invalid events are refused with a schema reason and change nothing",
+      "now0": 1700000000000,
+      "events": [
+        {
+          "at": 0,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "panic",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 1000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000001000,
+            "lastAt": 1700000001000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1,
+            "person": "p1"
+          }
+        },
+        {
+          "at": 2000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 0,
+            "firstAt": 1700000002000,
+            "lastAt": 1700000002000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 3000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": -1,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000003000,
+            "lastAt": 1700000003000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        },
+        {
+          "at": 4000,
+          "ev": {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000004000,
+            "lastAt": 1700000004000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1
+          }
+        }
+      ],
+      "expect": [
+        {
+          "at": 0,
+          "delivered": false,
+          "reason": "schema:kind"
+        },
+        {
+          "at": 1000,
+          "delivered": false,
+          "reason": "schema:person"
+        },
+        {
+          "at": 2000,
+          "delivered": false,
+          "reason": "schema:count"
+        },
+        {
+          "at": 3000,
+          "delivered": false,
+          "reason": "schema:rev"
+        },
+        {
+          "at": 4000,
+          "delivered": true,
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "a frontend report normalises to kind frontend with the fingerprint from the url-less message head; no person data",
+      "fn": "fromFrontendReport",
+      "now": 1700000000000,
+      "input": {
+        "instance": "i-todo",
+        "rev": 4,
+        "url": "https://acme.portal.pa1nd.de/acme/todo/list?x=1",
+        "ua": "Mozilla/5.0 (iPhone)",
+        "message": "TypeError: Cannot read properties of undefined (reading 'map')\n  at List (todo.js:12:3)",
+        "stack": "TypeError: Cannot read properties of undefined\n    at List (https://acme.portal.pa1nd.de/modules/acme/todo/frontend.js:12:3)",
+        "person": "p1",
+        "ip": "1.2.3.4",
+        "cookie": "x"
+      },
+      "expect": {
+        "instance": "i-todo",
+        "rev": 4,
+        "kind": "frontend",
+        "fingerprint": "frontend|-:-|TypeError: Cannot read properties of undefined (reading 'map')",
+        "count": 1,
+        "firstAt": 1700000000000,
+        "lastAt": 1700000000000,
+        "message": "TypeError: Cannot read properties of undefined (reading 'map')\n  at List (todo.js:12:3)",
+        "sample": {
+          "url": "https://acme.portal.pa1nd.de/acme/todo/list?x=1",
+          "ua": "Mozilla/5.0 (iPhone)"
+        },
+        "stack": "TypeError: Cannot read properties of undefined\n    at List (https://acme.portal.pa1nd.de/modules/acme/todo/frontend.js:12:3)"
+      }
+    },
+    {
+      "name": "fingerprint: kind|file:line|message head (80 chars, first line)",
+      "fn": "fingerprint",
+      "input": {
+        "kind": "build",
+        "file": "frontend.jsx",
+        "line": 4,
+        "message": "Unexpected end of file\nsecond line ignored"
+      },
+      "expect": "build|frontend.jsx:4|Unexpected end of file"
+    },
+    {
+      "name": "fingerprint: missing file/line become -",
+      "fn": "fingerprint",
+      "input": {
+        "kind": "worker",
+        "message": "  RSS over 1024M  "
+      },
+      "expect": "worker|-:-|RSS over 1024M"
+    },
+    {
+      "name": "fingerprint: message head is cut at 80 chars",
+      "fn": "fingerprint",
+      "input": {
+        "kind": "http",
+        "file": "backend.js",
+        "line": 7,
+        "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "expect": "http|backend.js:7|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "name": "formatForAgent: a build error carries app, rev, file:line:col, the message and the build hint",
+      "fn": "formatForAgent",
+      "delivery": {
+        "instance": "i-todo",
+        "rev": 4,
+        "at": 1700000000000,
+        "records": [
+          {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|frontend.jsx:4|Unexpected end of file",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "Unexpected end of file",
+            "file": "frontend.jsx",
+            "line": 4,
+            "col": 1,
+            "newCount": 1
+          }
+        ]
+      },
+      "opts": {
+        "appName": "todo"
+      },
+      "contains": [
+        "app-error todo rev 4 build",
+        "frontend.jsx:4:1 Unexpected end of file",
+        "fix: fix frontend.jsx:4:1 and save"
+      ],
+      "maxLength": 2000
+    },
+    {
+      "name": "formatForAgent: an http error names the triggering request and the count",
+      "fn": "formatForAgent",
+      "delivery": {
+        "instance": "i-todo",
+        "rev": 4,
+        "at": 1700000000000,
+        "records": [
+          {
+            "kind": "http",
+            "fingerprint": "http|backend.js:7|boom",
+            "count": 3,
+            "newCount": 3,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000120000,
+            "message": "boom",
+            "file": "backend.js",
+            "line": 7,
+            "rev": 4,
+            "sample": {
+              "request": {
+                "method": "GET",
+                "path": "/api/acme/todo/items",
+                "status": 500
+              }
+            },
+            "stack": "Error: boom\n    at handler (backend.js:7:9)\n    at next (router.js:1:1)"
+          }
+        ]
+      },
+      "contains": [
+        "app-error i-todo rev 4 http ×3 (first 2023-11-14T22:13:20Z, last 2023-11-14T22:15:20Z)",
+        "backend.js:7 boom",
+        "request: GET /api/acme/todo/items → 500",
+        "stack: Error: boom | at handler (backend.js:7:9)"
+      ],
+      "maxLength": 2000
+    },
+    {
+      "name": "formatForAgent: a \"+N more\" summary lists one line per record and stays under 2000 chars",
+      "fn": "formatForAgent",
+      "delivery": {
+        "instance": "i-todo",
+        "rev": 4,
+        "at": 1700000000000,
+        "summary": "+2 more",
+        "records": [
+          {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:16|error 6",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 6",
+            "file": "backend.js",
+            "line": 16,
+            "col": 1,
+            "newCount": 1
+          },
+          {
+            "instance": "i-todo",
+            "rev": 4,
+            "kind": "build",
+            "fingerprint": "build|backend.js:17|error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7err",
+            "count": 1,
+            "firstAt": 1700000000000,
+            "lastAt": 1700000000000,
+            "message": "error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7error 7",
+            "file": "backend.js",
+            "line": 17,
+            "col": 1,
+            "newCount": 1
+          }
+        ]
+      },
+      "contains": [
+        "app-error i-todo rev 4: +2 more (folded — 6/h cap",
+        "- backend.js:16:1 error 6",
+        "- backend.js:17:1 error 7"
+      ],
+      "maxLength": 2000
+    }
+  ]
+}
