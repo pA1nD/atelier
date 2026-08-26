@@ -1,0 +1,105 @@
+{
+  "module": "protocol/registry.js",
+  "spike": "D1",
+  "note": "fn ∈ allowMeta | authorizeWrite | reclaimRule; `input` is the single argument; `expect` is deep-compared. reclaimRule times are ms; H = 3 600 000.",
+  "cases": [
+    {
+      "name": "D1 test 6: trusted/eager/isChrome/chrome/hidden stripped; primary lands in requested, not meta",
+      "fn": "allowMeta",
+      "input": { "name": "Todo", "icon": "✅", "group": "Work", "primary": true, "color": "#0af", "trusted": true, "eager": true, "isChrome": true, "chrome": "x", "hidden": false },
+      "expect": { "meta": { "name": "Todo", "icon": "✅", "group": "Work", "color": "#0af" }, "requested": { "primary": true }, "dropped": ["trusted", "eager", "isChrome", "chrome", "hidden"], "invalid": [] }
+    },
+    {
+      "name": "visibility in module.json is a request, never meta (OR12)",
+      "fn": "allowMeta",
+      "input": { "name": "Wiki", "visibility": "company" },
+      "expect": { "meta": { "name": "Wiki" }, "requested": { "visibility": "company" }, "dropped": [], "invalid": [] }
+    },
+    {
+      "name": "type/length limits: name > 64, group > 32, icon 9 codepoints, color not hex, primary not boolean, visibility unknown → invalid",
+      "fn": "allowMeta",
+      "input": { "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "group": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "icon": "🎉🎉🎉🎉🎉🎉🎉🎉🎉", "color": "red", "primary": "yes", "visibility": "everyone" },
+      "expect": { "meta": {}, "requested": {}, "dropped": [], "invalid": ["name", "group", "icon", "color", "primary", "visibility"] }
+    },
+    {
+      "name": "icon as a ≤64-char token passes; color 6-hex passes; empty name invalid",
+      "fn": "allowMeta",
+      "input": { "name": "  ", "icon": "lucide:calendar-days", "color": "#00AAFF" },
+      "expect": { "meta": { "icon": "lucide:calendar-days", "color": "#00AAFF" }, "requested": {}, "dropped": [], "invalid": ["name"] }
+    },
+    { "name": "allowMeta on a non-object is empty", "fn": "allowMeta", "input": "nope", "expect": { "meta": {}, "requested": {}, "dropped": [], "invalid": [] } },
+    {
+      "name": "D1 test 5: computer-1's token on computer-2's row → 403 not-your-row; body.computer ignored",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": { "instance_id": "i-1", "company": "acme", "slug": "todo", "computer": "comp-2" }, "body": { "slug": "todo", "computer": "comp-2" } },
+      "expect": { "ok": false, "code": 403, "error": "not-your-row", "computer": "comp-2" }
+    },
+    {
+      "name": "happy path: company derived from the computer row, primary recorded as a request",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "computer": "comp-9", "meta": { "name": "Todo", "primary": true, "trusted": true } } },
+      "expect": { "ok": true, "row": { "company": "acme", "slug": "todo", "computer": "comp-1", "visibility": "chat", "meta": { "name": "Todo" }, "requested_primary": true, "requested_visibility": null }, "dropped": ["trusted"], "invalid": [] }
+    },
+    {
+      "name": "body company ≠ computer's company → 409 company-is-fixed",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "company": "beta" } },
+      "expect": { "ok": false, "code": 409, "error": "company-is-fixed", "company": "acme" }
+    },
+    {
+      "name": "existing row in another company (moved computer) → 409 company-is-fixed",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": { "instance_id": "i-1", "company": "beta", "slug": "todo", "computer": "comp-1" }, "body": { "slug": "todo" } },
+      "expect": { "ok": false, "code": 409, "error": "company-is-fixed", "company": "beta" }
+    },
+    {
+      "name": "reserved company id go refused",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "go" }, "existingRow": null, "body": { "slug": "todo" } },
+      "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "go" }
+    },
+    {
+      "name": "reserved p- prefix refused (personal spaces are minted by the spine)",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "p-ada" }, "existingRow": null, "body": { "slug": "todo" } },
+      "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "p-ada" }
+    },
+    {
+      "name": "slug Todo refused (SLUG_RE)",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "Todo" } },
+      "expect": { "ok": false, "code": 400, "error": "bad-slug" }
+    },
+    {
+      "name": "visibility everyone refused",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "visibility": "everyone" } },
+      "expect": { "ok": false, "code": 400, "error": "bad-visibility" }
+    },
+    {
+      "name": "OR20: visibility company is a valid wire value but refused in v1 with the §12 pointer",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "acme" }, "existingRow": null, "body": { "slug": "todo", "visibility": "company" } },
+      "expect": { "ok": false, "code": 403, "error": "no-promotion-in-v1", "see": "PLAN §12 — company-wide apps arrive with the dyno deploy target" }
+    },
+    {
+      "name": "no token → 401",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": null, "computerRow": null, "existingRow": null, "body": { "slug": "todo" } },
+      "expect": { "ok": false, "code": 401, "error": "no-token" }
+    },
+    {
+      "name": "token resolves to a computer the row lookup does not match → 401",
+      "fn": "authorizeWrite",
+      "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-2", "company": "acme" }, "existingRow": null, "body": { "slug": "todo" } },
+      "expect": { "ok": false, "code": 401, "error": "unknown-computer" }
+    },
+    { "name": "reclaim: no row → insert", "fn": "reclaimRule", "input": { "existing": null, "callerComputer": "comp-1", "now": 100000000000 }, "expect": "insert" },
+    { "name": "reclaim: live row, same computer, no .instance → adopt (D1 test 9)", "fn": "reclaimRule", "input": { "existing": { "computer": "comp-1", "tombstone_at": null }, "callerComputer": "comp-1", "now": 100000000000 }, "expect": "adopt" },
+    { "name": "reclaim: tombstoned row, same computer → revive (D1 test 10)", "fn": "reclaimRule", "input": { "existing": { "computer": "comp-1", "tombstone_at": 99999000000 }, "callerComputer": "comp-1", "now": 100000000000 }, "expect": "revive" },
+    { "name": "reclaim: live row, other computer → refuse-claimed (D1 test 3)", "fn": "reclaimRule", "input": { "existing": { "computer": "comp-2", "tombstone_at": null }, "callerComputer": "comp-1", "now": 100000000000 }, "expect": "refuse-claimed" },
+    { "name": "reclaim: tombstoned 23 h ago, other computer → refuse-tombstoned", "fn": "reclaimRule", "input": { "existing": { "computer": "comp-2", "tombstone_at": 100000000000 }, "callerComputer": "comp-1", "now": 100082800000 }, "expect": "refuse-tombstoned" },
+    { "name": "reclaim: tombstoned 25 h ago, other computer → insert (tombstone expired)", "fn": "reclaimRule", "input": { "existing": { "computer": "comp-2", "tombstone_at": 100000000000 }, "callerComputer": "comp-1", "now": 100090000000 }, "expect": "insert" },
+    { "name": "reclaim: exactly 24 h is still reserved", "fn": "reclaimRule", "input": { "existing": { "computer": "comp-2", "tombstone_at": 100000000000 }, "callerComputer": "comp-1", "now": 100086399999 }, "expect": "refuse-tombstoned" }
+  ]
+}
