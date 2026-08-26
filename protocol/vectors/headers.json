@@ -1,0 +1,115 @@
+{
+  "module": "protocol/headers.js",
+  "spike": "C3 + B6",
+  "note": "fn ∈ request|response|framing. request: filterRequestHeaders(input) → expect {headers, stripped, dropped}. response: filterResponseHeaders(input, opts) → expect {headers, stripped}. framing: rejectFraming(input) → expect boolean. Header names compare lowercase; the shell sets `host` itself from its own dial — it is on no list.",
+  "cases": [
+    {
+      "name": "C3 forged set: only accept and user-agent reach the worker",
+      "fn": "request",
+      "input": { "Accept": "*/*", "User-Agent": "curl/8", "x-atelier-identity": "forged", "x-atelier-foo": "1", "Authorization": "Bearer x", "X-Forwarded-For": "1.2.3.4", "X-Real-IP": "1.2.3.4", "Cookie": "sid=1" },
+      "expect": { "headers": { "accept": "*/*", "user-agent": "curl/8" }, "stripped": ["x-atelier-identity", "x-atelier-foo", "authorization", "x-forwarded-for", "cookie"], "dropped": ["x-real-ip"] }
+    },
+    {
+      "name": "B6 media set: range, if-range, last-event-id pass",
+      "fn": "request",
+      "input": { "range": "bytes=0-99", "if-range": "\"etag1\"", "last-event-id": "42", "accept-encoding": "gzip", "accept-language": "de", "if-none-match": "\"e\"", "if-modified-since": "Tue, 01 Jan 2030 00:00:00 GMT", "content-type": "application/json", "content-length": "12" },
+      "expect": { "headers": { "range": "bytes=0-99", "if-range": "\"etag1\"", "last-event-id": "42", "accept-encoding": "gzip", "accept-language": "de", "if-none-match": "\"e\"", "if-modified-since": "Tue, 01 Jan 2030 00:00:00 GMT", "content-type": "application/json", "content-length": "12" }, "stripped": [], "dropped": [] }
+    },
+    {
+      "name": "CORS preflight set passes inbound (origin + access-control-request-*)",
+      "fn": "request",
+      "input": { "origin": "https://acme.portal.pa1nd.de", "access-control-request-method": "PUT", "access-control-request-headers": "content-type" },
+      "expect": { "headers": { "origin": "https://acme.portal.pa1nd.de", "access-control-request-method": "PUT", "access-control-request-headers": "content-type" }, "stripped": [], "dropped": [] }
+    },
+    {
+      "name": "hop-by-hop inbound is stripped; host is not a list item (dropped)",
+      "fn": "request",
+      "input": { "connection": "keep-alive", "keep-alive": "timeout=5", "transfer-encoding": "chunked", "upgrade": "websocket", "te": "trailers", "trailer": "x", "proxy-authorization": "y", "proxy-connection": "z", "host": "acme.portal.pa1nd.de", "accept": "text/html" },
+      "expect": { "headers": { "accept": "text/html" }, "stripped": ["connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailer", "proxy-authorization", "proxy-connection"], "dropped": ["host"] }
+    },
+    {
+      "name": "response: allow list passes, unknown response headers are stripped",
+      "fn": "response",
+      "input": { "Content-Type": "text/html", "content-length": "5", "content-encoding": "gzip", "content-disposition": "attachment", "ETag": "\"abc\"", "cache-control": "no-cache", "content-range": "bytes 0-4/5", "accept-ranges": "bytes", "last-modified": "Tue, 01 Jan 2030 00:00:00 GMT", "vary": "accept", "retry-after": "3", "x-powered-by": "express", "server": "node" },
+      "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": { "content-type": "text/html", "content-length": "5", "content-encoding": "gzip", "content-disposition": "attachment", "etag": "\"abc\"", "cache-control": "no-cache", "content-range": "bytes 0-4/5", "accept-ranges": "bytes", "last-modified": "Tue, 01 Jan 2030 00:00:00 GMT", "vary": "accept", "retry-after": "3" }, "stripped": ["x-powered-by", "server"] }
+    },
+    {
+      "name": "response: set-cookie and www-authenticate never pass, on either path",
+      "fn": "response",
+      "input": { "set-cookie": ["a=1", "b=2"], "www-authenticate": "Basic realm=app", "content-type": "text/plain" },
+      "opts": { "cookieCredentialed": false },
+      "expect": { "headers": { "content-type": "text/plain" }, "stripped": ["set-cookie", "www-authenticate"] }
+    },
+    {
+      "name": "response: ACAO evil + ACAC true from a host on a cookie route is dropped",
+      "fn": "response",
+      "input": { "access-control-allow-origin": "https://evil", "access-control-allow-credentials": "true", "content-type": "application/json" },
+      "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": { "content-type": "application/json" }, "stripped": ["access-control-allow-origin", "access-control-allow-credentials"] }
+    },
+    {
+      "name": "response: ACAO equal to the company origin passes on a cookie route; ACAC and the rest are cut",
+      "fn": "response",
+      "input": { "access-control-allow-origin": "https://acme.portal.pa1nd.de", "access-control-allow-credentials": "true", "access-control-allow-methods": "GET, PUT", "access-control-expose-headers": "etag" },
+      "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": { "access-control-allow-origin": "https://acme.portal.pa1nd.de" }, "stripped": ["access-control-allow-credentials", "access-control-allow-methods", "access-control-expose-headers"] }
+    },
+    {
+      "name": "response: CORS passes whole on the assertion path (OR14)",
+      "fn": "response",
+      "input": { "access-control-allow-origin": "*", "access-control-allow-credentials": "true", "access-control-allow-methods": "GET, PUT", "access-control-max-age": "600" },
+      "opts": { "cookieCredentialed": false },
+      "expect": { "headers": { "access-control-allow-origin": "*", "access-control-allow-credentials": "true", "access-control-allow-methods": "GET, PUT", "access-control-max-age": "600" }, "stripped": [] }
+    },
+    {
+      "name": "response: hop-by-hop stripped outbound",
+      "fn": "response",
+      "input": { "connection": "close", "transfer-encoding": "chunked", "keep-alive": "timeout=5", "content-type": "text/plain" },
+      "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": { "content-type": "text/plain" }, "stripped": ["connection", "transfer-encoding", "keep-alive"] }
+    },
+    {
+      "name": "location: root-absolute passes (the shell rewrites it onto the mount)",
+      "fn": "response",
+      "input": { "location": "/abc123/" },
+      "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": { "location": "/abc123/" }, "stripped": [] }
+    },
+    {
+      "name": "location: same-origin absolute passes",
+      "fn": "response",
+      "input": { "location": "https://acme.portal.pa1nd.de/acme/todo/" },
+      "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": { "location": "https://acme.portal.pa1nd.de/acme/todo/" }, "stripped": [] }
+    },
+    {
+      "name": "location: foreign absolute, protocol-relative and relative are stripped",
+      "fn": "response",
+      "input": { "location": "https://evil.example/" },
+      "opts": { "cookieCredentialed": true, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": {}, "stripped": ["location"] }
+    },
+    {
+      "name": "location: protocol-relative //evil is stripped",
+      "fn": "response",
+      "input": { "location": "//evil.example/x" },
+      "opts": { "cookieCredentialed": false, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": {}, "stripped": ["location"] }
+    },
+    {
+      "name": "location: relative path is stripped (the shell cannot resolve it safely)",
+      "fn": "response",
+      "input": { "location": "next/" },
+      "opts": { "cookieCredentialed": false, "companyOrigin": "https://acme.portal.pa1nd.de" },
+      "expect": { "headers": {}, "stripped": ["location"] }
+    },
+    { "name": "framing: content-length alone is fine", "fn": "framing", "input": { "content-length": "10" }, "expect": false },
+    { "name": "framing: transfer-encoding alone is fine", "fn": "framing", "input": { "transfer-encoding": "chunked" }, "expect": false },
+    { "name": "framing: both content-length and transfer-encoding rejected", "fn": "framing", "input": { "Content-Length": "10", "Transfer-Encoding": "chunked" }, "expect": true },
+    { "name": "framing: content-length list rejected", "fn": "framing", "input": { "content-length": "10, 10" }, "expect": true },
+    { "name": "framing: content-length duplicate values rejected", "fn": "framing", "input": { "content-length": ["10", "11"] }, "expect": true },
+    { "name": "framing: content-length not an integer rejected", "fn": "framing", "input": { "content-length": "abc" }, "expect": true },
+    { "name": "framing: negative content-length rejected", "fn": "framing", "input": { "content-length": "-1" }, "expect": true }
+  ]
+}
