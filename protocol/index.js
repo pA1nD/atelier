@@ -2,3 +2,11 @@
 // no http, no sqlite, no ws. Every module has a vector file under ./vectors that a second
 // implementation (the spine, the host) runs against — see README.md for the contract.
 export const PROTOCOL = 'atelier/2'
+
+export * from './canonical.js'
+export * from './identity.js'
+export * from './headers.js'
+export * from './events.js'
+export * from './registry.js'
+export * from './membership.js'
+export * from './app-errors.js'
