@@ -1,0 +1,680 @@
+{
+  "module": "protocol/identity.js",
+  "spike": "C3",
+  "header": "x-atelier-identity",
+  "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "publicKey": "302a300506032b657003210003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "foreignSeed": "f0e1d2c3b4a5968778695a4b3c2d1e0f0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "foreignPublicKey": "302a300506032b657003210029ac7347ac0fbc79b9c5eee0c2a5fd63e573b62847e0f28482e0e47a950b54e8",
+  "constants": {
+    "MINT_TTL_S": 30,
+    "MAX_EXP_S": 60,
+    "SKEW_S": 5,
+    "MAX_HEADER_BYTES": 4096
+  },
+  "note": "Each case: verify(publicKey, header, verify) → expect. `before` lists headers verified first on the same nonce cache. `mintedWith` + `claims` let a second implementation re-mint and compare `header` byte for byte.",
+  "canonicalSample": {
+    "input": {
+      "b": 1,
+      "a": {
+        "d": [
+          1,
+          {
+            "z": 0,
+            "y": 1
+          }
+        ],
+        "c": "x"
+      }
+    },
+    "output": "{\"a\":{\"c\":\"x\",\"d\":[1,{\"y\":1,\"z\":0}]},\"b\":1}"
+  },
+  "cases": [
+    {
+      "name": "valid",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.BZ9kFyCmNWxxvMRl-uijdNRkg-30a8mO1-y_7jOpR8izp186AkDsXN_f1jgoFnPUQ5SYrHYWorejLXkPashcBA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": true
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "AQEBAQEBAQEBAQEBAQEBAQ"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "replay: same header verified twice on one nonce cache",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.BZ9kFyCmNWxxvMRl-uijdNRkg-30a8mO1-y_7jOpR8izp186AkDsXN_f1jgoFnPUQ5SYrHYWorejLXkPashcBA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "replay"
+      },
+      "before": [
+        "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.BZ9kFyCmNWxxvMRl-uijdNRkg-30a8mO1-y_7jOpR8izp186AkDsXN_f1jgoFnPUQ5SYrHYWorejLXkPashcBA"
+      ]
+    },
+    {
+      "name": "aged 61 s: minted 61 s ago with ttl 30",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTk2OSwiaWF0IjoxNjk5OTk5OTM5LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkF3TURBd01EQXdNREF3TURBd01EQXciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.Baz0nWjMofA0wGxvxQvk31NkNX4ThDB08XWmqUEgt0LDPsl_7DhFGynZD_tBooA5MDpyN-of00tYh49H3-mfAQ",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "expired"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1699999939,
+        "ttl": 30,
+        "nonce": "AwMDAwMDAwMDAwMDAwMDAw"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "exp +120: minted with ttl 120",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDEyMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkJBUUVCQVFFQkFRRUJBUUVCQVFFQkEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.rbuLKFLhsHeN1GHQKlcAdLF6N-G-DabjMy6rOhYK5LZHjZ74KmbneQWRxNf5kBEtet6159G778f7xvvZ64MlDQ",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "exp-too-far"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 120,
+        "nonce": "BAQEBAQEBAQEBAQEBAQEBA"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "backdated: exp 100 s in the past",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTkwMCwiaWF0IjoxNjk5OTk5ODcwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkJRVUZCUVVGQlFVRkJRVUZCUVVGQlEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.Wdo8jAD4AuChxKFwWt2hg7fEJJdvLkwJNJIyILZIdinIO-xEdIiTRISNVf8lBFBsjRIOvSUMggwvNU5VlpPUBw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "expired"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1699999870,
+        "ttl": 30,
+        "nonce": "BQUFBQUFBQUFBQUFBQUFBQ"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "wrong aud",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMiIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkJnWUdCZ1lHQmdZR0JnWUdCZ1lHQmciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.H9BEZRQksKty361II-_lzjJwtm9NHEWckeBl4WtOMI_YGsEGcnjFuK0vriWnERnyjgpHY9_2reh6F6L62-gfDg",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "wrong-aud"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "BgYGBgYGBgYGBgYGBgYGBg"
+      },
+      "claims": {
+        "aud": "h-comp-2",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "wrong app: an i-wiki assertion on the todo path",
+      "header": "eyJhcHAiOiJpLXdpa2kiLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQnciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.3xxrlJgdhpfjom0t_wmkTILWiQ6P7FzjzC6QyD_qxVYPYE-MXSXQluRJ3SC3CotQBU4BUqFN-WzY8tOo7LOfCg",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "wrong-app"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBw"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-wiki",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "method mismatch: POST assertion on a GET",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJQT1NUIiwibm9uY2UiOiJDQWdJQ0FnSUNBZ0lDQWdJQ0FnSUNBIiwicGF0aCI6Ii9hcGkvYWNtZS90b2RvL2l0ZW1zP3g9MSIsInBlcnNvbiI6eyJpZCI6InAxIiwibmFtZSI6IkFkYSJ9LCJ0eXAiOiJpZCJ9.gZLHtZKLlHObQUEcNd0G6x6PCFCyVg4_qtktXHqjZyDZNShAKc1tZlfgj2J5ZlM-BL4_bWJgQFGecEmMn_jZCw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "method-path-mismatch"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "CAgICAgICAgICAgICAgICA"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "POST",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "path mismatch: query differs",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0yIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.t3vnTeE8megxisMj3DQmSzEO9Ka8ZRpUAsFXMgDPrwlfhRGC0I6Wo9srKtp3RKZLTFlbYiTlYRJF2CZRp3TLBA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "method-path-mismatch"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "CQkJCQkJCQkJCQkJCQkJCQ"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=2",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "tampered payload: person.id edited after signing",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDIiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.BZ9kFyCmNWxxvMRl-uijdNRkg-30a8mO1-y_7jOpR8izp186AkDsXN_f1jgoFnPUQ5SYrHYWorejLXkPashcBA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "foreign key: signed by a keypair the host does not trust",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkN3c0xDd3NMQ3dzTEN3c0xDd3NMQ3ciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.X8l0OH54wsNAOKX49u1VzjomkVdaMa7D7AfJX9eBGZ6COtbvbVIUZ-j5ripUlCCKAw6KYHg4nJe8-iK_cMvWCA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      },
+      "mintedWith": {
+        "seed": "f0e1d2c3b4a5968778695a4b3c2d1e0f0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "CwsLCwsLCwsLCwsLCwsLCw"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "malformed: no dot",
+      "header": "not-an-assertion",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "malformed"
+      }
+    },
+    {
+      "name": "malformed: signature not 64 bytes",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.AQEBAQEBAQEBAQ",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "malformed"
+      }
+    },
+    {
+      "name": "missing: empty header",
+      "header": "",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "missing"
+      }
+    },
+    {
+      "name": "too-long: header over 4096 bytes",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.BZ9kFyCmNWxxvMRl-uijdNRkg-30a8mO1-y_7jOpR8izp186AkDsXN_f1jgoFnPUQ5SYrHYWorejLXkPashcBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "too-long"
+      }
+    },
+    {
+      "name": "non-canonical: same fields, keys unsorted, valid signature",
+      "header": "eyJ0eXAiOiJpZCIsInBlcnNvbiI6eyJpZCI6InAxIiwibmFtZSI6IkFkYSJ9LCJleHAiOjE3MDAwMDAwMzAsImlhdCI6MTcwMDAwMDAwMCwibm9uY2UiOiJFQkFRRUJBUUVCQVFFQkFRRUJBUUVBIiwicGF0aCI6Ii9hcGkvYWNtZS90b2RvL2l0ZW1zP3g9MSIsIm1ldGhvZCI6IkdFVCIsImFwcCI6ImktdG9kbyIsImF1ZCI6ImgtY29tcC0xIn0.YAUxn28BilG5O9U2TOVGHCix81DN843TkMOnZYW796QjDV0Eog9wcSoSiUwMoxc7sKrtPrw3SQ054mLANpgVCA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "non-canonical"
+      }
+    },
+    {
+      "name": "schema: unknown top-level key rejected",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiZXh0cmEiOjEsImlhdCI6MTcwMDAwMDAwMCwibWV0aG9kIjoiR0VUIiwibm9uY2UiOiJFaElTRWhJU0VoSVNFaElTRWhJU0VnIiwicGF0aCI6Ii9hcGkvYWNtZS90b2RvL2l0ZW1zP3g9MSIsInBlcnNvbiI6eyJpZCI6InAxIiwibmFtZSI6IkFkYSJ9LCJ0eXAiOiJpZCJ9.4nm896IiuEq93Z9K35EEMbGSugsvO-vv2bs5e-OheOtlGg1lehUDieS9JMXtsxJVIoLhlnw4KLdAlgn5ZsCBAw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "schema"
+      }
+    },
+    {
+      "name": "schema: iat not an integer",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLjUsIm1ldGhvZCI6IkdFVCIsIm5vbmNlIjoiRkJRVUZCUVVGQlFVRkJRVUZCUVVGQSIsInBhdGgiOiIvYXBpL2FjbWUvdG9kby9pdGVtcz94PTEiLCJwZXJzb24iOnsiaWQiOiJwMSIsIm5hbWUiOiJBZGEifSwidHlwIjoiaWQifQ.sioX3WMq5QsG_Zu7LxwoBSU4iowpWZYYLsxZqFJbOmYqZuwY1XCkD0kbNI881t6THzTylMunAqXsvM4JQtp6BQ",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "schema"
+      }
+    },
+    {
+      "name": "schema: person.name missing",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkZoWVdGaFlXRmhZV0ZoWVdGaFlXRmciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEifSwidHlwIjoiaWQifQ.WXx0QJlC4PIXVZeRcS4VHDtHU-TPxV59L80FqH1i-W76uWAX13o4jFlQTXmA3uarn_NTFl2RauTaYStYJ4EWAA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "schema"
+      }
+    },
+    {
+      "name": "person.claims passthrough: extra keys under person are allowed",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkdCZ1lHQmdZR0JnWUdCZ1lHQmdZR0EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImNsYWltcyI6eyJyb2xlIjoiYWRtaW4ifSwiZXBvY2giOjMsImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.0vndzc_Izv6M0uHFHnkhxPjrnW6jpxTbjtAtahA2CDhbT7nOKtAsd5ERn5m2-rOeWNPHwtVlKakCQEz1re_lAg",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": true
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000000,
+        "ttl": 30,
+        "nonce": "GBgYGBgYGBgYGBgYGBgYGA"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada",
+          "claims": {
+            "role": "admin"
+          },
+          "epoch": 3
+        }
+      }
+    },
+    {
+      "name": "iat before host start (C3 surprise 2: restart replay window)",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNjk5OTk4OTk5LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkdSa1pHUmtaR1JrWkdSa1pHUmtaR1EiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.GoWPzmwUVNuMXbzlqHZnhm5Z3XAsBjSDfjEZ1gO9uHwRoOvB8iuc9fGgnzHYKeIDXlggHuRyr-ZDmcmSS-bwDw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "iat-before-host"
+      }
+    },
+    {
+      "name": "iat 6 s in the future",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzNiwiaWF0IjoxNzAwMDAwMDA2LCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikd4c2JHeHNiR3hzYkd4c2JHeHNiR3ciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.y7-4O4VqhO0Xg9ef17UJm59btZDuMKl1-ieveDbnx-PRtc0y-aJfGmx5zHScdisnFzhTrN-ih_KqID98LgZiCg",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "iat-future"
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000006,
+        "ttl": 30,
+        "nonce": "GxsbGxsbGxsbGxsbGxsbGw"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "iat 5 s in the future: inside skew",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzNSwiaWF0IjoxNzAwMDAwMDA1LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkhCd2NIQndjSEJ3Y0hCd2NIQndjSEEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.8aXLRxOq1f7QayRDlfIwXNnNiJ0JgR-eKP_5jlBtNHGGWa3nHIPZLcK_7zBHw27JyNT86AhOPhuVg6aVLzKaBw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": true
+      },
+      "mintedWith": {
+        "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "now": 1700000005,
+        "ttl": 30,
+        "nonce": "HBwcHBwcHBwcHBwcHBwcHA"
+      },
+      "claims": {
+        "aud": "h-comp-1",
+        "app": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "person": {
+          "id": "p1",
+          "name": "Ada"
+        }
+      }
+    },
+    {
+      "name": "skew boundary: exp = now + 60 + 5 accepted",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDA2NSwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkhSMGRIUjBkSFIwZEhSMGRIUjBkSFEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.iBylvmzE4s2b7UM6tkuBsRHkbcIw_hvTl0K5EvK1oW5eC8X2ZlKoqwiffVA25hZu1XhQjuLDMFb3hJ2TMdJ1CA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "skew boundary: exp = now + 60 + 6 rejected",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDA2NiwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikh4OGZIeDhmSHg4Zkh4OGZIeDhmSHciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.hkYfIK2BObinHzDoVZkDXjOCVG_tn66LxuGn79z2m28x0wA9b4rnNysOkzZaozqtD2SWwXe1ydkoRIx1EBoPCw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "exp-too-far"
+      }
+    },
+    {
+      "name": "skew boundary: exp = now − 4 still accepted",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTk5NiwiaWF0IjoxNjk5OTk5OTY2LCJtZXRob2QiOiJHRVQiLCJub25jZSI6IklTRWhJU0VoSVNFaElTRWhJU0VoSVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.K5_ygPkLPJlilHU7jGZh_9orfO_hxIOxnF2kAyceZiDkBrslXKYp3ZxzjKu8BdOs1-frITjTozznAmKw5eiHAw",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "skew boundary: exp = now − 5 expired",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTY5OTk5OTk5NSwiaWF0IjoxNjk5OTk5OTY1LCJtZXRob2QiOiJHRVQiLCJub25jZSI6Ikl5TWpJeU1qSXlNakl5TWpJeU1qSXciLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.M-sFXJs_X1-MKvYC1nDcmvRmCPIQLjFmM-7PwvfXwMRgCvmwEaYjtll5zsX2GT6Mqr767BugLs_vewl1ba8mDA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/items?x=1",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "check order: replayed on another path reports method-path-mismatch, not replay",
+      "header": "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.BZ9kFyCmNWxxvMRl-uijdNRkg-30a8mO1-y_7jOpR8izp186AkDsXN_f1jgoFnPUQ5SYrHYWorejLXkPashcBA",
+      "verify": {
+        "hostId": "h-comp-1",
+        "instanceId": "i-todo",
+        "method": "GET",
+        "path": "/api/acme/todo/other",
+        "now": 1700000000,
+        "hostStartedAt": 1699999000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "method-path-mismatch"
+      },
+      "before": [
+        "eyJhcHAiOiJpLXRvZG8iLCJhdWQiOiJoLWNvbXAtMSIsImV4cCI6MTcwMDAwMDAzMCwiaWF0IjoxNzAwMDAwMDAwLCJtZXRob2QiOiJHRVQiLCJub25jZSI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVEiLCJwYXRoIjoiL2FwaS9hY21lL3RvZG8vaXRlbXM_eD0xIiwicGVyc29uIjp7ImlkIjoicDEiLCJuYW1lIjoiQWRhIn0sInR5cCI6ImlkIn0.BZ9kFyCmNWxxvMRl-uijdNRkg-30a8mO1-y_7jOpR8izp186AkDsXN_f1jgoFnPUQ5SYrHYWorejLXkPashcBA"
+      ],
+      "note": "the verify opts differ per case; this one overrides path"
+    }
+  ]
+}
