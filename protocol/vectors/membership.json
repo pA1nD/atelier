@@ -1,0 +1,52 @@
+{
+  "module": "protocol/membership.js",
+  "spike": "C3 (presence matrix) + §0.1 R5",
+  "note": "fn ∈ checkSession | assertionEpochCheck | hostEpochCheck | present | scenario. `epochs` is the currentEpochOf table (personId → epoch) for the first two. present runs against `model` (C3's MODEL). scenario drives one MembershipModel: steps op ∈ join | leave | epochOf | present | checkSession.",
+  "model": {
+    "persons": { "p1": { "name": "Ada" }, "p2": { "name": "Bob" }, "p3": { "name": "Cy" }, "p9": { "name": "Zed" } },
+    "companies": { "acme": { "chats": { "c1": ["p1", "p2"], "c2": ["p2", "p3"] } }, "beta": { "chats": { "b1": ["p9"] } } },
+    "apps": {
+      "todo": { "instanceId": "i-todo", "company": "acme", "chat": "c1", "visibility": "chat" },
+      "wiki": { "instanceId": "i-wiki", "company": "acme", "chat": "c2", "visibility": "company" }
+    }
+  },
+  "cases": [
+    { "name": "session epoch 3 vs current 3 → ok", "fn": "checkSession", "input": { "personId": "p1", "epoch": 3 }, "epochs": { "p1": 3 }, "expect": { "ok": true } },
+    { "name": "session epoch 3 vs current 4 → epoch-moved", "fn": "checkSession", "input": { "personId": "p1", "epoch": 3 }, "epochs": { "p1": 4 }, "expect": { "ok": false, "reason": "epoch-moved" } },
+    { "name": "session epoch ahead of current (4 vs 3) is also refused — the store is the truth", "fn": "checkSession", "input": { "personId": "p1", "epoch": 4 }, "epochs": { "p1": 3 }, "expect": { "ok": false, "reason": "epoch-moved" } },
+    { "name": "session for an unknown person → unknown-person", "fn": "checkSession", "input": { "personId": "p7", "epoch": 1 }, "epochs": { "p1": 3 }, "expect": { "ok": false, "reason": "unknown-person" } },
+    { "name": "session without an integer epoch → no-session", "fn": "checkSession", "input": { "personId": "p1" }, "epochs": { "p1": 3 }, "expect": { "ok": false, "reason": "no-session" } },
+    { "name": "assertion with person.epoch 2 vs current 3 → refused", "fn": "assertionEpochCheck", "input": { "typ": "id", "person": { "id": "p1", "name": "Ada", "epoch": 2 } }, "epochs": { "p1": 3 }, "expect": { "ok": false, "reason": "epoch-moved" } },
+    { "name": "assertion with person.epoch 3 vs current 3 → ok", "fn": "assertionEpochCheck", "input": { "typ": "id", "person": { "id": "p1", "name": "Ada", "epoch": 3 } }, "epochs": { "p1": 3 }, "expect": { "ok": true } },
+    { "name": "assertion without person.epoch → ok (the shell minted from a fresh session)", "fn": "assertionEpochCheck", "input": { "typ": "id", "person": { "id": "p1", "name": "Ada" } }, "epochs": { "p1": 3 }, "expect": { "ok": true } },
+    { "name": "assertion with a non-integer person.epoch → schema", "fn": "assertionEpochCheck", "input": { "typ": "id", "person": { "id": "p1", "name": "Ada", "epoch": "3" } }, "epochs": { "p1": 3 }, "expect": { "ok": false, "reason": "schema" } },
+    { "name": "host token epoch equals the registered epoch → ok", "fn": "hostEpochCheck", "input": ["e-9f3a", "e-9f3a"], "expect": { "ok": true } },
+    { "name": "host token from the previous epoch after re-registration → host-epoch-moved", "fn": "hostEpochCheck", "input": ["e-1111", "e-9f3a"], "expect": { "ok": false, "reason": "host-epoch-moved" } },
+    { "name": "host not registered yet → not-registered", "fn": "hostEpochCheck", "input": ["e-1111", null], "expect": { "ok": false, "reason": "not-registered" } },
+    { "name": "C3 presence: p1 → todo (in c1) = 200", "fn": "present", "input": { "personId": "p1", "slug": "todo", "company": "acme" }, "expect": true },
+    { "name": "C3 presence: p3 → todo (acme member via c2, not in c1) = 404", "fn": "present", "input": { "personId": "p3", "slug": "todo", "company": "acme" }, "expect": false },
+    { "name": "C3 presence: p9 → wiki (no acme chat) = 404", "fn": "present", "input": { "personId": "p9", "slug": "wiki", "company": "acme" }, "expect": false },
+    { "name": "C3 presence: p3 → wiki (company-visible, p3 in c2) = 200", "fn": "present", "input": { "personId": "p3", "slug": "wiki", "company": "acme" }, "expect": true },
+    { "name": "C3 presence: p9 → todo = 404", "fn": "present", "input": { "personId": "p9", "slug": "todo", "company": "acme" }, "expect": false },
+    { "name": "C3 Host gate: todo under company beta does not resolve = 404", "fn": "present", "input": { "personId": "p1", "slug": "todo", "company": "beta" }, "expect": false },
+    {
+      "name": "scenario: joining c1 bumps p3's epoch and makes todo present; leaving bumps again and removes it",
+      "fn": "scenario",
+      "steps": [
+        { "op": "epochOf", "personId": "p3", "expect": 1 },
+        { "op": "checkSession", "session": { "personId": "p3", "epoch": 1 }, "expect": { "ok": true } },
+        { "op": "present", "personId": "p3", "slug": "todo", "company": "acme", "expect": false },
+        { "op": "join", "company": "acme", "chat": "c1", "personId": "p3", "expect": { "ok": true, "epoch": 2, "changed": true } },
+        { "op": "join", "company": "acme", "chat": "c1", "personId": "p3", "expect": { "ok": true, "epoch": 2, "changed": false } },
+        { "op": "checkSession", "session": { "personId": "p3", "epoch": 1 }, "expect": { "ok": false, "reason": "epoch-moved" } },
+        { "op": "checkSession", "session": { "personId": "p3", "epoch": 2 }, "expect": { "ok": true } },
+        { "op": "present", "personId": "p3", "slug": "todo", "company": "acme", "expect": true },
+        { "op": "leave", "company": "acme", "chat": "c1", "personId": "p3", "expect": { "ok": true, "epoch": 3, "changed": true } },
+        { "op": "present", "personId": "p3", "slug": "todo", "company": "acme", "expect": false },
+        { "op": "leave", "company": "acme", "chat": "c2", "personId": "p3", "expect": { "ok": true, "epoch": 4, "changed": true } },
+        { "op": "present", "personId": "p3", "slug": "wiki", "company": "acme", "expect": false },
+        { "op": "epochOf", "personId": "p1", "expect": 1 }
+      ]
+    }
+  ]
+}
