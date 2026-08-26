@@ -2,6 +2,10 @@
 
 Still pre-1.0 — anything in the shell surface (URLs, ctx shape, config schema) can move between minor versions until 1.0. The pace will slow as real users land, but for now: assume any 0.x bump may break a module that hardcoded an internal.
 
+## 2.0.0-alpha.0
+
+**`protocol/` — the atelier/2 wire format as code + conformance vectors; no runtime yet.** The branch `v2` starts the major bump the operator asked for. `protocol/` holds the pure decision functions of PLAN §4.4 (identity assertions, header policy, event frames, registry token scope + manifest allowlist, membership-epoch revocation) and §4.3's app-error coalescing (OR19), each with a JSON vector file under `protocol/vectors/` that a second implementation — the spine, the host — runs against. Nothing here is wired into the 1.x shell; `npm test` runs both globs. Not published (no `npm publish` from `v2` until the runtime lands).
+
 ## 0.20.0
 
 **A cut now honors the module's own `.gitignore`.** `atelier package` copied everything a fixed denylist didn't catch, then force-staged it — so a module's ignored build output (`native/.build/`, caches, compiled binaries) shipped in cuts (observed: a cut carrying 1,363 build files). When the working tree is a git repo, the packager now keeps exactly what the repo would: tracked files plus untracked files not excluded by in-tree `.gitignore` rules (global excludes are ignored, so cuts stay machine-independent; an ignored-but-tracked file still ships — tracking it means you meant it). `--data` remains the explicit override: `data/` ships when asked even if the module ignores it. Modules not under git cut unfiltered, exactly as before.

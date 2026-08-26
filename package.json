@@ -1,6 +1,6 @@
 {
   "name": "@pa1nd/atelier",
-  "version": "0.20.0",
+  "version": "2.0.0-alpha.0",
   "type": "module",
   "description": "The Atelier app shell — discovers, mounts, and serves feature modules around one shared chrome: a single runtime hosting many small, context-window-sized apps. Install as a dependency, run with `atelier`, install modules with `atelier add`.",
   "bin": {
@@ -23,7 +23,8 @@
     "client.jsx",
     "index.html",
     "shims",
-    "docs"
+    "docs",
+    "protocol"
   ],
   "publishConfig": {
     "access": "public"
@@ -31,7 +32,7 @@
   "scripts": {
     "dev": "node server.js",
     "dev:module": "node server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js protocol/test/*.test.js"
   },
   "engines": {
     "node": ">=24"
