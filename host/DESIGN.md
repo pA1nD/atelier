@@ -157,8 +157,11 @@ a FAILED step before (4) exits 2 (a genuine fault; the kubelet restarts):
    Every write is `writeFileSync(path, data, {mode, flag:'wx'})` under `umask 077`.
 4. Spawn the host (row H). fd 3 = the dirfd. Restart policy on exit: unlink `$ATELIER_RUN/host-ready`;
    append one JSON line `{"at":ms,"code":c,"signal":s,"exits":n}` to `/control/.host-crash`
-   through a uid-1000 helper (`os.spawnSync` row X); backoff 0.5 s doubling to 30 s; after 10 exits
-   in 10 min stop restarting (log `host: parked after 10 exits/10 min`, the pod stays up).
+   through a uid-1000 helper (`os.spawnSync` row X); SIGKILL every process whose uid is a worker's
+   (20000–65535: a host that died without its teardown leaves its workers as detached process groups
+   holding sockets, sqlite locks and CPU — `orphanedWorkers()` over `/proc`); restart at once after
+   the first exit in the window, then 0.5 s doubling to 30 s; after 10 exits in 10 min stop
+   restarting (log `host: parked after 10 exits/10 min`, the pod stays up).
 5. Spawn the session supervisor (row S) in parallel — never after the host is ready.
 6. Signals: SIGTERM → SIGTERM the host first, wait ≤ `grace − 5 s` (grace = `ATELIER_GRACE_S`,
    default 40) for its exit while forwarding SIGTERM to the session supervisor; then exit with the
@@ -702,14 +705,19 @@ Deviations from §2.1–§2.2 as built, current state (details in `host/drill/la
 5. **Row X is `os.spawn`, not `spawnSync`** (`spawnSync` has no stdin): `stdio[0]='pipe'`, the JSON line
    written to `child.stdin`. `memory()`'s fake child has no stdin, so the line is unit-tested as
    `crashLine()` and the file is the drill's row 3.
-6. **Backoff window:** delay = `min(30 s, 0.5 s × 2^(n−1))` with n = host exits in the last 10 min;
-   the 10th exit in the window parks. `exits` in the crash line is the launcher-life total.
+6. **Backoff window:** delay = 0 for n = 1, else `min(30 s, 0.5 s × 2^(n−2))`, with n = host exits in
+   the last 10 min (one crash is not a loop: the blink after a `kill -9` is the host's boot alone —
+   §I1 rows); the 10th exit in the window parks. `exits` in the crash line is the launcher-life total.
+   Before every restart the launcher SIGKILLs the dead host's workers (`orphanedWorkers()`: every
+   `/proc/<pid>/status` whose real uid is in 20000–65535; root + CAP_KILL) — measured: without it the
+   first life's four workers ran on beside the second life's, the sqlite one holding its lock.
 7. **`host-ready` at boot:** the launcher also unlinks it in the plan (item 3); the host writes it, the
    launcher unlinks it on every host exit, the host at teardown.
 8. **Entry points:** the host is `host/index.mjs` next to the launcher (`import.meta.url`-relative;
    `/app/host/index.mjs` in the image); the session supervisor is `/app/session-supervisor.mjs`. The
-   drill replaces the latter with a sleeping stub and, while the integrator's `index.mjs` is absent,
-   installs `drill/launcher/host-stub.mjs` in its place — no env knob for either.
+   launcher drill replaces the latter with a sleeping stub and the host with `drill/launcher/host-stub.mjs`
+   (its rows are the launcher's supervision of the host process; the real host under the same launcher
+   is `drill/step2` and `drill/rows`) — no env knob for either.
 9. **Drill status:** `host/drill/launcher/run.sh` (rows 1–3 of §8.2 plus the container restart, the
    park storm and the grace-40 delete) is written, not yet run on fsn-01.
 

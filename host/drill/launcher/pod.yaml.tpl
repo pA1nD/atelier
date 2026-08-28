@@ -41,7 +41,7 @@ spec:
     # host-stub.mjs: this drill is the launcher's supervision of the host process (no spine, no deps); the real
     # host under the same launcher is drilled in host/drill/step2 and host/drill/rows
     command: [ bash, -c ]
-    args: [ 'cp /code/host/drill/launcher/session-supervisor-stub.mjs /app/session-supervisor.mjs; cp /code/host/drill/launcher/host-stub.mjs /code/host/index.mjs; echo "[drill] host entry: $(head -c 120 /code/host/index.mjs | head -1)"; exec bash /code/host/entrypoint.sh' ]
+    args: [ 'cp /code/host/drill/launcher/session-supervisor-stub.mjs /app/session-supervisor.mjs; echo "[drill] host entry: $(head -c 90 /code/host/index.mjs | head -1)"; exec bash /code/host/entrypoint.sh' ]
     workingDir: /work
     securityContext:
       runAsUser: 0

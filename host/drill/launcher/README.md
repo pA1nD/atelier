@@ -27,9 +27,11 @@ runs the plan (a failure → exit 2 before any spawn), spawns H and S, and appli
 
 - host exit → unlink `host-ready`, one JSON line `{"at","code","signal","exits"}` appended to
   `/control/.host-crash` by the uid-1000 helper (row X: `sh -c 'cat >> /control/.host-crash'`, env `{PATH}`,
-  `--clear-groups`, umask 077, the line on stdin), restart after `min(30 s, 0.5 s × 2^(n−1))` where n =
-  exits in the last 10 min; the 10th exit in 10 min parks the host (`host: parked after 10 exits/10 min`),
-  the pod stays up, the session supervisor is untouched.
+  `--clear-groups`, umask 077, the line on stdin), SIGKILL of every process of a worker uid (20000–65535,
+  `orphanedWorkers()` over `/proc` — a dead host's detached workers), restart at once after the first exit
+  in the window, then after `min(30 s, 0.5 s × 2^(n−2))` where n = exits in the last 10 min; the 10th exit
+  in 10 min parks the host (`host: parked after 10 exits/10 min`), the pod stays up, the session
+  supervisor is untouched.
 - session supervisor exit → SIGTERM the host, SIGKILL after 10 s, exit with the supervisor's code or
   `128 + signal`.
 - SIGTERM → SIGTERM the host first, then the supervisor, `grace − 5 s` (`ATELIER_GRACE_S`, default 40)

@@ -12,14 +12,17 @@ echo "== host launcher drill $(date -u +%FT%TZ) — repo $REPO ($(git -C "$REPO"
 IMAGE=$(grep -o 'ghcr.io/pa1nd/agent-image@sha256:[0-9a-f]*' "$SPINE_YAML" | head -1)
 [ -n "$IMAGE" ] || { echo "VERDICT: BLOCKED — no agent-image digest in $SPINE_YAML"; exit 1; }
 echo "== image: $IMAGE"
-# host/ (the launcher, its stubs and tests), protocol/, package.json — the host stub needs no dependencies
-TAR=()
-for p in host protocol package.json; do
-  [ -e "$REPO/$p" ] && TAR+=("$p")
-done
-echo "== shipping: ${TAR[*]}"
+# host/ (the launcher, its stubs and tests), protocol/, package.json — the host stub needs no dependencies.
+# host/index.mjs is REPLACED by the stub in the staged tree: /code is an idmapped mount whose files are
+# 501-owned, and container-root cannot overwrite them in place — so the stub must arrive already named
+# index.mjs (this drill is the launcher supervising the host process; the real host runs in step2/rows).
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-COPYFILE_DISABLE=1 tar -C "$REPO" --exclude='host/drill/launcher/out' --exclude='*.log' -czf "$TMP/code.tgz" "${TAR[@]}" || { echo "VERDICT: BLOCKED — tar failed"; exit 1; }
+STAGE=$TMP/tree; mkdir -p "$STAGE"
+for p in host protocol package.json; do [ -e "$REPO/$p" ] && cp -R "$REPO/$p" "$STAGE/$p"; done
+rm -rf "$STAGE/host/drill/launcher/out"
+cp "$STAGE/host/drill/launcher/host-stub.mjs" "$STAGE/host/index.mjs"
+echo "== shipping: host (index.mjs = host-stub.mjs) protocol package.json"
+COPYFILE_DISABLE=1 tar -C "$STAGE" --exclude='*.log' -czf "$TMP/code.tgz" . || { echo "VERDICT: BLOCKED — tar failed"; exit 1; }
 echo "$IMAGE" > "$TMP/image.txt"
 ssh -n -o ConnectTimeout=15 fsn-01 "rm -rf $CODE && mkdir -p $CODE/out" || { echo "VERDICT: BLOCKED — ssh fsn-01 failed"; exit 1; }
 scp -q "$TMP/code.tgz" "$TMP/image.txt" "$HERE/remote.sh" "$HERE/inpod.sh" "$HERE/pod.yaml.tpl" "fsn-01:$CODE/" || { echo "VERDICT: BLOCKED — scp failed"; exit 1; }
