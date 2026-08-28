@@ -789,3 +789,30 @@ Built to §4.1/§6.2 as written; the deviations, each a fact the code needs, are
 Stubs: none. Not built here (other lanes): `hygiene.mjs` constants, `errors/limits.mjs`
 `rlimitsFor` (the spec carries `rlimits`), the supervisor's calls into `spawnWorker`/`installDeps`,
 the drill harness (README lists the rows this lane owes it).
+
+## L1. errors lane — state after build (host-errors)
+
+Files: `errors/{collector,report,agentlog,push,watchdog,limits}.mjs`, `test/errors-*.test.js`,
+`test/errors.helpers.js` (the fake clock), `errors/README.md`. Interfaces are §4.2's; the
+additions and readings below are current state.
+
+- `createCollector` sinks receive `(ev, {running})` — the running rev rides beside the event so
+  `agentLog.appError` writes `FAILED (users still on rev M)` without a second lookup.
+- `agentLog({os, path, slugOf})`: `slugOf(instance) → slug` is the integrator's
+  (`supervisor.resolve` by instance); without it the line names the instance. FAILED (build) and
+  KILLED (worker) lines are written by the collector sink; the supervisor writes LIVE / STOPPED /
+  RESUMED through `log.live/.stopped/.resumed` and never logs FAILED itself (one line per failure).
+- `exitDetail(code, signal)` (collector.mjs) is the `worker` detail the workers lane passes to
+  `report` on a spawn `onExit` (`exit 134` / `signal SIGSEGV` + the fix hint).
+- `push({transport, running})` takes `running = collector.running` and drops an event that went
+  stale in the queue. The transport signals a spine answer as an `Error` with integer `.status`
+  (no `.status` = network); 401/408/429 and 5xx retry on the ladder, other 4xx drop.
+- `createWatchdog` reads `rev` and `rlimits?.data` from `supervisor.workers()` rows
+  (`{instance, pid, uid, dataDir, sock, rev, rlimits?}`) — `rev` is the report's rev, `rlimits.data`
+  moves the RSS cap for a worker with a non-default limit. `du`/`find` run AS THE WORKER UID via
+  `os.spawnSync({uid, gid, groups: []})` (a `2770 <uid>:19999` dataDir is EACCES to userns-root).
+  `/dev/shm` per uid: stop at 256 MB, resume below 128 MB (defaults). One CPU `worker` report per
+  minute after 25 throttle cycles, stable message, numbers in the hint.
+- `frontendReport` bounds a flooding tab at 60 accepted reports per instance per minute.
+- Adapter note for the architect: `memory().spawnSync` calls `state.answers.spawnSync` twice per
+  call (`rec()` + the explicit call); the errors tests keep their answers idempotent.
