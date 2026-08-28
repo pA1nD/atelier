@@ -53,14 +53,16 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   }
   const withGroupSync = (uid, fn) => { held.set(uid, (held.get(uid) ?? 0) + 1); setGroups(); try { return fn() } finally { const n = held.get(uid) - 1; if (n) held.set(uid, n); else held.delete(uid); setGroups() } }
   // discovery reads module.json in every claimed (2750 1000:appgid) folder: hold every known gid for that walk
+  // groupFs(uid): the node-fs-shaped object the watcher reads through — every call holds the app's gid
+  const groupFs = (uid) => new Proxy(fs, { get: (t, k) => (typeof t[k] === 'function' ? (...a) => withGroupSync(uid, () => t[k](...a)) : t[k]) })
   const withAllGroupsSync = (fn) => { const uids = [...new Set([...rows.values()].map((r) => r.uid).filter((u) => u > 0))]; for (const u of uids) held.set(u, (held.get(u) ?? 0) + 1); setGroups(); try { return fn() } finally { for (const u of uids) { const n = held.get(u) - 1; if (n) held.set(u, n); else held.delete(u) } setGroups() } }
 
   function mkRow({ instance, slug, uid, company: co, dir }) {
     const row = {
       instance, slug, uid, company: co, dir, meta: null,
       dataDir: os.at(dirfd, `data/${instance}`), tmpDir: os.at(dirfd, `tmp/${instance}`),
-      sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance), get sock() { return path.join(this.sockDir, 'w.sock') },
-      state: 'unclaimed', rev: null, live: null, kept: [], counter: 0, fingerprint: null,
+      sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
+      state: 'unclaimed', claimed: false, rev: null, live: null, retiring: new Set(), kept: [], counter: 0, fingerprint: null,
       building: null, pending: false, broken: null, watcher: null,
       resources: null, suspendable: false, lastServedAt: 0, inflight: 0, idleTimer: null, restarts: 0, resuming: null,
       armIdle: () => armIdle(row),
@@ -75,9 +77,11 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   async function workerSpec(row, rev, codeDir) {
     let configEnv = {}
     try { configEnv = (await registrar?.appConfig?.(row.instance)) ?? {} } catch (e) { emit(`[${row.slug}] app config: ${e.message} (spawning without)`) }
+    // one socket per rev: load-beside needs the new worker bound while the old one still serves, and a
+    // proxy's keep-alive pool is keyed by socket path — the same name would keep feeding the old worker
     return {
       instance: row.instance, slug: row.slug, company: row.company, uid: row.uid, rev, codeDir, appDir: row.dir,
-      dataDir: row.dataDir, tmpDir: row.tmpDir, sockDir: row.sockDir, sock: row.sock,
+      dataDir: row.dataDir, tmpDir: row.tmpDir, sockDir: row.sockDir, sock: path.join(row.sockDir, `w-${rev}.sock`),
       baseUrl: `${origin()}/api/${row.company}/${row.slug}`, origin: origin(), configEnv, rlimits: T.rlimits,
     }
   }
@@ -115,6 +119,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   async function stopLive(row, live, reason) {
     if (!live?.handle || live.stopping) return
     live.stopping = true
+    row.retiring.delete(live)
     try { await live.handle.stop(T.drainMs) } catch (e) { emit(`[${row.slug}] rev ${live.rev} stop(${reason}): ${e.message}`) }
   }
 
@@ -186,6 +191,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     store.commit(row.instance, rev, { slug: row.slug, sha256, bytes, fingerprint: fp, chrome: chromeName })
     if (old) {
       row.kept.push({ rev: old.rev, until: os.now() + T.keepMs })
+      row.retiring.add(old)
       later(T.swapStopMs, () => stopLive(row, old, 'swap'))
       later(T.keepMs + 50, () => prune(row))
     }
@@ -265,12 +271,16 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
   // --- discovery / claim / watch ------------------------------------------------------------
   const rowBySlug = (slug) => [...rows.values()].find((r) => r.slug === slug && r.state !== 'unclaimed')
-  async function claimFolder(app) {
+  // claimFolder(app, existing) — registrar.claim for a new folder, or the re-claim (adopt) of a boot row
+  // on the first scan; a refusal leaves no row (the registrar wrote CLAIM-REFUSED.txt as uid 1000).
+  async function claimFolder(app, existing = null) {
     let res
-    try { res = await registrar.claim({ slug: app.slug, meta: app.meta ?? {}, dir: app.dir }) } catch (e) { emit(`[${app.slug}] claim: ${e.message}`); return null }
+    try { res = await registrar.claim({ slug: app.slug, meta: app.meta ?? {}, dir: app.dir }) } catch (e) { emit(`[${app.slug}] claim: ${e.message}`); return existing }
     if (!res || res.refused) { emit(`[${app.slug}] claim refused: ${res?.refused?.code ?? '?'} ${res?.refused?.error ?? ''}`); return null }
+    if (existing && res.instance !== existing.instance) emit(`[${app.slug}] re-claim returned ${res.instance}, snapshot row is ${existing.instance} — following the registrar`)
     const row = rows.get(res.instance) ?? mkRow({ instance: res.instance, slug: app.slug, uid: res.uid, company: company(), dir: app.dir })
-    row.slug = app.slug; row.uid = res.uid; row.dir = app.dir; row.state = row.rev != null ? 'stopped' : 'loading'; row.meta = app.meta ?? {}
+    row.claimed = true
+    row.slug = app.slug; row.uid = res.uid; row.dir = app.dir; if (!row.live) row.state = row.rev != null ? 'stopped' : 'loading'; row.meta = app.meta ?? {}
     store.ensure(row.instance, row.uid)
     store.writeMarker(row.instance, 'slug', row.slug)
     if (jail?.claimRoundTrip) { try { jail.claimRoundTrip(os, row.dir, row.uid) } catch (e) { emit(`[${row.slug}] claim round trip: ${e.code ?? e.message}`) } }
@@ -279,7 +289,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   function watchRow(row) {
     if (row.watcher) return
     row.watcher = createWatcher({
-      dir: row.dir, fs, quiesceMs: T.quiesceMs, log: (l) => emit(`[${row.slug}] ${l}`),
+      dir: row.dir, fs: groupFs(row.uid), quiesceMs: T.quiesceMs, log: (l) => emit(`[${row.slug}] ${l}`),
       onChange: () => rebuild(row),
       onInstall: () => installThenRebuild(row),
       onGone: () => gone(row),
@@ -337,8 +347,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       }
       for (const app of d.apps) {
         let row = rowBySlug(app.slug)
-        if (!row) {
-          row = await claimFolder(app)
+        if (!row?.claimed) {
+          row = await claimFolder(app, row)
           if (!row) continue
         }
         watchRow(row)
@@ -368,7 +378,11 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       for (const t of timers) clearTimeout(t)
       timers.clear()
       for (const row of rows.values()) { if (row.watcher) { row.watcher.stop(); row.watcher = null } }
-      await Promise.all([...rows.values()].map(async (row) => { const live = row.live; if (!live) return; row.live = null; row.state = 'stopped'; await stopLive(row, live, 'teardown') }))
+      await Promise.all([...rows.values()].map(async (row) => {
+        const all = [...row.retiring, row.live].filter(Boolean)
+        if (row.live) { row.live = null; row.state = 'stopped' }
+        await Promise.all(all.map((live) => stopLive(row, live, 'teardown')))
+      }))
     },
   }
   const serve = createServe({
