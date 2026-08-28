@@ -76,7 +76,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // --- worker spec (§4.1 WorkerSpec) ----------------------------------------------------------
   async function workerSpec(row, rev, codeDir) {
     let configEnv = {}
-    try { configEnv = (await registrar?.appConfig?.(row.instance)) ?? {} } catch (e) { emit(`[${row.slug}] app config: ${e.message} (spawning without)`) }
+    try { const r = await registrar?.appConfig?.(row.instance); configEnv = r?.env ?? {} } catch (e) { emit(`[${row.slug}] app config: ${e.message} (spawning without)`) }   // DESIGN §7: → {env:{K:V}}
     // one socket per rev: load-beside needs the new worker bound while the old one still serves, and a
     // proxy's keep-alive pool is keyed by socket path — the same name would keep feeding the old worker
     return {
@@ -359,7 +359,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     },
 
     apps: () => [...rows.values()].map(appRow),
-    workers: () => [...rows.values()].filter((r) => r.live?.pid).map((r) => ({ instance: r.instance, pid: r.live.pid, uid: r.uid, dataDir: r.dataDir, sock: r.live.sock })),
+    workers: () => [...rows.values()].filter((r) => r.live?.pid).map((r) => ({ instance: r.instance, pid: r.live.pid, uid: r.uid, dataDir: r.dataDir, sock: r.live.sock, rev: r.live.rev, rlimits: T.rlimits })),
     resolve: (co, slug) => { const r = [...rows.values()].find((x) => x.company === co && x.slug === slug && x.state !== 'unclaimed'); return r ? appRow(r) : null },
     rebuild: (instance) => { const r = rows.get(instance); return r ? rebuild(r) : Promise.resolve(null) },
     stop: async (instance) => { const r = rows.get(instance); if (r) await idleStop(r) },

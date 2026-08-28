@@ -32,6 +32,17 @@ export function safeRel(rel) {
  *   awaitBuild(row) → the in-flight build (requests are held during a load with no live worker)
  *   readStatic(row, name) → Buffer|null; served(instance) → registrar.served; keptRev(row, rev) → bool
  */
+// mountRelative(url, row) → the path the worker's router sees: `/api/<company>/<slug>` stripped
+// (DESIGN §4.3: req.url reaches the supervisor untouched; the mount is derivable from the row).
+export function mountRelative(url, row) {
+  const mount = `/api/${row.company}/${row.slug}`
+  if (url === mount || url.startsWith(mount + '/') || url.startsWith(mount + '?')) {
+    const rest = url.slice(mount.length)
+    return rest.startsWith('/') ? rest : '/' + rest
+  }
+  return url
+}
+
 export function createServe({ row: rowOf, store, proxy, resume, awaitBuild = async () => {}, readStatic, served = () => {}, keptRev, timing = {} }) {
   const json = (res, status, body) => { if (!res.headersSent) res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)) }
 
@@ -47,7 +58,7 @@ export function createServe({ row: rowOf, store, proxy, resume, awaitBuild = asy
     row.inflight++
     row.lastServedAt = Date.now()
     try {
-      return await proxy({ sock: live.sock, req, res, user, bodyCap: timing.bodyCap, timeoutMs: timing.proxyTimeoutMs })
+      return await proxy({ sock: live.sock, req, res, user, path: mountRelative(req.url, row), bodyCap: timing.bodyCap, timeoutMs: timing.proxyTimeoutMs })
     } finally {
       row.inflight--
       row.lastServedAt = Date.now()

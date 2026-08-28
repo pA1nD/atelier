@@ -856,3 +856,36 @@ Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`
    needs the header. The bootstrap adds `workspace` and `workspaces` beside 1.x's fields (§6.5).
 8. Local mode's shell key: `localTransport(...).keys` (Ed25519, minted per process) — its public
    half comes back as `shell_public_key_hex`; the local shell process (step 4) signs with it.
+
+## I1. Integrator — `host/index.mjs`, `host/README.md`, `host/drill/step2/` (current state)
+
+`index.mjs` wires the lanes in §1.1's order; what it adds or reads differently:
+
+1. **`config(env)`** = §1.2 plus `fleet = !!ATELIER_SPINE_URL`, `dirfd` only when `ATELIER_DIRFD` is
+   numeric (unset = local mode: the host creates the launcher's rows itself and mints `dev.token` when
+   none exists), `ATELIER_GIT_COMMIT=0` disables row G. `podIp()` = the first non-internal IPv4.
+2. **Host-owned directories**: `.atelier/tmp` and `$run/w` (0711 root) are the host's — the launcher's
+   plan does not create the parents `jailPlan` mkdirs into (`hostDirs()`).
+3. **Startup audit (§6.5)** is `audit(os, cfg, dirfd)` in `index.mjs`: `bootstrap.token`/`dev.token`
+   without g/o bits, `/work/.claude` and `/control` without o bits, every `last-good/<inst>` and
+   `data/<inst>` without o bits; a non-empty list logs and retries every 5 s before `host-ready`.
+4. **`registrar.appConfig()` → `{env:{K:V}}`** (§7); the supervisor reads `.env` (was passing the
+   whole reply as `configEnv`).
+5. **`supervisor.workers()` rows carry `rev` and `rlimits`** — the watchdog's report rev and RSS cap.
+6. **The mount is stripped in `supervisor/serve.mjs`** (`mountRelative(req.url, row)` → the proxy's
+   `path`): the worker's router sees `/state`, not `/api/<company>/<slug>/state`.
+7. **Log routing**: every supervisor line goes to stderr; `LIVE` / `STOPPED` / `RESUMED` also to
+   `agent.log`; `FAILED` / `KILLED` reach `agent.log` through the collector sink only (one line each).
+8. **Install**: `installDeps` is wired with `beforeFreeze: () => supervisor.stop(instance)` (the freeze
+   SIGKILLs the worker uid; the supervisor stops the live worker first, the rebuild spawns the next).
+9. **Dev shell chrome sheet**: `chromeSheet()` = `buildSheet({chromeDir, appDir: null})` when
+   `ATELIER_CHROME_DIR` is set.
+10. **Teardown**: `host-ready` unlinked → `registrar.draining()` (fleet, ≤ 2 s) → both listeners closed
+    → `supervisor.teardown()` → watchdog stop → `events.drain(1000)` → `host: stopped` → exit 0; the
+    whole sequence is capped at 30 s.
+11. **`package.json` `test`** now includes `host/test/*.test.js` (§9.15).
+12. **The Linux drill `host/drill/step2/`** runs the integrated host in FLEET mode against a fake
+    spine on a peer pod (`fake-spine.mjs`: the §7 routes, `validateAppError` on the app-error lane,
+    every call logged as JSON lines) with a signer (`signer.mjs`: bearer + protocol/identity assertion)
+    dialing the pod IP from outside; one real 1.x module (blitzfeed) + a probe app; rows (a)–(g) in
+    `remote.sh`; evidence in `design/atelier2/r2/spike-host-step2/`.

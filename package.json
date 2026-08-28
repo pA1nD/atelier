@@ -32,7 +32,7 @@
   "scripts": {
     "dev": "node server.js",
     "dev:module": "node server.js",
-    "test": "node --test test/*.test.js protocol/test/*.test.js"
+    "test": "node --test test/*.test.js protocol/test/*.test.js host/test/*.test.js"
   },
   "engines": {
     "node": ">=24"

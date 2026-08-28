@@ -1,0 +1,63 @@
+// host/index.mjs — the integrator's pure pieces: config, the host's own dirs, the audit, the mount
+// strip, podIp. The wiring itself is proven by the local smoke (README) and the Linux drill.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { config, hostDirs, audit, podIp } from '../index.mjs'
+import { mountRelative } from '../supervisor/serve.mjs'
+import { unprivileged } from '../adapters/os.mjs'
+
+test('config: defaults are DESIGN §1.2; fleet iff ATELIER_SPINE_URL; dirfd only when numeric', () => {
+  const c = config({})
+  assert.equal(c.work, '/work'); assert.equal(c.run, '/run/atelier'); assert.equal(c.control, '/control')
+  assert.equal(c.hostPort, 1845); assert.equal(c.devPort, 1844); assert.equal(c.company, 'local'); assert.equal(c.origin, 'http://127.0.0.1:1844')
+  assert.equal(c.fleet, false); assert.equal(c.dirfd, null); assert.equal(c.chromeDir, null); assert.equal(c.nodeEnv, 'production'); assert.equal(c.gitCommit, true)
+  const f = config({ ATELIER_SPINE_URL: 'http://spine:7331', ATELIER_DIRFD: '3', ATELIER_DEV_PORT: '2000', ATELIER_GIT_COMMIT: '0', ATELIER_CHROME_DIR: '' })
+  assert.equal(f.fleet, true); assert.equal(f.dirfd, 3); assert.equal(f.origin, 'http://127.0.0.1:2000'); assert.equal(f.gitCommit, false); assert.equal(f.chromeDir, null)
+  assert.equal(config({ ATELIER_DIRFD: 'x' }).dirfd, null)
+})
+
+test('hostDirs: fleet adds only .atelier/tmp and $run/w to the launcher plan; local carries the launcher rows too', () => {
+  const cfg = { work: '/w', run: '/r' }
+  assert.deepEqual(hostDirs(cfg, { local: false }), [['/w/.atelier/tmp', 0o711], ['/r/w', 0o711]])
+  const local = hostDirs(cfg, { local: true }).map(([p]) => p)
+  assert.deepEqual(local, ['/w/.atelier', '/w/.atelier/data', '/w/.atelier/last-good', '/w/.atelier/scratch', '/w/apps', '/r', '/r/dev', '/r/session', '/w/.atelier/tmp', '/r/w'])
+})
+
+test('audit: a world-readable token, .claude, control, last-good/<inst> or data/<inst> is listed; the tight tree is clean', () => {
+  const os = unprivileged()
+  const root = fs.mkdtempSync('/tmp/hia-')
+  const cfg = { work: path.join(root, 'work'), run: path.join(root, 'run'), control: path.join(root, 'control') }
+  fs.mkdirSync(path.join(cfg.work, '.atelier', 'last-good', 'i-1'), { recursive: true, mode: 0o750 })
+  fs.mkdirSync(path.join(cfg.work, '.atelier', 'data', 'i-1'), { recursive: true, mode: 0o770 })
+  fs.mkdirSync(cfg.run, { recursive: true }); fs.mkdirSync(cfg.control, { mode: 0o700 })
+  fs.writeFileSync(path.join(cfg.run, 'bootstrap.token'), 'x', { mode: 0o400 })
+  const dirfd = os.openDir(path.join(cfg.work, '.atelier'))
+  assert.deepEqual(audit(os, cfg, dirfd), [])
+  fs.chmodSync(path.join(cfg.run, 'bootstrap.token'), 0o644)
+  fs.chmodSync(path.join(cfg.work, '.atelier', 'data', 'i-1'), 0o775)
+  fs.chmodSync(cfg.control, 0o705)
+  const bad = audit(os, cfg, dirfd)
+  assert.equal(bad.length, 3)
+  assert.ok(bad.some((b) => b.includes('bootstrap.token 644')))
+  assert.ok(bad.some((b) => b.includes('data/i-1 775')))
+  assert.ok(bad.some((b) => b.includes('control 705')))
+  os.closeFd(dirfd)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('mountRelative: /api/<company>/<slug> is stripped once, query kept, bare mount → /, other urls untouched', () => {
+  const row = { company: 'acme', slug: 'notes' }
+  assert.equal(mountRelative('/api/acme/notes/state', row), '/state')
+  assert.equal(mountRelative('/api/acme/notes/a/b?x=1', row), '/a/b?x=1')
+  assert.equal(mountRelative('/api/acme/notes', row), '/')
+  assert.equal(mountRelative('/api/acme/notes?x=1', row), '/?x=1')
+  assert.equal(mountRelative('/api/acme/notesx/state', row), '/api/acme/notesx/state')
+  assert.equal(mountRelative('/state', row), '/state')
+})
+
+test('podIp: first non-internal IPv4, null without one', () => {
+  assert.equal(podIp({ lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }], eth0: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '10.42.0.7', family: 'IPv4', internal: false }] }), '10.42.0.7')
+  assert.equal(podIp({ lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] }), null)
+})
