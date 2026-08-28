@@ -75,8 +75,8 @@ export function applyWrite({ dir, moduleJson, rewrites = [] }) {
   let top
   try { top = git(dir, ['rev-parse', '--show-toplevel']).trim() } catch { top = '' }
   if (!top) throw new WriteRefused(`--write refused: ${dir} is not inside a git work tree`)
-  const dirty = git(dir, ['status', '--porcelain', '--', ...targets]).trim()
-  if (dirty) throw new WriteRefused(`--write refused: uncommitted changes in ${dir}: ${dirty.split('\n').map((l) => l.slice(3)).join(', ')}`)
+  const dirty = git(dir, ['status', '--porcelain', '--', ...targets]).split('\n').filter(Boolean)   // `XY path` — the first column may be a space
+  if (dirty.length) throw new WriteRefused(`--write refused: uncommitted changes in ${dir}: ${dirty.map((l) => l.slice(3)).join(', ')}`)
   const written = []
   for (const r of rewrites) {
     if (!targets.includes(r.file)) continue

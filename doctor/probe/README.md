@@ -76,7 +76,7 @@ catalogue's `NODE_NOISE` filter (lane A/C).
 { module, dir, state, mounted, died: null | {where, code, error:{message, file, line, col, hint?}},
   importMs, mountMs, resources, teardown, stop: {code, signal, killed} | null, exitedEarly, rss,
   jail: 'hook-emulated', hooks: {counts:{envRead, listen, spawn, writeOutside, selfData, egress, ctxModule, signal, exit}, skipped:{runtime, node}, summary?: 'missing'},
-  envReads: [{key, n, frame}], listens: [{target, frame}], spawns: [{bin, fn, frame}],
+  envReads: [{key, n, frame}], envSpread: n (enumerations of process.env — a child env being built; not config reads), listens: [{target, frame}], spawns: [{bin, fn, frame}],
   writesOutside: [{op, path, inApp, frame}], selfData: [{op, path, write, frame}], egress: [{via, target, loopback, frame}],
   ctxModule: [{id, cross, frame}], signalHandlers: [{signal, frame}], processExit: [{code, frame}],
   control: {error, http5xx, broadcast, suspendable}, asyncErrors: [{message, file, line, col}], stderrTail: [...], ms, budgetMs }

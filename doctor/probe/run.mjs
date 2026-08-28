@@ -69,7 +69,7 @@ export async function probeModule({ id, dir, out, name = id, os = unprivileged()
     module: id, dir, state: null, mounted: false, died: null,
     importMs: null, mountMs: null, resources: null, teardown: null, stop: null, exitedEarly: null, rss: null,
     jail: 'hook-emulated', hooks: { counts: Object.fromEntries(KINDS.map((k) => [k, 0])), skipped: { runtime: 0, node: 0 } },
-    envReads: [], listens: [], spawns: [], writesOutside: [], selfData: [], egress: [], ctxModule: [], signalHandlers: [], processExit: [],
+    envReads: [], envSpread: 0, listens: [], spawns: [], writesOutside: [], selfData: [], egress: [], ctxModule: [], signalHandlers: [], processExit: [],
     control: { error: 0, http5xx: 0, broadcast: 0, suspendable: 0 }, asyncErrors: [], stderrTail: [], ms: 0,
     budgetMs: readyMs + settleMs + drainMs + closeMs,
   }
@@ -160,6 +160,7 @@ export async function probeModule({ id, dir, out, name = id, os = unprivileged()
       report.hooks.counts = summary.counts
       report.hooks.skipped = summary.skipped
       report.envReads = Object.entries(summary.envReads).map(([key, n]) => ({ key, n, frame: report.envReads.find((r) => r.key === key)?.frame ?? null }))
+      report.envSpread = summary.envSpread ?? 0
     } else {
       for (const k of KINDS) report.hooks.counts[k] = report[LISTS[k]].length
       report.envReads = report.envReads.map((r) => ({ key: r.key, n: 1, frame: r.frame }))

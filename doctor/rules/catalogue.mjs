@@ -240,7 +240,7 @@ export const RULES = [
       ],
       runtime: ['selfData', 'writeOutside'],
     },
-    count: (s, p) => g(s, 'self_data') + arr(P(p).selfData).length + arr(P(p).writesOutside).filter((w) => /<app>/.test(w)).length,
+    count: (s, p) => g(s, 'self_data') + new Set([...arr(P(p).selfData), ...arr(P(p).writesOutside).filter((w) => /<app>/.test(w))]).size,
     answer: '`ctx.dataDir` is the only data path (`/work/.atelier/data/<instance>`, outside the folder, survives a rename)',
     rewrite: { kind: 'mechanical', transform: 'N1', applies: 'backend', notes: 'inside the mountRoutes span only: path.join/resolve(<X>, \'data\'[, rest]) and `${<X>}/data[/tail]` → <ctx>.dataDir / path.join(<ctx>.dataDir, rest) / `${<ctx>.dataDir}/tail`; <X> ∈ __dirname HERE ROOT DIR MODULE_DIR dirname(…) fileURLToPath(…)' },
     evidence: '19/58 static (9 daily); 10 touched it at mount, 7 died; 13 mix both paths (N1mix)',

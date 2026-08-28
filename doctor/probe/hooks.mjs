@@ -102,17 +102,28 @@ let summarySent = false
 export function sendSummary(reason) {
   if (summarySent) return
   summarySent = true
-  send({ t: 'doctor', kind: 'summary', reason, counts, skipped, envReads: Object.fromEntries(envReads), jail: 'hook-emulated' })
+  send({ t: 'doctor', kind: 'summary', reason, counts, skipped, envReads: Object.fromEntries(envReads), envSpread, jail: 'hook-emulated' })
 }
 
 // ---------------------------------------------------------------------------------------------
 // process.env → Proxy over the real env object (writes still land in the real env)
 
+// An enumeration (`{ ...process.env }`, Object.assign, for-in — a child's env being built) reads EVERY
+// published key; those gets are not config reads. ownKeys marks the keys about to be copied, the next
+// get of each is counted once as one `envSpread`, and the mark expires with the current tick.
+let spreadKeys = null
+let envSpread = 0                   // app-attributed enumerations of process.env
 process.env = new Proxy(realEnv, {
+  ownKeys(t) {
+    const keys = Reflect.ownKeys(t)
+    if (attribute().by === 'app') { spreadKeys = new Set(keys); envSpread++; process.nextTick(() => { spreadKeys = null }) }
+    return keys
+  },
   get(t, k, r) { if (typeof k === 'string') noteEnv(k); return Reflect.get(t, k, r) },
   has(t, k) { if (typeof k === 'string') noteEnv(k); return Reflect.has(t, k) },
 })
 function noteEnv(key) {
+  if (spreadKeys?.has(key)) { spreadKeys.delete(key); return }
   const at = attribute()
   if (at.by !== 'app') { skipped[at.by]++; return }
   envReads.set(key, (envReads.get(key) ?? 0) + 1)

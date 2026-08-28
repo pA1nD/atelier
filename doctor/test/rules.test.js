@@ -255,12 +255,12 @@ test('count(): the probe observations join the static hits with the seed semanti
   const s = analyzeFiles('demo', [{ rel: 'backend.js', kind: 'backend', text: be("spawn('ffmpeg', []); const p = process.env.SPACES_PORT") }])
   const probe = {
     state: 'mount-throw', listens: ['0.0.0.0:7475'], spawns: ['ffmpeg', 'signal-cli'], envReads: ['SPACES_PORT', 'BASE_URL', 'WATCH_REPORT_DEPENDENCIES'],
-    writesOutside: ['<app>/data/x', '~/pro/hf/y'], selfData: ['<app>/data/x'], egress: ['http://127.0.0.1:443/api/doctor/jobs/beacon', 'https://api.example.com/v1'],
+    writesOutside: ['mkdirSync <app>/data', '~/pro/hf/y'], selfData: ['mkdirSync <app>/data', 'readFileSync <app>/data/x'], egress: ['http://127.0.0.1:443/api/doctor/jobs/beacon', 'https://api.example.com/v1'],
     signalHandlers: ['SIGTERM'], processExit: true, resources: { timers: 1 }, teardown: false, stop: { killed: true },
   }
   const c = cellsOf(s, probe)
   assert.equal(c.D2, 1); assert.equal(c.D12, 2); assert.equal(c.D13, 1)
-  assert.equal(c.N1, 2); assert.equal(c.N2, 1); assert.equal(c.N3, 1); assert.equal(c.N5, 1); assert.equal(c.N8, 2)
+  assert.equal(c.N1, 2, 'a refused write under <app>/data is in selfData AND writesOutside — counted once'); assert.equal(c.N2, 1); assert.equal(c.N3, 1); assert.equal(c.N5, 1); assert.equal(c.N8, 2)
   assert.equal(c.I2, 1); assert.equal(c.R1, 1); assert.equal(c.R2, 1); assert.equal(c.R3, 1)
   const none = cellsOf(s, null)
   assert.equal(none.D2, 0); assert.equal(none.D12, 1); assert.equal(none.R1, 0); assert.equal(none.R2, 0); assert.equal(none.R3, 0)

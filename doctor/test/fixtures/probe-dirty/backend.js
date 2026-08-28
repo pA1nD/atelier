@@ -14,7 +14,8 @@ export default {
     const port = Number(process.env.SPACES_PORT || 7475)
     const side = http.createServer((req, res) => res.end('sidecar'))
     side.listen(port, '0.0.0.0', () => ctx.log(`sidecar on ${port}`))
-    const child = spawn('ffmpeg', ['-version'])
+    const childEnv = { ...process.env, FFREPORT: '1' }   // an enumeration: one envSpread, no per-key reads
+    const child = spawn('ffmpeg', ['-version'], { env: childEnv })
     child.on('error', () => {})
     try { fs.mkdirSync(path.join(HERE, 'data'), { recursive: true }) } catch {}
     try { fs.writeFileSync(path.join(HERE, 'data', 'x'), 'x') } catch {}

@@ -100,6 +100,7 @@ test('(b) a dirty app: every habit observed and attributed to the app, the write
   // N2: the env read — and ONLY the app's; the runtime's PORT/HOST/ATELIER_WORKER reads are attributed to it
   assert.deepEqual(r.envReads.map((e) => e.key), ['SPACES_PORT'])
   assert.equal(r.envReads[0].n, 1)
+  assert.equal(r.envSpread, 1, 'the `{ ...process.env }` spread counts once as an enumeration, not as HOST/PORT/… reads')
   assert.match(r.envReads[0].frame, /^backend\.js:14:\d+$/, 'frames are mapped through the source map to the source file')
   // D2: the sidecar listen — recorded, never bound
   assert.deepEqual(r.listens.map((l) => l.target), ['0.0.0.0:7475'])
