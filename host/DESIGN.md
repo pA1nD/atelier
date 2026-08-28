@@ -652,3 +652,41 @@ are sites (a) and (b).
     the plan names the file, not the path.
 15. **Package.json test script** — `host/test/*.test.js` is added by the integrator, the only
     file outside `host/` touched by step 2 besides `protocol/` fixes.
+
+## 11. Lane notes — launcher (`entrypoint.sh`, `launcher.mjs`, `hygiene.mjs`, `test/launcher*.test.js`, `drill/launcher/`)
+
+Deviations from §2.1–§2.2 as built, current state (details in `host/drill/launcher/README.md`):
+
+1. **The plan is data.** `hygiene.bootPlan(cfg, {bootstrap, devToken})` returns the ordered step list
+   (§2.1 steps 1–3b); `launcher.runPlan` executes it through the adapter plus a three-method `io`
+   (`umask`, exclusive `write`, `unlink`) — the adapter has no file write/unlink. Proposed adapter
+   additions: `writeFile(p, data, mode)` (`wx`) and `unlink(p)`, recorded by `memory()`.
+2. **umask 0 while the plan runs.** `mkdir(2)`/`open(2)` mask the mode with the umask, so the plan
+   opens with `umask 000` (every step carries its full mode: 0755/0711/0710/0700/1777/0400) and closes
+   with `umask 077` for the launcher's own writes from then on. No chmod op exists in the plan.
+3. **Container-restart steps** (restartPolicy Always; `/run/atelier` and `/work` outlive the container):
+   the plan unlinks the previous life's `host-ready` before anything is spawned, unlinks each token
+   before its `wx` write (re-minted every launcher life), and reclaims an existing 1000-owned
+   `/run/atelier/session` with `chown 0:0` before populating it (root cannot create inside it
+   otherwise) — the only chown of a non-fresh inode; it is chowned back after the token lands.
+   An existing marker with the wrong owner/mode is logged `exists <uid>:<gid> <mode> — wrong (want …), left`.
+4. **Env rows are explicit key lists** (`scrub` never spreads): H = `PATH LANG LC_ALL TERM TZ ATELIER_*`
+   plus the launcher-set keys (`ATELIER_DIRFD=3`, `ATELIER_RUN/WORK/CONTROL`, `ATELIER_SPINE_URL` =
+   pod `CHANNEL_URL`, `HOME=/root`, `NODE_ENV=production`); S = `PATH LANG LC_ALL TERM TZ CHAT_ID PERSONA*
+   STORY_TEXT CHANNEL_URL CHANNEL_TOKEN CHANNEL_CHAT ANTHROPIC_* DISABLE_AUTOUPDATER HORSE_BROWSER_*
+   FLEET_EGRESS* PIP_USER NPM_CONFIG_PREFIX` plus `HOME=/work` (what k8s.ts `buildSessionPod` and the
+   Containerfile set); X = `PATH`. `ATELIER_BOOTSTRAP` is never copied by `scrub` under any list. The
+   adapter's `sh -c` wrapper adds `PWD`, `SHLVL`, `_` to every child.
+5. **Row X is `os.spawn`, not `spawnSync`** (`spawnSync` has no stdin): `stdio[0]='pipe'`, the JSON line
+   written to `child.stdin`. `memory()`'s fake child has no stdin, so the line is unit-tested as
+   `crashLine()` and the file is the drill's row 3.
+6. **Backoff window:** delay = `min(30 s, 0.5 s × 2^(n−1))` with n = host exits in the last 10 min;
+   the 10th exit in the window parks. `exits` in the crash line is the launcher-life total.
+7. **`host-ready` at boot:** the launcher also unlinks it in the plan (item 3); the host writes it, the
+   launcher unlinks it on every host exit, the host at teardown.
+8. **Entry points:** the host is `host/index.mjs` next to the launcher (`import.meta.url`-relative;
+   `/app/host/index.mjs` in the image); the session supervisor is `/app/session-supervisor.mjs`. The
+   drill replaces the latter with a sleeping stub and, while the integrator's `index.mjs` is absent,
+   installs `drill/launcher/host-stub.mjs` in its place — no env knob for either.
+9. **Drill status:** `host/drill/launcher/run.sh` (rows 1–3 of §8.2 plus the container restart, the
+   park storm and the grace-40 delete) is written, not yet run on fsn-01.
