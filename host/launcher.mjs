@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { constants as osConstants } from 'node:os'
 import { linuxRoot, unprivileged } from './adapters/os.mjs'
-import { AGENT, AGENT_DATA_GID, bootPlan, hostEnv, sessionEnv, helperEnv } from './hygiene.mjs'
+import { AGENT, AGENT_DATA_GID, WORKER_UID_BASE, WORKER_UID_MAX, bootPlan, hostEnv, sessionEnv, helperEnv } from './hygiene.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 export const HOST_ENTRY = path.join(here, 'index.mjs')            // /app/host/index.mjs in the image
@@ -87,8 +87,24 @@ export function runPlan(steps, { os, io, log }) {
 export const crashLine = ({ at, code, signal, exits }) => JSON.stringify({ at, code, signal, exits })
 /** The launcher's exit code for a session supervisor result: its code, or 128+signal when it died by signal. */
 export const exitCode = (r) => (!r ? 1 : r.signal ? 128 + (osConstants.signals[r.signal] ?? 0) : (r.code ?? 1))
-/** Restart delay after the n-th host exit inside the window: 0.5 s doubling, capped at 30 s. */
-export const backoffMs = (exitsInWindow) => Math.min(RESTART.capMs, RESTART.baseMs * 2 ** Math.max(0, exitsInWindow - 1))
+/** Restart delay after the n-th host exit inside the window: the first at once (one crash is not a loop; the
+ *  blink is the host's boot alone), then 0.5 s doubling, capped at 30 s. */
+export const backoffMs = (exitsInWindow) => (exitsInWindow <= 1 ? 0 : Math.min(RESTART.capMs, RESTART.baseMs * 2 ** (exitsInWindow - 2)))
+
+/** Every process whose real uid is a worker's (WORKER_UID_BASE…WORKER_UID_MAX), from /proc — the workers a dead
+ *  host left behind (they are detached process groups; nothing else reaps them). `readdir`/`read` injectable. */
+export function orphanedWorkers({ readdir = (d) => fs.readdirSync(d), read = (p) => fs.readFileSync(p, 'utf8') } = {}) {
+  const out = []
+  let names = []
+  try { names = readdir('/proc') } catch { return out }
+  for (const n of names) {
+    if (!/^\d+$/.test(n)) continue
+    let uid = null
+    try { const m = /^Uid:\s+(\d+)/m.exec(read(`/proc/${n}/status`)); uid = m ? Number(m[1]) : null } catch { continue }
+    if (uid !== null && uid >= WORKER_UID_BASE && uid <= WORKER_UID_MAX) out.push({ pid: Number(n), uid })
+  }
+  return out
+}
 
 /**
  * @param {object} d
@@ -99,7 +115,7 @@ export const backoffMs = (exitsInWindow) => Math.min(RESTART.capMs, RESTART.base
  * @param {{now:Function, setTimeout:Function, clearTimeout:Function}} d.clock
  * @param {(code:number)=>void} d.exit
  * @param {{on:(sig:string, fn:Function)=>void}} d.signals
- * @param {string[]} [d.hostArgv]  @param {string[]} [d.sessionArgv]  @param {string} [d.devToken]
+ * @param {string[]} [d.hostArgv]  @param {string[]} [d.sessionArgv]  @param {string} [d.devToken]  @param {() => {pid:number, uid:number}[]} [d.orphans]
  */
 export function createLauncher(d) {
   const { os, io, env, log, clock, exit, signals } = d
@@ -133,6 +149,7 @@ export function createLauncher(d) {
     say(`host: exited code=${code} signal=${signal}`)
     if (st.exiting) { settle(); return }
     io.unlink(`${cfg.run}/host-ready`)
+    sweepWorkers()
     const now = clock.now()
     st.exits += 1
     st.exitTimes = st.exitTimes.filter((t) => now - t < RESTART.windowMs).concat(now)
@@ -141,6 +158,15 @@ export function createLauncher(d) {
     const delay = backoffMs(st.exitTimes.length)
     say(`host: restart in ${delay} ms (exit ${st.exitTimes.length} in window)`)
     st.timer = clock.setTimeout(spawnHost, delay)
+  }
+
+  // A host that died without its teardown (kill -9, a crash) leaves its workers running as detached process
+  // groups: they would hold their sockets, sqlite locks and CPU beside the next life's workers. SIGKILL them
+  // (root, CAP_KILL) before the restart; a parked host leaves no workers behind either.
+  function sweepWorkers() {
+    const list = (d.orphans ?? orphanedWorkers)()
+    for (const w of list) { try { os.kill(w.pid, 'SIGKILL') } catch (e) { say(`sweep: kill pid ${w.pid} uid ${w.uid}: ${e.code ?? e.message}`) } }
+    if (list.length) say(`host: SIGKILLed ${list.length} orphaned worker process(es): ${list.map((w) => `${w.pid}/${w.uid}`).join(' ')}`)
   }
 
   // Row X: /control is 1000-owned; the line is appended by a uid-1000 helper, never by root.

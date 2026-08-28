@@ -37,10 +37,11 @@ spec:
   - name: session
     image: __IMAGE__
     imagePullPolicy: IfNotPresent
-    # the image's session supervisor is replaced by the sleeping stub (g3 drills the real one); host/index.mjs
-    # is the integrator's — when the shipped tree has none, the host stub stands in its place
+    # the image's session supervisor is replaced by the sleeping stub (g3 drills the real one) and the host by
+    # host-stub.mjs: this drill is the launcher's supervision of the host process (no spine, no deps); the real
+    # host under the same launcher is drilled in host/drill/step2 and host/drill/rows
     command: [ bash, -c ]
-    args: [ 'cp /code/host/drill/launcher/session-supervisor-stub.mjs /app/session-supervisor.mjs; [ -f /code/host/index.mjs ] || cp /code/host/drill/launcher/host-stub.mjs /code/host/index.mjs; exec bash /code/host/entrypoint.sh' ]
+    args: [ 'cp /code/host/drill/launcher/session-supervisor-stub.mjs /app/session-supervisor.mjs; cp /code/host/drill/launcher/host-stub.mjs /code/host/index.mjs; echo "[drill] host entry: $(head -c 120 /code/host/index.mjs | head -1)"; exec bash /code/host/entrypoint.sh' ]
     workingDir: /work
     securityContext:
       runAsUser: 0

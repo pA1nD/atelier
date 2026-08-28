@@ -87,6 +87,13 @@ export function run(os, spec, { timeoutMs = INSTALL_TIMEOUT_MS } = {}) {
   })
 }
 
+/** The scratch dir as a path another process can open: `<readlink(dirfd)>/scratch/<inst>` (the dirfd form when the link cannot be read). */
+export function realScratch(os, dirfd, instance, fallback) {
+  let base = null
+  try { base = os.readlinkFd(dirfd) } catch {}
+  return typeof base === 'string' && base ? path.posix.join(base, 'scratch', instance) : fallback
+}
+
 const tail = (s, n = 5) => String(s).split('\n').filter(Boolean).slice(-n).join(' | ')
 
 /**
@@ -110,6 +117,9 @@ export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = p
 
   const scratchDir = os.at(dirfd, `scratch/${spec.instance}`)
   const jail = applyJail(os, installPlan(spec, scratchDir), log)
+  // the cp and npm children see the host's `/proc/self/fd/N/…` as THEIR fd table (fd 3 is not the dirfd
+  // there): they get the real path (DESIGN I1.13); freeze.py keeps the dirfd form (it inherits fd 3)
+  const scratchReal = realScratch(os, dirfd, spec.instance, scratchDir)
   if (!jail.ok) { const f = jail.results.at(-1); return { ok: false, class: 'install', message: `scratch ${f.step.op} ${f.step.path}: ${f.code}` } }
 
   // thaw: a frozen tree comes back to build/ as the worker's so npm can re-run in place (no-op when nothing is frozen)
@@ -118,10 +128,10 @@ export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = p
   log(`install ${spec.slug}: thaw rc=${thaw.code} ${thawV.ok ? JSON.stringify(thawV.stats) : thawV.reason}`)
   if (thaw.code !== 0 || !thawV.ok) return { ok: false, class: 'freeze-abort', message: `thaw: ${thawV.reason ?? tail(thaw.stderr)}` }
 
-  const cp = await run(os, copyManifestSpec(spec, { scratchDir, hostEnv }), { timeoutMs })
+  const cp = await run(os, copyManifestSpec(spec, { scratchDir: scratchReal, hostEnv }), { timeoutMs })
   if (cp.code !== 0) return { ok: false, class: 'install', message: `package.json copy failed (rc=${cp.code}): ${tail(cp.stderr)}` }
 
-  const npm = await run(os, npmSpec(spec, { scratchDir, hostEnv }), { timeoutMs })
+  const npm = await run(os, npmSpec(spec, { scratchDir: scratchReal, hostEnv }), { timeoutMs })
   log(`install ${spec.slug}: npm rc=${npm.code} in ${ms()} ms`)
   if (npm.code !== 0) return { ok: false, class: 'install', message: `npm exit ${npm.code ?? npm.signal}: ${tail(npm.stderr)}` }
 

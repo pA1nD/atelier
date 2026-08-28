@@ -12,15 +12,14 @@ echo "== host launcher drill $(date -u +%FT%TZ) — repo $REPO ($(git -C "$REPO"
 IMAGE=$(grep -o 'ghcr.io/pa1nd/agent-image@sha256:[0-9a-f]*' "$SPINE_YAML" | head -1)
 [ -n "$IMAGE" ] || { echo "VERDICT: BLOCKED — no agent-image digest in $SPINE_YAML"; exit 1; }
 echo "== image: $IMAGE"
-# the tree every lane's Linux tests run in: host/, protocol/, package.json, plus the assets that exist here
+# host/ (the launcher, its stubs and tests), protocol/, package.json — the host stub needs no dependencies
 TAR=()
-for p in host protocol package.json index.html client.jsx chrome-resolve.js shims \
-         node_modules/esbuild node_modules/@esbuild node_modules/tailwindcss node_modules/@tailwindcss node_modules/ws node_modules/react node_modules/react-dom node_modules/@jridgewell node_modules/detect-libc node_modules/@jitl; do
+for p in host protocol package.json; do
   [ -e "$REPO/$p" ] && TAR+=("$p")
 done
 echo "== shipping: ${TAR[*]}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-tar -C "$REPO" --exclude='host/drill/launcher/out' --exclude='*.log' -czf "$TMP/code.tgz" "${TAR[@]}" || { echo "VERDICT: BLOCKED — tar failed"; exit 1; }
+COPYFILE_DISABLE=1 tar -C "$REPO" --exclude='host/drill/launcher/out' --exclude='*.log' -czf "$TMP/code.tgz" "${TAR[@]}" || { echo "VERDICT: BLOCKED — tar failed"; exit 1; }
 echo "$IMAGE" > "$TMP/image.txt"
 ssh -n -o ConnectTimeout=15 fsn-01 "rm -rf $CODE && mkdir -p $CODE/out" || { echo "VERDICT: BLOCKED — ssh fsn-01 failed"; exit 1; }
 scp -q "$TMP/code.tgz" "$TMP/image.txt" "$HERE/remote.sh" "$HERE/inpod.sh" "$HERE/pod.yaml.tpl" "fsn-01:$CODE/" || { echo "VERDICT: BLOCKED — scp failed"; exit 1; }

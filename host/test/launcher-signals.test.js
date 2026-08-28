@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { memory } from '../adapters/os.mjs'
 import { helperEnv } from '../hygiene.mjs'
-import { createLauncher, backoffMs, exitCode, RESTART } from '../launcher.mjs'
+import { createLauncher, backoffMs, exitCode, orphanedWorkers, RESTART } from '../launcher.mjs'
 
 function fakeClock() {
   let t = 1_000_000, id = 0
@@ -40,7 +40,7 @@ function boot(extra = {}) {
   const handlers = {}
   let exited = null
   const l = createLauncher({ os, io: fakeIo(state), env: ENV, log: (m) => logs.push(m), clock, exit: (c) => { exited = c }, signals: { on: (s, fn) => { handlers[s] = fn } },
-    hostArgv: ['node', '/app/host/index.mjs'], sessionArgv: ['node', '/app/session-supervisor.mjs'], devToken: 'D', ...extra })
+    hostArgv: ['node', '/app/host/index.mjs'], sessionArgv: ['node', '/app/session-supervisor.mjs'], devToken: 'D', orphans: () => [], ...extra })
   l.boot()
   const [host, sup] = state.spawned
   return { state, os, clock, logs, handlers, l, host, sup, exited: () => exited, spawned: () => state.spawned }
@@ -48,7 +48,7 @@ function boot(extra = {}) {
 const helpers = (state) => state.spawned.filter((c) => c.spec.argv[0] === 'sh')
 const hosts = (state) => state.spawned.filter((c) => c.spec.argv[1] === '/app/host/index.mjs')
 
-test('host exit: host-ready unlinked, one crash line via the uid-1000 helper (row X), restart after 0.5 s, supervisor untouched', () => {
+test('host exit: host-ready unlinked, one crash line via the uid-1000 helper (row X), restart at once, supervisor untouched', () => {
   const { state, clock, host, sup, logs, exited } = boot()
   state.fs['/run/atelier/host-ready'] = { uid: 0, gid: 0, mode: 0o644, type: 'file' }
   const supKills = []; sup.onSignal = (s) => supKills.push(s)
@@ -58,17 +58,16 @@ test('host exit: host-ready unlinked, one crash line via the uid-1000 helper (ro
   assert.deepEqual(h.spec, { argv: ['sh', '-c', 'cat >> /control/.host-crash'], env: helperEnv(ENV), cwd: '/', uid: 1000, gid: 1000, groups: [], umask: 0o077, stdio: ['pipe', 'ignore', 'inherit'] })
   assert.deepEqual(h.argv, ['sh', '-c', 'umask 77; exec "$@"', 'sh', 'setpriv', '--reuid=1000', '--regid=1000', '--clear-groups', '--', 'sh', '-c', 'cat >> /control/.host-crash'])
   assert.deepEqual(h.spec.env, { PATH: '/usr/bin:/bin' })
-  assert.equal(hosts(state).length, 1, 'not yet restarted')
-  clock.advance(499); assert.equal(hosts(state).length, 1)
-  clock.advance(1); assert.equal(hosts(state).length, 2, 'restarted after 500 ms')
+  assert.equal(hosts(state).length, 1, 'the restart is a timer, not synchronous')
+  clock.advance(0); assert.equal(hosts(state).length, 2, 'restarted at once (the first exit in the window)')
   assert.equal(hosts(state)[1].spec.stdio[3], 3, 'the same dirfd is inherited by the new host')
   assert.deepEqual(supKills, []); assert.equal(exited(), null)
   assert.ok(logs.some((l) => /host: exited code=1 signal=null/.test(l)))
-  assert.ok(logs.some((l) => /host: restart in 500 ms/.test(l)))
+  assert.ok(logs.some((l) => /host: restart in 0 ms \(exit 1 in window\)/.test(l)))
 })
 
-test('backoff doubles 0.5 → 30 s and parks after 10 exits in 10 min; the pod stays up', () => {
-  assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8, 9].map(backoffMs), [500, 1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000])
+test('backoff: at once, then 0.5 → 30 s doubling; parks after 10 exits in 10 min; the pod stays up', () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8, 9].map(backoffMs), [0, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000])
   const { state, clock, logs, exited } = boot()
   const delays = []
   for (let i = 1; i <= 10; i++) {
@@ -76,10 +75,11 @@ test('backoff doubles 0.5 → 30 s and parks after 10 exits in 10 min; the pod s
     const before = hosts(state).length, t0 = clock.now()
     cur.exit(134)
     if (i === 10) break
+    clock.advance(0)
     while (hosts(state).length === before) clock.advance(100)
     delays.push(clock.now() - t0)
   }
-  assert.deepEqual(delays, [500, 1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000])
+  assert.deepEqual(delays, [0, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000])
   assert.ok(logs.some((l) => /host: parked after 10 exits\/10 min/.test(l)))
   clock.advance(120_000)
   assert.equal(hosts(state).length, 10, 'no 11th spawn')
@@ -95,8 +95,9 @@ test('exits older than 10 min fall out of the window: the backoff and the park c
   clock.advance(RESTART.windowMs)
   const before = hosts(state).length, t0 = clock.now()
   hosts(state).at(-1).exit(1)
+  clock.advance(0)
   while (hosts(state).length === before) clock.advance(100)
-  assert.equal(clock.now() - t0, 500, 'back to the base delay after a quiet window')
+  assert.equal(clock.now() - t0, 0, 'back to an immediate restart after a quiet window')
 })
 
 test('SIGTERM: host signalled first, supervisor forwarded, exit with the supervisor code once both are gone', () => {
@@ -187,4 +188,16 @@ test('a host that cannot be spawned (error event) follows the restart policy, ne
   assert.equal(hosts(state).length, 2)
   assert.equal(exited(), null)
   assert.equal(logs.filter((l) => /host: exited/.test(l)).length, 1)
+})
+
+test('a dead host\'s workers are SIGKILLed before the restart (every /proc uid in the worker range); the supervisor is not', () => {
+  const procs = { '/proc': ['1', '8', '17', '102', '4365', 'self', 'meminfo'], '/proc/1/status': 'Name:\tbash\nUid:\t0\t0\t0\t0\n', '/proc/8/status': 'Uid:\t0\t0\t0\t0\n', '/proc/17/status': 'Uid:\t1000\t1000\t1000\t1000\n', '/proc/102/status': 'Uid:\t20001\t20001\t20001\t20001\n', '/proc/4365/status': 'Uid:\t20004\t20004\t20004\t20004\n' }
+  const found = orphanedWorkers({ readdir: (d) => procs[d], read: (p) => { if (!(p in procs)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return procs[p] } })
+  assert.deepEqual(found, [{ pid: 102, uid: 20001 }, { pid: 4365, uid: 20004 }])
+  assert.deepEqual(orphanedWorkers({ readdir: () => { throw new Error('EACCES') } }), [])
+  const { state, host, logs } = boot({ orphans: () => found })
+  host.exit(null, 'SIGKILL')
+  const kills = state.calls.filter((c) => c[0] === 'kill').map((c) => c.slice(1))
+  assert.deepEqual(kills, [[102, 'SIGKILL'], [4365, 'SIGKILL']])
+  assert.ok(logs.some((l) => /host: SIGKILLed 2 orphaned worker process\(es\): 102\/20001 4365\/20004/.test(l)))
 })

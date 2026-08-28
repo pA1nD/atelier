@@ -1,0 +1,11 @@
+{
+  "name": "deps",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "loot-pkg": "file:/code/drill-apps/loot-pkg-1.0.0.tgz",
+    "better-sqlite3": "^12.2.0",
+    "core-js": "^3.38.0"
+  }
+}

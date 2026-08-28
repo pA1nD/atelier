@@ -41,7 +41,7 @@ $K exec computer -c stage -- sh -c 'tar xzf /tmp/code.tgz -C /code && touch /cod
 T_STAGED=$(now)
 log "staged; waiting for Ready (≤ 60 s incl. container creation)"
 R=$(waitready 60)
-[ "$R" = timeout ] && { $K describe pod computer | tail -20; $K logs computer -c session 2>&1 | tail -30; echo "VERDICT: FAIL — never Ready"; exit 1; }
+[ "$R" = timeout ] && { $K describe pod computer | tail -20; $K logs computer -c session 2>&1 | head -60; echo "VERDICT: FAIL — never Ready"; exit 1; }
 STARTED=$($K get pod computer -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}')
 SINCE_START=$(python3 -c "import datetime as d; s=d.datetime.strptime('$STARTED','%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=d.timezone.utc).timestamp(); print(round($(now)-s,1))")
 log "row 1: Ready $R s after staging, ≤ $SINCE_START s after the container start (startedAt has 1 s grain) — $(readyq)"

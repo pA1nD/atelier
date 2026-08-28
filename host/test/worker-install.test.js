@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { memory } from '../adapters/os.mjs'
-import { installDeps, npmSpec, freezeSpec, copyManifestSpec, parseFreeze, FREEZE_PATH, NPM_ARGV } from '../worker/install.mjs'
+import { installDeps, npmSpec, freezeSpec, copyManifestSpec, parseFreeze, realScratch, FREEZE_PATH, NPM_ARGV } from '../worker/install.mjs'
 
 const spec = { instance: 'i-0123456789abcdef', slug: 'demo', company: 'acme', uid: 20001, appDir: '/work/apps/demo', dataDir: '/proc/self/fd/3/data/i-0123456789abcdef' }
 const hostEnv = { PATH: '/usr/bin:/bin', NODE_ENV: 'production', HOME: '/root', CHANNEL_TOKEN: 'secret' }
@@ -94,6 +94,22 @@ test('thaw refusal (app folder not 1000-owned / symlinked) → freeze-abort befo
   assert.equal(r.class, 'freeze-abort')
   assert.match(r.message, /^thaw: agent-step/)
   assert.equal(state.calls.filter((c) => c[0] === 'spawn').length, 1)
+})
+
+test('the cp and npm children get the REAL scratch path, never the host\'s /proc/self/fd form (fd 3 is not the dirfd in a child)', async () => {
+  const state = { fs: {}, fds: new Map([[3, '/work/.atelier']]) }
+  const base = driven(state, (argv) => { const k = kind(argv); if (k.startsWith('freeze')) return { code: 0, stdout: `FREEZE-OK ${k.split(':')[1]} demo files=0 noop=1 total_ms=0.1` } })
+  const os = { ...base, at: (fd, rel) => `/proc/self/fd/${fd}/${rel}` }      // linuxRoot's at() shape
+  const r = await installDeps({ os, dirfd: 3, spec, hostEnv, log: () => {} })
+  assert.equal(r.ok, true)
+  const spawns = state.calls.filter((c) => c[0] === 'spawn').map((c) => c[2])
+  const cp = spawns[1], npm = spawns[2]
+  assert.deepEqual(cp.argv.slice(-2), ['/work/apps/demo', `${SCRATCH}/build`])
+  assert.equal(npm.cwd, `${SCRATCH}/build`)
+  assert.equal(npm.env.HOME, `${SCRATCH}/home`)
+  assert.equal(realScratch({ readlinkFd: () => { throw new Error('x') } }, 3, spec.instance, '/proc/self/fd/3/scratch/x'), '/proc/self/fd/3/scratch/x')
+  // the scratch plan itself stays dirfd-relative (the host's own mkdir/chown)
+  assert.equal(state.calls.find((c) => c[0] === 'mkdir')[1], `/proc/self/fd/3/scratch/${spec.instance}`)
 })
 
 test('unprivileged(): npm runs in the app folder as the current user, no scratch, no freeze (logged)', async () => {

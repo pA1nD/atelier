@@ -80,7 +80,7 @@ test('real process: plan on disk, fd 3 to the host, crash → helper line → re
   // first host crashed: one crash line through the helper (`cat >> .host-crash`), then a restart that became ready
   const crash = fs.readFileSync(`${p.control}/.host-crash`, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
   assert.equal(crash.length, 1); assert.equal(crash[0].code, 1); assert.equal(crash[0].signal, null); assert.equal(crash[0].exits, 1); assert.ok(crash[0].at > 0)
-  assert.match(out, /host: restart in 500 ms/)
+  assert.match(out, /host: restart in 0 ms \(exit 1 in window\)/)
   // the restarted host saw fd 3 as a directory, umask 077, cwd /, the row-H env, and was torn down on the supervisor exit
   assert.ok(fs.existsSync(`${p.run}/host-term`), 'host got SIGTERM after the supervisor exit')
   assert.equal(fs.existsSync(`${p.run}/host-ready`), false)
