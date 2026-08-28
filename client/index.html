@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Atelier</title>
+
+  <!-- The 2.0 document template (shell/DESIGN.md §2.2; the slot names are shell/document.mjs
+       SLOTS). The shell fills five slots, in this order and no other; everything else is static. The client ships zero pixels: fonts,
+       colors, rail, topbar, favicon, theme-color live in the chrome module the bootstrap names.
+       The one inline rule is non-visual: a margin reset plus a color-scheme hint so the brief
+       pre-chrome paint follows the OS light/dark setting. -->
+  <style>html{color-scheme:light dark}html,body{margin:0}</style>
+
+  <!-- 1. STYLES — ONE render-blocking sheet, id="atelier-chrome-styles": the active app's
+       `/modules/<c>/<s>/styles.css?rev=N` on `/<c>/<s>…`, the chrome's
+       `/modules/global/<chrome>/styles.css?rev=<chromeRev>` on an app-less document. The client
+       swaps it per app on SPA navigation (client/sheet.js). -->
+  <!--__STYLES__-->
+
+  <!-- 2. React + ReactDOM UMDs — the only ambient runtime (modules are React components sharing
+       this one instance); the shell serves the production builds whenever it runs with
+       NODE_ENV=production (the fleet always), the development builds otherwise. -->
+  <script src="/assets/react.js"></script>
+  <script src="/assets/react-dom.js"></script>
+
+  <!-- 3. BOOTSTRAP — `<script nonce="…">window.__ATELIER__ = {…}</script>` (§2.1): mode, label,
+       chromeApi: 2, user (one company, its module rows with instance + rev), workspace,
+       companies, portal, activeQid, chromeQid / defaultChromeQid / chromes, chromeRev. -->
+  <!--__BOOTSTRAP__-->
+
+  <!-- 4a. IMPORTMAP — `<script type="importmap" nonce="…">` mapping `@atelier/kit` to the chrome's
+       `kit.js?rev=<chromeRev>` when the chrome ships one. Before any module script: once parsed
+       the map applies to every later static and dynamic import. -->
+  <!--__IMPORTMAP__-->
+
+  <!-- 4b. PRELOADS — `<link rel="modulepreload">` for the client, the chrome bundle, kit, the
+       active app's entry and its relative imports. AFTER the import map, always: a preload that
+       runs before the map resolves `@atelier/kit` eagerly, caches the failure and the later
+       import() dies with zero network errors. -->
+  <!--__PRELOADS__-->
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- 5. CLIENT — `<script type="module" src="/assets/client.js">`: client/client.jsx bundled by
+       the shell (client/build.mjs). Wires the events socket (window.__atelier.subscribe / self),
+       URL routing, imports the chrome and the active app at their revisions, and renders. -->
+  <!--__CLIENT__-->
+</body>
+</html>
