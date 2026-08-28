@@ -18,6 +18,7 @@ const VERBS = new Map([
   ['package', './package.js'],
   ['publish', './publish.js'],
   ['list', './list.js'],
+  ['doctor', './doctor/cli.mjs'],
 ]);
 const verb = VERBS.get(process.argv[2]);
 if (verb) {
