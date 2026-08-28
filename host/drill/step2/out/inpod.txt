@@ -4,12 +4,11 @@
          8       1     0     0 MainThread      node /code/host/launcher.mjs
         16       8     0     0 MainThread      node /code/host/index.mjs
         17       8  1000  1000 MainThread      node /app/session-supervisor.mjs
-        66      16     0     0 esbuild         /code/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.28.0 --ping
-        77      16 20001 20001 MainThread      node --max-old-space-size=380 /code/host/worker/runtime.mjs
-        83      16 20002 20002 MainThread      node --max-old-space-size=380 /code/host/worker/runtime.mjs
-       122       0     0     0 bash            bash /tmp/inpod.sh i-a9f177c1128b5344 20001 i-6b9a782ddcd135fc 20002 1
-       127       0     0     0 runc:[2:INIT]   runc init
-       135     122     0     0 sed             sed s/^/   /
+        67      16     0     0 esbuild         /code/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.28.0 --ping
+        79      16 20001 20001 MainThread      node --max-old-space-size=380 /code/host/worker/runtime.mjs
+        85      16 20002 20002 MainThread      node --max-old-space-size=380 /code/host/worker/runtime.mjs
+       126       0     0     0 bash            bash /tmp/inpod.sh i-e7d39a532b589917 20001 i-ad6af2be3877d77b 20002 1
+       134     126     0     0 sed             sed s/^/   /
 PASS PID 1 is bash = bash
 PASS launcher pid 8
 PASS host pid 16
@@ -20,7 +19,7 @@ PASS host umask = 0077
 PASS host cwd = /
 PASS host supplementary groups (between reads: none) = 
 PASS session supervisor uid/groups = 1000/19999
-PASS blitzfeed worker pid 77 (uid 20001)
+PASS blitzfeed worker pid 79 (uid 20001)
 PASS blitzfeed worker Uid line (real/effective/saved/fs) = 20001 20001 20001 20001
 PASS blitzfeed worker Gid line = 20001 20001 20001 20001
 PASS blitzfeed worker supplementary groups = 
@@ -31,7 +30,7 @@ PASS blitzfeed worker oom_score_adj = 1000
 PASS blitzfeed worker RLIMIT_DATA = 1073741824
 PASS blitzfeed worker RLIMIT_NPROC = 64
 PASS blitzfeed worker RLIMIT_CORE = 0
-PASS probe worker pid 83 (uid 20002)
+PASS probe worker pid 85 (uid 20002)
 PASS probe worker Uid line (real/effective/saved/fs) = 20002 20002 20002 20002
 PASS probe worker Gid line = 20002 20002 20002 20002
 PASS probe worker supplementary groups = 
@@ -49,31 +48,31 @@ PASS /work/apps/blitzfeed = 1000:20001 2750
 PASS /work/apps/probe = 1000:20002 2750
 PASS /work/apps/blitzfeed/backend.js (the agent's file, untouched; stat as the owner — root has no DAC) = 1000:1000 644
 PASS /work/.claude (the agent's) = 1000:1000 700
-PASS /work/.atelier = 0:0 755
+PASS /work/.atelier = 0:0 711
 PASS /work/.atelier/agent.log = 0:1000 640
-PASS /work/.atelier/i-a9f177c1128b5344 (marker dir) = 0:0 711
-PASS /work/.atelier/i-a9f177c1128b5344/slug = 0:0 644
-PASS /work/.atelier/i-a9f177c1128b5344/uid = 0:0 644
-PASS /work/.atelier/i-a9f177c1128b5344/revision.json = 0:0 644
-PASS /work/.atelier/i-a9f177c1128b5344/registered.json = 0:0 600
-PASS /work/.atelier/i-a9f177c1128b5344/current → rev-1 = ../last-good/i-a9f177c1128b5344/rev-1
+PASS /work/.atelier/i-e7d39a532b589917 (marker dir) = 0:0 711
+PASS /work/.atelier/i-e7d39a532b589917/slug = 0:0 600
+PASS /work/.atelier/i-e7d39a532b589917/uid = 0:0 600
+PASS /work/.atelier/i-e7d39a532b589917/revision.json = 0:0 600
+PASS /work/.atelier/i-e7d39a532b589917/registered.json = 0:0 600
+PASS /work/.atelier/i-e7d39a532b589917/current → rev-1 = ../last-good/i-e7d39a532b589917/rev-1
 PASS /work/.atelier/data = 0:0 711
-PASS /work/.atelier/data/i-a9f177c1128b5344 = 20001:19999 2770
-PASS /work/.atelier/data/i-6b9a782ddcd135fc = 20002:19999 2770
-   data file the probe worker wrote (stat as its uid — root has no DAC into 2770): stat: cannot statx '/work/.atelier/data/i-6b9a782ddcd135fc/probe.txt': No such file or directory (umask 002 → 0664 inside a 2770 dir)
+PASS /work/.atelier/data/i-e7d39a532b589917 = 20001:19999 2770
+PASS /work/.atelier/data/i-ad6af2be3877d77b = 20002:19999 2770
+   data file the probe worker wrote (stat as its uid — root has no DAC into 2770): stat: cannot statx '/work/.atelier/data/i-ad6af2be3877d77b/probe.txt': No such file or directory (umask 002 → 0664 inside a 2770 dir)
 PASS /work/.atelier/last-good = 0:0 711
-PASS /work/.atelier/last-good/i-a9f177c1128b5344 = 0:20001 750
-PASS /work/.atelier/last-good/i-a9f177c1128b5344/rev-1 = 0:20001 750
-PASS /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/backend.js = 0:20001 640
-PASS /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/frontend/frontend.js = 0:20001 640
-PASS /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/styles.css = 0:20001 640
+PASS /work/.atelier/last-good/i-e7d39a532b589917 = 0:20001 750
+PASS /work/.atelier/last-good/i-e7d39a532b589917/rev-1 = 0:20001 750
+PASS /work/.atelier/last-good/i-e7d39a532b589917/rev-1/backend.js = 0:20001 640
+PASS /work/.atelier/last-good/i-e7d39a532b589917/rev-1/frontend/frontend.js = 0:20001 640
+PASS /work/.atelier/last-good/i-e7d39a532b589917/rev-1/styles.css = 0:20001 640
 PASS /work/.atelier/scratch = 0:0 711
 PASS /work/.atelier/tmp = 0:0 711
-PASS /work/.atelier/tmp/i-a9f177c1128b5344 = 20001:20001 700
+PASS /work/.atelier/tmp/i-e7d39a532b589917 = 20001:20001 700
 PASS /run/atelier = 0:0 711
 PASS /run/atelier/w = 0:0 711
-PASS /run/atelier/w/i-a9f177c1128b5344 = 0:20001 730
-PASS /run/atelier/w/i-a9f177c1128b5344/w-1.sock (after READY) = 0:0 700
+PASS /run/atelier/w/i-e7d39a532b589917 (after READY: no worker write bit) = 0:20001 710
+PASS /run/atelier/w/i-e7d39a532b589917/w-1.sock (after READY) = 0:0 700
 PASS /run/atelier/dev = 0:1000 710
 PASS /run/atelier/dev/shell.sock = 0:1000 660
 PASS /run/atelier/bootstrap.token = 0:0 400
@@ -88,60 +87,60 @@ PASS /tmp/.X11-unix = 0:0 1777
 == the agent's view (uid 1000, group 1000 only — the real agent also carries 19999)
 PASS agent reads agent.log = 2026
 PASS agent lists its app folder = backend.js frontend.jsx module.json styles.css 
-PASS agent cannot list last-good/i-a9f177c1128b5344 = 1
+PASS agent cannot list last-good/i-e7d39a532b589917 = 1
 PASS agent cannot read bootstrap.token = 1
 PASS agent reads its dev token = 64
 PASS root-owned inodes in /work outside .atelier, as uid 1000 = 0
    .atelier + /run/atelier tree:
-find: ‘/work/.atelier/tmp/i-a9f177c1128b5344’: Permission denied
-find: ‘/work/.atelier/tmp/i-6b9a782ddcd135fc’: Permission denied
-find: ‘/work/.atelier/data/i-a9f177c1128b5344’: Permission denied
-find: ‘/work/.atelier/data/i-6b9a782ddcd135fc’: Permission denied
+find: ‘/work/.atelier/tmp/i-ad6af2be3877d77b’: Permission denied
+find: ‘/work/.atelier/tmp/i-e7d39a532b589917’: Permission denied
+find: ‘/work/.atelier/data/i-ad6af2be3877d77b’: Permission denied
+find: ‘/work/.atelier/data/i-e7d39a532b589917’: Permission denied
 find: ‘/run/atelier/session’: Permission denied
-   2770 20001:19999 /work/.atelier/data/i-a9f177c1128b5344
-   2770 20002:19999 /work/.atelier/data/i-6b9a782ddcd135fc
+   2770 20001:19999 /work/.atelier/data/i-e7d39a532b589917
+   2770 20002:19999 /work/.atelier/data/i-ad6af2be3877d77b
    400 root:root /run/atelier/bootstrap.token
    400 root:root /run/atelier/dev.token
-   600 root:root /work/.atelier/i-6b9a782ddcd135fc/registered.json
-   600 root:root /work/.atelier/i-a9f177c1128b5344/registered.json
-   640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/backend.js
-   640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/backend.js.map
-   640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/frontend/frontend.js
-   640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/styles.css
-   640 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1/backend.js
-   640 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1/backend.js.map
-   640 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1/styles.css
+   600 root:root /work/.atelier/i-ad6af2be3877d77b/registered.json
+   600 root:root /work/.atelier/i-ad6af2be3877d77b/revision.json
+   600 root:root /work/.atelier/i-ad6af2be3877d77b/slug
+   600 root:root /work/.atelier/i-ad6af2be3877d77b/uid
+   600 root:root /work/.atelier/i-e7d39a532b589917/registered.json
+   600 root:root /work/.atelier/i-e7d39a532b589917/revision.json
+   600 root:root /work/.atelier/i-e7d39a532b589917/slug
+   600 root:root /work/.atelier/i-e7d39a532b589917/uid
+   640 root:20001 /work/.atelier/last-good/i-e7d39a532b589917/rev-1/backend.js
+   640 root:20001 /work/.atelier/last-good/i-e7d39a532b589917/rev-1/backend.js.map
+   640 root:20001 /work/.atelier/last-good/i-e7d39a532b589917/rev-1/frontend/frontend.js
+   640 root:20001 /work/.atelier/last-good/i-e7d39a532b589917/rev-1/styles.css
+   640 root:20002 /work/.atelier/last-good/i-ad6af2be3877d77b/rev-1/backend.js
+   640 root:20002 /work/.atelier/last-good/i-ad6af2be3877d77b/rev-1/backend.js.map
+   640 root:20002 /work/.atelier/last-good/i-ad6af2be3877d77b/rev-1/styles.css
    640 root:node /work/.atelier/agent.log
    644 root:root /run/atelier/host-ready
-   644 root:root /work/.atelier/i-6b9a782ddcd135fc/revision.json
-   644 root:root /work/.atelier/i-6b9a782ddcd135fc/slug
-   644 root:root /work/.atelier/i-6b9a782ddcd135fc/uid
-   644 root:root /work/.atelier/i-a9f177c1128b5344/revision.json
-   644 root:root /work/.atelier/i-a9f177c1128b5344/slug
-   644 root:root /work/.atelier/i-a9f177c1128b5344/uid
    660 root:node /run/atelier/dev/shell.sock
-   700 20001:20001 /work/.atelier/tmp/i-a9f177c1128b5344
-   700 20002:20002 /work/.atelier/tmp/i-6b9a782ddcd135fc
+   700 20001:20001 /work/.atelier/tmp/i-e7d39a532b589917
+   700 20002:20002 /work/.atelier/tmp/i-ad6af2be3877d77b
    700 node:node /run/atelier/session
-   700 root:root /run/atelier/w/i-6b9a782ddcd135fc/w-1.sock
-   700 root:root /run/atelier/w/i-a9f177c1128b5344/w-1.sock
+   700 root:root /run/atelier/w/i-ad6af2be3877d77b/w-1.sock
+   700 root:root /run/atelier/w/i-e7d39a532b589917/w-1.sock
+   710 root:20001 /run/atelier/w/i-e7d39a532b589917
+   710 root:20002 /run/atelier/w/i-ad6af2be3877d77b
    710 root:node /run/atelier/dev
    711 root:root /run/atelier
    711 root:root /run/atelier/w
+   711 root:root /work/.atelier
    711 root:root /work/.atelier/data
-   711 root:root /work/.atelier/i-6b9a782ddcd135fc
-   711 root:root /work/.atelier/i-a9f177c1128b5344
+   711 root:root /work/.atelier/i-ad6af2be3877d77b
+   711 root:root /work/.atelier/i-e7d39a532b589917
    711 root:root /work/.atelier/last-good
    711 root:root /work/.atelier/scratch
    711 root:root /work/.atelier/tmp
-   730 root:20001 /run/atelier/w/i-a9f177c1128b5344
-   730 root:20002 /run/atelier/w/i-6b9a782ddcd135fc
-   750 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344
-   750 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-1
-   750 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-1/frontend
-   750 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc
-   750 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1
-   755 root:root /work/.atelier
-   777 root:root /work/.atelier/i-6b9a782ddcd135fc/current
-   777 root:root /work/.atelier/i-a9f177c1128b5344/current
+   750 root:20001 /work/.atelier/last-good/i-e7d39a532b589917
+   750 root:20001 /work/.atelier/last-good/i-e7d39a532b589917/rev-1
+   750 root:20001 /work/.atelier/last-good/i-e7d39a532b589917/rev-1/frontend
+   750 root:20002 /work/.atelier/last-good/i-ad6af2be3877d77b
+   750 root:20002 /work/.atelier/last-good/i-ad6af2be3877d77b/rev-1
+   777 root:root /work/.atelier/i-ad6af2be3877d77b/current
+   777 root:root /work/.atelier/i-e7d39a532b589917/current
 INPOD: pass=77 fail=0

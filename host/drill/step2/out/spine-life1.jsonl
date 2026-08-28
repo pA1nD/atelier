@@ -1,15 +1,15 @@
-{"at":1787919123617,"method":"POST","path":"/v1/host/register","auth":"bootstrap","body":{"pod_ip":"10.42.0.134","host_started_at":1787919123604},"status":200}
-{"at":1787919125423,"method":"PUT","path":"/v1/apps/i-a9f177c1128b5344","auth":"token","body":{"slug":"blitzfeed","meta":{"name":"BlitzFeed"}},"status":201}
-{"at":1787919125471,"method":"PUT","path":"/v1/apps/i-6b9a782ddcd135fc","auth":"token","body":{"slug":"probe","meta":{"name":"Probe"}},"status":201}
-{"at":1787919125511,"method":"GET","path":"/v1/apps/i-a9f177c1128b5344/config","auth":"token","body":{},"status":200}
-{"at":1787919125533,"method":"GET","path":"/v1/apps/i-6b9a782ddcd135fc/config","auth":"token","body":{},"status":200}
-{"at":1787919125589,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-a9f177c1128b5344","slug":"blitzfeed","uid":20001,"rev":1}]},"status":200}
-{"at":1787919125603,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-6b9a782ddcd135fc","slug":"probe","uid":20002,"rev":1}]},"status":200}
-{"at":1787919125604,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:a9664659de83694f","topic":"i-a9f177c1128b5344","seq":1,"type":"invalidate"},{"stream":"computer-drill:a9664659de83694f","topic":"i-6b9a782ddcd135fc","seq":1,"type":"invalidate"}],"status":200}
-{"at":1787919128970,"method":"POST","path":"/v1/host/event","auth":"token","body":{"kind":"app-error","error":{"instance":"i-a9f177c1128b5344","rev":2,"kind":"build","fingerprint":"build|backend.js:2|Unexpected end of file","count":1,"firstAt":1787919128965,"lastAt":1787919128965,"message":"Unexpected end of file","file":"backend.js","line":2,"col":1,"hint":"backend.js:2:1 Unexpected end of file — close the open brace / parenthesis before the end of the file"}},"valid":true,"status":200}
-{"at":1787919131951,"method":"GET","path":"/v1/apps/i-a9f177c1128b5344/config","auth":"token","body":{},"status":200}
-{"at":1787919132068,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-a9f177c1128b5344","slug":"blitzfeed","uid":20001,"rev":3}]},"status":200}
-{"at":1787919132076,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:a9664659de83694f","topic":"i-a9f177c1128b5344","seq":2,"type":"invalidate"}],"status":200}
-{"at":1787919133623,"method":"POST","path":"/v1/host/heartbeat","auth":"token","body":{"visible_apps":2,"last_served_at":1787919133551,"pod_ip":"10.42.0.134"},"status":200}
-{"at":1787919134999,"method":"POST","path":"/v1/host/event","auth":"token","body":{"kind":"app-error","error":{"instance":"i-a9f177c1128b5344","rev":3,"kind":"worker","fingerprint":"worker|-:-|worker died: signal SIGKILL","count":1,"firstAt":1787919134999,"lastAt":1787919134999,"message":"worker died: signal SIGKILL"}},"valid":true,"status":200}
-{"at":1787919135061,"method":"GET","path":"/v1/apps/i-a9f177c1128b5344/config","auth":"token","body":{},"status":200}
+{"at":1787926281495,"method":"POST","path":"/v1/host/register","auth":"bootstrap","body":{"pod_ip":"10.42.0.142","host_started_at":1787926281485},"status":200}
+{"at":1787926283152,"method":"PUT","path":"/v1/apps/i-e7d39a532b589917","auth":"token","body":{"slug":"blitzfeed","meta":{"name":"BlitzFeed"}},"status":201}
+{"at":1787926283176,"method":"PUT","path":"/v1/apps/i-ad6af2be3877d77b","auth":"token","body":{"slug":"probe","meta":{"name":"Probe"}},"status":201}
+{"at":1787926283219,"method":"GET","path":"/v1/apps/i-e7d39a532b589917/config","auth":"token","body":{},"status":200}
+{"at":1787926283259,"method":"GET","path":"/v1/apps/i-ad6af2be3877d77b/config","auth":"token","body":{},"status":200}
+{"at":1787926283341,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-ad6af2be3877d77b","slug":"probe","uid":20002,"rev":1}]},"status":200}
+{"at":1787926283352,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-e7d39a532b589917","slug":"blitzfeed","uid":20001,"rev":1}]},"status":200}
+{"at":1787926283352,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:cade9d23a6d9106b","topic":"i-ad6af2be3877d77b","seq":1,"type":"invalidate"},{"stream":"computer-drill:cade9d23a6d9106b","topic":"i-e7d39a532b589917","seq":1,"type":"invalidate"}],"status":200}
+{"at":1787926286706,"method":"POST","path":"/v1/host/event","auth":"token","body":{"kind":"app-error","error":{"instance":"i-e7d39a532b589917","rev":2,"kind":"build","fingerprint":"build|backend.js:2|Unexpected end of file","count":1,"firstAt":1787926286699,"lastAt":1787926286699,"message":"Unexpected end of file","file":"backend.js","line":2,"col":1,"hint":"backend.js:2:1 Unexpected end of file — close the open brace / parenthesis before the end of the file"}},"valid":true,"status":200}
+{"at":1787926289627,"method":"GET","path":"/v1/apps/i-e7d39a532b589917/config","auth":"token","body":{},"status":200}
+{"at":1787926289687,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-e7d39a532b589917","slug":"blitzfeed","uid":20001,"rev":3}]},"status":200}
+{"at":1787926289697,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:cade9d23a6d9106b","topic":"i-e7d39a532b589917","seq":2,"type":"invalidate"}],"status":200}
+{"at":1787926291500,"method":"POST","path":"/v1/host/heartbeat","auth":"token","body":{"visible_apps":2,"last_served_at":1787926290957,"pod_ip":"10.42.0.142"},"status":200}
+{"at":1787926292433,"method":"POST","path":"/v1/host/event","auth":"token","body":{"kind":"app-error","error":{"instance":"i-e7d39a532b589917","rev":3,"kind":"worker","fingerprint":"worker|-:-|worker died: signal SIGKILL","count":1,"firstAt":1787926292432,"lastAt":1787926292432,"message":"worker died: signal SIGKILL"}},"valid":true,"status":200}
+{"at":1787926292479,"method":"GET","path":"/v1/apps/i-e7d39a532b589917/config","auth":"token","body":{},"status":200}
