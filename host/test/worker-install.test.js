@@ -96,6 +96,20 @@ test('thaw refusal (app folder not 1000-owned / symlinked) → freeze-abort befo
   assert.equal(state.calls.filter((c) => c[0] === 'spawn').length, 1)
 })
 
+test('re-install: build already exists (a prior freeze left it agent-owned) → the build steps are dropped so applyJail does not EOWNER; thaw reclaims it', async () => {
+  const state = { fs: { [`${SCRATCH}/build`]: { uid: 1000, gid: 1000, mode: 0o755, type: 'dir' } }, fds: new Map([[3, '/work/.atelier']]) }
+  const order = []
+  const os = driven(state, (argv) => { const k = kind(argv); order.push(k); if (k === 'freeze:thaw') return { code: 0, stdout: 'FREEZE-OK thaw demo files=4378 rename_ms=1 total_ms=40' }; if (k === 'freeze:freeze') return { code: 0, stdout: 'FREEZE-OK freeze demo files=4378 total_ms=42' } })
+  const r = await installDeps({ os, dirfd: 3, spec, hostEnv, log: () => {} })
+  assert.equal(r.ok, true)
+  assert.deepEqual(order, ['freeze:thaw', 'cp', 'npm', 'freeze:freeze'])
+  // the scratch + home steps still run; the three build steps are gone (thaw owns build now)
+  const fsCalls = state.calls.filter((c) => c[0] !== 'spawn').map((c) => `${c[0]} ${c[1]}`)
+  assert.ok(!fsCalls.includes(`mkdir ${SCRATCH}/build`), 'build mkdir dropped')
+  assert.ok(!fsCalls.includes(`chown ${SCRATCH}/build`), 'build chown dropped')
+  assert.ok(fsCalls.includes(`mkdir ${SCRATCH}/home`), 'home still created')
+})
+
 test('the cp and npm children get the REAL scratch path, never the host\'s /proc/self/fd form (fd 3 is not the dirfd in a child)', async () => {
   const state = { fs: {}, fds: new Map([[3, '/work/.atelier']]) }
   const base = driven(state, (argv) => { const k = kind(argv); if (k.startsWith('freeze')) return { code: 0, stdout: `FREEZE-OK ${k.split(':')[1]} demo files=0 noop=1 total_ms=0.1` } })

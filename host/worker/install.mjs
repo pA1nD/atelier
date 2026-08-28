@@ -116,7 +116,15 @@ export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = p
   }
 
   const scratchDir = os.at(dirfd, `scratch/${spec.instance}`)
-  const jail = applyJail(os, installPlan(spec, scratchDir), log)
+  const buildDir = path.posix.join(scratchDir, 'build')
+  // A freeze hands `build` to the AGENT (1000) for the rename and leaves it there; the NEXT install's
+  // jail plan wants it `<uid>:<uid>` and applyJail would EOWNER on the agent-owned dir BEFORE thaw can
+  // reclaim it. So when build already exists, drop its three plan steps: thaw (next) moves the frozen
+  // tree back and chowns build to the worker. On a first install build is missing → the full plan
+  // creates it worker-owned and thaw is a no-op.
+  const buildExists = (() => { try { return !!os.lstat(buildDir) } catch { return false } })()
+  const plan = buildExists ? installPlan(spec, scratchDir).filter((s) => s.path !== buildDir) : installPlan(spec, scratchDir)
+  const jail = applyJail(os, plan, log)
   // the cp and npm children see the host's `/proc/self/fd/N/…` as THEIR fd table (fd 3 is not the dirfd
   // there): they get the real path (DESIGN I1.13); freeze.py keeps the dirfd form (it inherits fd 3)
   const scratchReal = realScratch(os, dirfd, spec.instance, scratchDir)

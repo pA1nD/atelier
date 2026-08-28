@@ -247,7 +247,6 @@ LC0=$(hostlog | grep -c 'install deps')
 X "$AS1000 sh -c 'python3 - <<PY
 import json; p=\"/work/apps/deps/package.json\"; j=json.load(open(p)); j[\"description\"]=\"rows drill 2\"; json.dump(j, open(p,\"w\"), indent=2)
 PY'"
-X "$AS1000 touch /work/apps/deps/package.json"
 t0=$(now)
 for i in $(seq 1 300); do hostlog | grep 'install deps' | tail -n +$((LC0+1)) | grep -q 'freeze {\|FREEZE-ABORT\|install ok' && break; sleep 0.2; done
 T_INST3=$(el $t0); hostlog | grep 'install deps' | tail -n +$((LC0+1)) > $OUT/install-c.log; sed 's/^/    | /' $OUT/install-c.log
