@@ -27,8 +27,9 @@ async function rig(t) {
   const logs = []
   let clock = 1_000_000
   const registry = createRegistryLocal({ workspaces: () => workspaces, discover: () => rows, chrome: { qid: 'global/catalyst-chrome', dir: chromeDir }, hostLink, log: (l) => logs.push(l), now: () => clock, ttlMs: 100 })
-  t.after(async () => { registry.stop(); hostLink.close(); await host.stop() })
-  return { host, rows, workspaces, registry, logs, chromeDir, tick: (ms) => { clock += ms } }
+  const out = { host, rows, workspaces, registry, logs, chromeDir, tick: (ms) => { clock += ms }, stopped: false }
+  t.after(async () => { registry.stop(); hostLink.close(); if (!out.stopped) await host.stop() })
+  return out
 }
 
 test('the mount table: discovered folders joined with the host rows; meta split; the chrome staged as a hidden app; unclaimed folders wait', async (t) => {
@@ -50,6 +51,12 @@ test('the mount table: discovered folders joined with the host rows; meta split;
   assert.equal(h.port, r.workspaces[0].port); assert.equal(h.token, 'dev'); assert.equal(h.ip, '127.0.0.1'); assert.equal(h.tls, null); assert.equal(h.drainingAt, null)
   assert.equal(h.heartbeatAt, 1_000_000)   // the successful /_atelier/apps fetch counts as a heartbeat
   assert.equal(await r.registry.host('nope'), null)
+  // the host goes away: the last rows are served stale, the company is marked waking
+  await r.host.stop()
+  r.tick(200)
+  assert.deepEqual((await r.registry.apps('global')).map((a) => a.slug), ['todo', 'wiki', 'catalyst-chrome'])
+  assert.ok(r.logs.some((l) => /host unreachable/.test(l)))
+  r.stopped = true
 })
 
 test('watch fires on refresh when the host rows changed (a new claim, a new rev); the chrome digest is the folder max mtime', async (t) => {

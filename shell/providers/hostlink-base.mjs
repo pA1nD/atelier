@@ -32,7 +32,8 @@ export function createHostLink({ kind, minter, credential, transport = () => ({ 
       const req = lib.request({ host: hostRow.ip, port: hostRow.port, method, path, headers, agent: lib === https ? agents.https : agents.http, timeout: dialMs, ...(t.options ?? {}) })
       let connected = false, responded = false, upstream = null
       const fail = (code, msg) => { const e = linkError(code, msg); if (!responded) reject(e); else upstream?.destroy(e); req.destroy(e) }
-      req.on('socket', (s) => s.once('connect', () => { connected = true; req.setTimeout(idle) }))
+      const onConnect = () => { connected = true; req.setTimeout(idle) }
+      req.on('socket', (s) => { if (s.connecting) s.once('connect', onConnect); else onConnect() })   // a reused keep-alive socket is already connected
       req.on('timeout', () => fail(connected ? 'TIMEOUT' : 'DIAL', connected ? `host idle > ${idle} ms` : `host dial > ${dialMs} ms`))
       req.on('error', (e) => { if (e?.code === 'DIAL' || e?.code === 'TIMEOUT' || e?.code === 'BODY_CAP') { if (!responded) reject(e); return } fail(!connected || DIAL_CODES.has(e?.code) ? 'DIAL' : 'UPSTREAM', e?.message) })
       req.on('response', (res) => { responded = true; upstream = res; resolve({ status: res.statusCode, headers: res.headers, body: res }) })

@@ -148,7 +148,7 @@ export async function laneDocument(ctx) {
     if (u.status === 302) return r('document', 302, { headers: { location: u.location, 'cache-control': 'no-store', ...(u.cookie ? { 'set-cookie': u.cookie } : {}) } })
     return r('document', u.status, { body: 'Sign-in did not stick on this origin (cookies blocked?). Open the link again from the portal.', headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } })
   }
-  const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, now: ctx.now })
+  const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, marks: ctx.marks, now: ctx.now })
   const nonce = newNonce()
   if (state.waking) {
     ctx.log(`document: ${company} waking (${state.reason})`)
@@ -250,9 +250,10 @@ export async function laneProxy(ctx) {
   if (k === 'api' || k === 'modules') {
     if (ctx.upgrade) return jsonR('proxy', 426, {})
     const hostRow = await registry.host(ctx.appCompany)
-    if (!hostRow) return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' })
+    if (!hostRow || ctx.marks.isWaking(ctx.appCompany, ctx.now(), registry)) { ctx.req.resume(); return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' }) }
     const app = ctx.app.chrome ? { instance: ctx.app.instance, company: ctx.app.company, slug: ctx.app.slug } : ctx.app
-    await proxyRequest({ req: ctx.req, res: ctx.res, hostLink, hostRow, app, person: ctx.person, credential: ctx.credential, companyOrigin: ctx.cfg.origin(ctx.appCompany), forwardPath: ctx.forward, log: ctx.log })
+    const out = await proxyRequest({ req: ctx.req, res: ctx.res, hostLink, hostRow, app, person: ctx.person, credential: ctx.credential, companyOrigin: ctx.cfg.origin(ctx.appCompany), forwardPath: ctx.forward, log: ctx.log })
+    if (out.error === 'DIAL' || out.error === 'TIMEOUT') ctx.marks.mark(ctx.appCompany, ctx.now())
     return { lane: 'proxy', handled: true }
   }
   if (k !== 'atelier') return null
@@ -284,7 +285,7 @@ export async function laneProxy(ctx) {
   if (name === 'wake' && ctx.method === 'GET') {
     const company = ctx.company
     if (!company) return jsonR('proxy', 200, { ok: false })
-    const state = await hostState({ registry, hostLink, bus, company, now: ctx.now })
+    const state = await hostState({ registry, hostLink, bus, company, marks: ctx.marks, now: ctx.now })
     return jsonR('proxy', 200, { ok: !state.waking, ...(state.waking ? { reason: state.reason } : {}) })
   }
   if (name === 'report' && ctx.method === 'POST') {

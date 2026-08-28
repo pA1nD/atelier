@@ -8,6 +8,7 @@ import { companyTopic } from '../protocol/index.js'
 import { dispatch } from './routes.mjs'
 import { createAssets } from './assets.mjs'
 import { createEventsSocket } from './events.mjs'
+import { createWakingMarks } from './waking.mjs'
 
 export const LISTENER_DRAIN_MS = 25_000
 
@@ -39,6 +40,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   assets ??= createAssets({ repoRoot, clientDir, nodeEnv: cfg.nodeEnv, log })
   const events = createEventsSocket({ bus, registry, log, now })
   const entryCache = new Map()
+  const marks = createWakingMarks()
   const watches = new Map()
   const ensureWatch = (company) => {
     if (watches.has(company)) return
@@ -48,7 +50,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   server.on('upgrade', (req, socket, head) => upgrade(req, socket, head))
   server.keepAliveTimeout = 65_000
 
-  const base = (req) => ({ req, cfg, providers, gate, assets, events, log, now, entryCache, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, upgrade: false })
+  const base = (req) => ({ req, cfg, providers, gate, assets, events, log, now, entryCache, marks, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, upgrade: false })
 
   function finish(ctx, out, t0) {
     const res = ctx.res
@@ -94,7 +96,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
 
   let started = false
   return {
-    server, events, assets, entryCache,
+    server, events, assets, entryCache, marks,
     start() { if (started) return; started = true; bus.start?.(); registry.start?.(); for (const c of registry.companies?.() ?? []) ensureWatch(c.id) },
     stop() { started = false; for (const off of watches.values()) { try { off() } catch {} } watches.clear(); registry.stop?.(); bus.stop?.() },
     handle, upgrade,

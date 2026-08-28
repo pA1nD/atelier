@@ -6,6 +6,28 @@
 // (proxy.mjs) and the client shows its own fallback.
 export const WAKE_POLL_MS = 2000
 export const HEARTBEAT_STALE_MS = 30_000
+export const WAKING_MARK_MS = 2000
+
+// The waking marks (one set per shell): a host that just failed a probe or a dial is answered
+// 503 {waking:true} on fetch routes for WAKING_MARK_MS without a new dial — a stopped computer
+// costs one second once, not one second (or the 30 s idle cap) per request; a mark expires by
+// itself and the next request dials. The local registry's `unreachableAt(company)` (a failed
+// /_atelier/apps fetch) counts as a mark too.
+export function createWakingMarks({ ms = WAKING_MARK_MS } = {}) {
+  const marks = new Map()
+  return {
+    mark(company, now = Date.now()) { if (company) marks.set(company, now + ms) },
+    clear(company) { marks.delete(company) },
+    isWaking(company, now = Date.now(), registry = null) {
+      const at = registry?.unreachableAt?.(company)
+      if (at != null && now - at < ms) return true
+      const until = marks.get(company)
+      if (until === undefined) return false
+      if (until <= now) { marks.delete(company); return false }
+      return true
+    },
+  }
+}
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
@@ -32,13 +54,14 @@ export function wakingHeaders({ nonce }) {
 }
 
 // hostState({registry, hostLink, bus, company, now}) → {waking:false, hostRow, probe} | {waking:true, reason, hostRow}
-export async function hostState({ registry, hostLink, bus, company, now = Date.now, staleMs = HEARTBEAT_STALE_MS }) {
+export async function hostState({ registry, hostLink, bus, company, marks = null, now = Date.now, staleMs = HEARTBEAT_STALE_MS }) {
   const hostRow = await registry.host(company)
-  if (!hostRow) return { waking: true, reason: 'no-host', hostRow: null }
+  if (!hostRow) { marks?.mark(company, now()); return { waking: true, reason: 'no-host', hostRow: null } }
   if (hostRow.drainingAt != null) return { waking: true, reason: 'draining', hostRow }
   if (registry.kind === 'fleet' && (hostRow.heartbeatAt == null || now() - hostRow.heartbeatAt > staleMs)) return { waking: true, reason: 'heartbeat-stale', hostRow }
   const probe = await hostLink.probe(hostRow)
   registry.noteProbe?.(company, probe)
-  if (probe.ok) await bus?.reprobe?.(company, probe)
-  return probe.ok ? { waking: false, hostRow, probe } : { waking: true, reason: probe.code ?? 'probe', hostRow }
+  if (probe.ok) { marks?.clear(company); await bus?.reprobe?.(company, probe); return { waking: false, hostRow, probe } }
+  marks?.mark(company, now())
+  return { waking: true, reason: probe.code ?? 'probe', hostRow }
 }

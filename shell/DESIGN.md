@@ -406,3 +406,51 @@ Screenshots per row into `shell/drill/out/`; the run script `shell/drill/run.sh`
 - **H2 (host, later, not gating):** `localTransport` takes the shell's public key and writes the host's `<epoch>.<token>` to `$ATELIER_RUN/host-link.json` (0600) so the local shell can dial the protocol port with a verified assertion instead of the dev lane. Until then §1.5's local row holds.
 - **The chrome's backend** (catalyst-chrome ships `backend.js`, [S:migration-local-3] surprise 5): the host mounts the chrome folder as a worker only when it is under `/work/apps`; `ATELIER_CHROME_DIR` is assets + sheet only. Local mode therefore stages the chrome folder as an app too (`global/<chrome>`, `module.json` from its literal meta) so `/api/global/catalyst-chrome/docs` answers; the shell's chrome exemption from presence applies to `/modules/global/<chrome>/*`; its API goes through lane 5 like any app (locally: present).
 - **Resolutions:** (1) one shell socket frame set — 1.x payload broadcasts are collapsed to invalidations (§1.4), the doctor names the break; (2) the overlay stays, fed by the snapshot's `error` (local only; the fleet snapshot never carries one — OR16); (3) `primary` locally = `module.json`'s value (no portal to apply it); (4) local mode = one chrome; a `meta.chrome` naming another renders the client's error; (5) `?token=` never reaches a browser in 2.0 local mode; (6) every local wait is per request with a 1 s dial cap and a `VERDICT`-ended background task in the drill — the CLI never blocks on a host boot.
+
+---
+
+## A1. Lane A (shell core + providers) — current state (append-only)
+
+Built: `index, routes, document, assets, proxy, minter, events, waking, config` and all ten
+providers (`providers/*-{local,fleet}.mjs` + `hostlink-base.mjs`); 54 tests in `shell/test/`;
+`shell/drill/smoke.mjs` runs the shell with local providers in front of the real host. Deviations
+from §1–§3 as built, each a stated choice:
+
+1. **Interface additions** (README lists them ⊕): `registry.companies()`, `registry.byInstance()`,
+   `registry.noteProbe()`, `registry.refresh()`, `gate.hsts()`, `bus.reprobe()`, `hostLink.json()`.
+   `byInstance` exists because the socket, `/_atelier/topics/<instance>` and `/_atelier/report` name
+   apps by instance while §1.2 resolves by (company, slug); the fleet provider falls back to
+   `spine.instance(id)` for an instance this replica has not listed yet.
+2. **The tab's ping**: protocol/events has no client `ping` (messages are `sub|resume|pong`), so the
+   1 s liveness is the tab's `{op:'pong', at}` answered by `{type:'ping', at}`; a `pong` also marks
+   the socket pong-live for the budget. §3.4's "pong answers the server ping" holds for `ws.ping()`.
+3. **The socket's company**: `/_atelier/ws` has no path company; the fleet derives it from the Host
+   (lane 2), local mode reads `?company=<ws>` (validated by `SLUG_RE`); the same for `/_atelier/rail`.
+   A `company:<x>` topic is allowed only for the socket's own company.
+4. **Gap on a fresh subscription**: a `subscribed` at an empty ring has cursor `{stream:null, seq:0}`;
+   the pump treats a first delivered seq ≠ 1 on that cursor as a gap (the ring rotated past the
+   subscription) — `since()` alone answers `streamChange` for a null cursor.
+5. **Chrome routing**: `/modules/global/<chrome>/*` is exempt from the fleet's Host = path company
+   check as well as from presence (it is served on every company origin by the Host company's host);
+   the chrome's `/api/global/<chrome>/*` is an app lane (the staged chrome row, `isChrome`, hidden
+   from the rail and the bootstrap).
+6. **Unknown company locally → 404** on document routes (the fleet's Host gate does this in lane 2;
+   locally the registry's workspace list decides) — without it every typo was a waking page.
+7. **The loop breaker** (§10 item 14): `__Host-tried=1` (Max-Age 30) set with the 302; a document
+   request that still carries it with no session answers 403 with a one-line text page.
+8. **Assets**: `/assets/client.js` is an esbuild BUNDLE (client.jsx + its `./bridge.js`… + `chrome-resolve.js`),
+   so the preload list's depth is 3 with one client request; `/assets/<name>.js` also serves the plain
+   files under `client/` for a fork that prefers separate modules. Until `client/client.jsx` exists
+   the 1.x `client.jsx` is bundled (one log line).
+9. **`hostlink-fleet`** dials plain http when the row has no `tls` (the drill's `plain` opt-out and the
+   tests' fake host); the fleet registry never hands out such a row.
+10. **Waking marks** (§3.5 addendum, found by the smoke drill): a `kill -STOP`ped host still accepts
+    TCP, so a fetch would sit in the 30 s idle cap. A failed probe or dial marks the company waking for
+    2 s per shell (`createWakingMarks`); fetches in that window answer `503 {waking:true}` without a
+    dial; the local registry serves its last known rows while `/_atelier/apps` is unreachable
+    (`unreachableAt`) instead of an empty mount table (which made presence answer 404 for a sleeping
+    host). The document route still probes on every request (1 s cap).
+
+Owed to other lanes: B — `shell/local/{discover,stage,hosts}.mjs` feeding `createRegistryLocal({workspaces, discover, chrome})`
+and calling `registry.refresh()` from its apps-root watch; `cli-local.mjs` wiring `createShell` as `drill/smoke.mjs` does.
+C — `client/index.html` with the five slots and the socket/topic contract in README "What the client gets".

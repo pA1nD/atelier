@@ -43,6 +43,7 @@ export function chromeDigest(dir) {
 export function createRegistryLocal({ workspaces, discover, chrome = null, hostLink, log = () => {}, now = Date.now, pollMs = POLL_MS, ttlMs = APPS_TTL_MS }) {
   const hostView = new Map()      // company → { at, rows: [{instance, slug, company, rev, state}] | null }
   const probes = new Map()        // company → { heartbeatAt, epoch }
+  const unreachable = new Map()   // company → at (the last failed /_atelier/apps fetch; cleared on success)
   const watchers = new Map()      // company → Set<fn>
   const shapes = new Map()        // company → the last mount-table shape (for change detection)
   let chromeCache = null, poll = null
@@ -64,8 +65,16 @@ export function createRegistryLocal({ workspaces, discover, chrome = null, hostL
       try {
         const r = await hostLink.json({ hostRow: row, path: '/_atelier/apps' })
         rows = r.status === 200 && Array.isArray(r.json) ? r.json : null
-        if (rows) probes.set(company, { ...(probes.get(company) ?? {}), heartbeatAt: now() })
-      } catch (e) { rows = null }
+        if (rows) { probes.set(company, { ...(probes.get(company) ?? {}), heartbeatAt: now() }); unreachable.delete(company) }
+      } catch (e) {
+        // unreachable (a stopped or restarting host): serve the last known rows — the mount table
+        // does not vanish because the computer sleeps; the proxy answers 503 waking meanwhile
+        rows = hit?.rows ?? null
+        unreachable.set(company, now())
+        if (!hit?.stale) log(`registry: ${company} host unreachable (${e.code ?? e.message}) — serving ${rows ? rows.length + ' stale rows' : 'no rows'}`)
+        hostView.set(company, { at: now(), rows, stale: true })
+        return rows
+      }
     }
     hostView.set(company, { at: now(), rows })
     return rows
@@ -129,7 +138,9 @@ export function createRegistryLocal({ workspaces, discover, chrome = null, hostL
       return () => { s.delete(fn); if (!s.size) watchers.delete(company) }
     },
     // noteProbe(company, {ok, epoch}): the route's / the bus's healthz result feeds heartbeatAt
-    noteProbe(company, r) { if (r?.ok) probes.set(company, { heartbeatAt: now(), epoch: r.epoch ?? null }) },
+    noteProbe(company, r) { if (r?.ok) { probes.set(company, { heartbeatAt: now(), epoch: r.epoch ?? null }); unreachable.delete(company) } },
+    // unreachableAt(company): when the last /_atelier/apps fetch failed (the shell's waking marks read it)
+    unreachableAt(company) { return unreachable.get(company) ?? null },
     // refresh(company?): drop the caches and rescan now (lane B's fs.watch, the bus's unknown qid)
     async refresh(company = null) {
       chromeCache = null

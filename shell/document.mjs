@@ -62,7 +62,7 @@ export function escapeBootstrap(obj) {
 // preloaded. `.jsx` is served as `.js`.
 export function relativeImports(code) {
   const out = new Set()
-  for (const m of String(code).matchAll(/\b(?:from|import)\s*["'](\.\.?\/[^"']+)["']/g)) out.add(m[1].replace(/\.jsx$/, '.js'))
+  for (const m of String(code).matchAll(/\b(?:from|import)\s*["'](\.\.?\/[^"']+)["']/g)) out.add(m[1].replace(/[?#].*$/, '').replace(/\.jsx$/, '.js'))   // the host versions relative imports (`./x.js?rev=N`): the preload adds its own ?rev
   return [...out]
 }
 

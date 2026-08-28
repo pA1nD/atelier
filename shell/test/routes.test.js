@@ -55,7 +55,7 @@ async function rig(t, { mode = 'local', present, hostUp = true, chrome } = {}) {
     req.on('error', reject)
     req.end(body)
   })
-  return { shell, host, registry, bus, stores, traces, logs, port, go, sid, minter }
+  return { shell, host, registry, bus, stores, traces, logs, port, go, sid, minter, hostPort: hp }
 }
 
 test('lane 0: normalisation rows (B6) and the route parser', () => {
@@ -183,6 +183,22 @@ test('local: the host is down → the waking page on documents (503, ≤ 1.2 s),
   const api = await r.go('/api/global/todo/x')
   assert.equal(api.status, 503); assert.deepEqual(api.json(), { waking: true }); assert.equal(api.headers.get('x-atelier-waking'), '1')
   assert.deepEqual((await r.go('/_atelier/wake?company=global')).json(), { ok: false, reason: 'DIAL' })
+})
+
+test('local: a failed probe marks the host waking for 2 s — fetches answer 503 without a dial, then dial again', async (t) => {
+  const r = await rig(t)
+  assert.equal((await r.go('/api/global/todo/x')).status, 200)
+  const seen = r.host.seen.length
+  await r.host.stop()
+  assert.equal((await r.go('/global/todo')).status, 503)               // the probe fails (1 s cap) → marked
+  const t0 = Date.now()
+  const a = await r.go('/api/global/todo/x'); const b = await r.go('/modules/global/todo/frontend.js')
+  assert.equal(a.status, 503); assert.equal(b.status, 503); assert.ok(Date.now() - t0 < 200, 'no dial while marked')
+  assert.deepEqual(a.json(), { waking: true })
+  await r.host.start(r.hostPort)                                         // the fixture host is back on the same port
+  await new Promise((res) => setTimeout(res, 2100))
+  assert.equal((await r.go('/api/global/todo/x')).status, 200)
+  assert.ok(r.host.seen.length > seen)
 })
 
 test('local: /assets/* — the UMDs, client.js, chrome-resolve.js, 304 on ETag, gzip, 404 for the rest', async (t) => {

@@ -3,7 +3,7 @@
 import http from 'node:http'
 import { EventRing, companyTopic, decode } from '../../protocol/index.js'
 
-export const listen = (server) => new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)))
+export const listen = (server, port = 0) => new Promise((r) => server.listen(port, '127.0.0.1', () => r(server.address().port)))
 export const TODO = 'i-0123456789abcdef', WIKI = 'i-fedcba9876543210', CHROME_APP = 'i-cccccccccccccccc'
 
 // fakeHost(): what the shell dials — healthz, apps, events, modules, api echo, report
@@ -32,7 +32,7 @@ export function fakeHost({ epoch = 'e1', company = 'acme', rows } = {}) {
     }
     return json(200, { method: req.method, url: req.url, person: identity?.person ?? null, app: identity?.app ?? null, bytes: body.length, cookie: req.headers.cookie ?? null, authorization: req.headers.authorization ?? null, forged: req.headers['x-atelier-user'] ?? null }, { 'set-cookie': 'leak=1', 'x-worker': 'yes' })
   })
-  return { server, seen, state, start: () => listen(server), stop: () => new Promise((r) => server.close(r)) }
+  return { server, seen, state, start: (port = 0) => listen(server, port), stop: () => new Promise((r) => server.close(r)) }
 }
 
 // fakeRegistry({mode, companies: {acme: {apps: [...], host: {...}}}, chrome, present})

@@ -92,6 +92,7 @@ test('CSP: one nonce on both inline scripts, no-store, nosniff, font hosts, form
 
 test('relativeImports lists ./ specifiers once, .jsx as .js; a template without the slots is refused', () => {
   assert.deepEqual(relativeImports(`import React from 'react'\nimport { a } from './a.jsx'\nimport './b.js'\nimport x from "./a.jsx"\nimport('./lazy.js')`), ['./a.js', './b.js'])
+  assert.deepEqual(relativeImports(`import { h } from './helper.js?rev=4'\nimport '../up.js#x'`), ['./helper.js', '../up.js'])
   assert.throws(() => composeDocument({ template: '<html></html>', nonce: 'n', bootstrap: {}, sheet: null, importMap: null }), /slot/)
   for (const s of Object.values(SLOTS)) assert.ok(FALLBACK_TEMPLATE.includes(s))
 })
