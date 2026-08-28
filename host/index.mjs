@@ -30,6 +30,8 @@ import { createDevShell } from './protocol/devshell.mjs'
 
 export const TEARDOWN_CAP_MS = 30_000
 export const DIRFD_CHECK_MS = 5000
+export const APPS_WATCH_DEBOUNCE_MS = 300
+export const RESCAN_MS = 30_000
 
 /** config(env) — DESIGN §1.2; env only, set by the launcher (fleet) or the developer (local). */
 export function config(env) {
@@ -70,11 +72,17 @@ export function hostDirs(cfg, { local }) {
     [`${W}/.atelier`, 0o755], [`${W}/.atelier/data`, 0o711], [`${W}/.atelier/last-good`, 0o711], [`${W}/.atelier/scratch`, 0o711],
     [`${W}/apps`, 0o755], [R, 0o711], [`${R}/dev`, 0o710], [`${R}/session`, 0o700],
   ]
-  return [...(local ? launcherRows : []), [`${W}/.atelier/tmp`, 0o711], [`${R}/w`, 0o711]]
+  return [...(local ? launcherRows : []), [R, 0o711], [`${W}/.atelier/tmp`, 0o711], [`${R}/w`, 0o711]]
 }
+// mkdir with the mode (chmod after: the host runs under umask 077); an EXISTING root-owned dir with
+// another mode is chmodded — `$run` arrives as a 1777 tmpfs mount and must not stay world-writable.
 function ensureDirs(os, rows, log) {
   for (const [p, mode] of rows) {
-    try { os.mkdir(p, mode); os.chmod(p, mode) } catch (e) { if (e.code !== 'EEXIST') { log(`mkdir ${p}: ${e.code ?? e.message}`); throw e } }
+    try { os.mkdir(p, mode); os.chmod(p, mode) } catch (e) {
+      if (e.code !== 'EEXIST') { log(`mkdir ${p}: ${e.code ?? e.message}`); throw e }
+      const st = os.lstat(p)
+      if (st.uid === 0 && (st.mode & 0o7777) !== mode) { const r = os.chmod(p, mode); log(`chmod ${p} ${(st.mode & 0o7777).toString(8)} → ${mode.toString(8)}${r?.skipped ? ' (skipped)' : ''}`) }
+    }
   }
 }
 function ensureDevToken(cfg, log) {
@@ -185,7 +193,22 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   fs.writeFileSync(ready, `${process.pid}\n`, { mode: 0o644 })
   try { os.chmod(ready, 0o644) } catch {}
   log.line(`host: ready pid ${process.pid} ${local ? 'local' : `host=${registrar.hostId} epoch=${registrar.epoch}`}`)
-  supervisor.scan().catch((e) => hostLog(`scan: ${e?.stack ?? e}`))
+  // discovery: one scan now, one per change of the apps root (a new or removed folder; debounced —
+  // saves inside an app are the per-app watcher's), and one every RESCAN_MS as the safety net. Scans
+  // are serialized; a change during a scan queues exactly one more.
+  const appsDir = `${cfg.work}/apps`
+  let scanChain = Promise.resolve(), scanQueued = false
+  const rescan = () => {
+    if (scanQueued) return
+    scanQueued = true
+    scanChain = scanChain.then(async () => { scanQueued = false; await supervisor.scan().catch((e) => hostLog(`scan: ${e?.stack ?? e}`)) })
+  }
+  let appsTimer = null
+  let appsWatch = null
+  try { appsWatch = fs.watch(appsDir, { persistent: false }, () => { clearTimeout(appsTimer); appsTimer = setTimeout(rescan, APPS_WATCH_DEBOUNCE_MS) }) } catch (e) { hostLog(`apps watch: ${e.code ?? e.message} (periodic rescan only)`) }
+  appsWatch?.on?.('error', (e) => hostLog(`apps watch error: ${e.code ?? e.message}`))
+  rescan()
+  const rescanTimer = setInterval(rescan, RESCAN_MS); rescanTimer.unref?.()
   watchdog.start()
   registrar.heartbeat(HEARTBEAT_MS)
   const dirfdCheck = privileged ? setInterval(() => {
@@ -205,6 +228,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
     cap.unref?.()
     try { fs.unlinkSync(ready) } catch {}
     if (dirfdCheck) clearInterval(dirfdCheck)
+    clearInterval(rescanTimer); clearTimeout(appsTimer); appsWatch?.close?.()
     registrar.stop()
     if (!local) { try { await Promise.race([registrar.draining(), new Promise((r) => setTimeout(r, 2000))]) } catch (e) { hostLog(`draining: ${e.message}`) } }
     await Promise.all([server.close(), dev.close()])

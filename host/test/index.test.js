@@ -18,11 +18,11 @@ test('config: defaults are DESIGN §1.2; fleet iff ATELIER_SPINE_URL; dirfd only
   assert.equal(config({ ATELIER_DIRFD: 'x' }).dirfd, null)
 })
 
-test('hostDirs: fleet adds only .atelier/tmp and $run/w to the launcher plan; local carries the launcher rows too', () => {
+test('hostDirs: fleet adds $run (chmod of the 1777 tmpfs), .atelier/tmp and $run/w to the launcher plan; local carries the launcher rows too', () => {
   const cfg = { work: '/w', run: '/r' }
-  assert.deepEqual(hostDirs(cfg, { local: false }), [['/w/.atelier/tmp', 0o711], ['/r/w', 0o711]])
+  assert.deepEqual(hostDirs(cfg, { local: false }), [['/r', 0o711], ['/w/.atelier/tmp', 0o711], ['/r/w', 0o711]])
   const local = hostDirs(cfg, { local: true }).map(([p]) => p)
-  assert.deepEqual(local, ['/w/.atelier', '/w/.atelier/data', '/w/.atelier/last-good', '/w/.atelier/scratch', '/w/apps', '/r', '/r/dev', '/r/session', '/w/.atelier/tmp', '/r/w'])
+  assert.deepEqual(local, ['/w/.atelier', '/w/.atelier/data', '/w/.atelier/last-good', '/w/.atelier/scratch', '/w/apps', '/r', '/r/dev', '/r/session', '/r', '/w/.atelier/tmp', '/r/w'])
 })
 
 test('audit: a world-readable token, .claude, control, last-good/<inst> or data/<inst> is listed; the tight tree is clean', () => {
