@@ -63,12 +63,23 @@ export function installPlan(spec, scratchDir) {
 
 /**
  * Runs a plan through the adapter. Each step is logged `[priv] <op> <path>: ok|<errno>`.
- * EEXIST on mkdir is ok (the dir was claimed before); any other failure stops the plan.
+ * EEXIST on mkdir is ok (the dir was claimed before) — the existing inode is lstat'ed: root-owned →
+ * the chmod/chown that follow run (root chmods what it owns, no FOWNER needed); already owned by
+ * the plan's `<uid>:<gid>` (a re-spawn, a resume: `data/<inst>` is `<uid>:19999`, root cannot chmod
+ * it under the plan caps) → that path's chmod/chown are skipped as `owned`; anything else (a foreign
+ * owner, a symlink, a file) → `EOWNER`/`ENOTDIR`, the plan stops. Any other failure stops the plan.
  * @returns {{ok:boolean, results:Array<{step:Step, ok:boolean, code?:string}>}}
  */
 export function applyJail(os, steps, log = () => {}) {
   const results = []
-  for (const step of steps) {
+  let owned = null   // the path whose mkdir hit EEXIST on an inode already handed to its owner
+  const fail = (step, code) => { log(`[priv] ${step.op} ${step.path ?? ''}: ${code}`); results.push({ step, ok: false, code }); return { ok: false, results } }
+  for (const [i, step] of steps.entries()) {
+    if (owned && step.path === owned && (step.op === 'chmod' || step.op === 'chown')) {
+      log(`[priv] ${step.op} ${step.path}: skipped (owned)`)
+      results.push({ step, ok: true, code: 'EEXIST' })
+      continue
+    }
     let code
     try {
       if (step.op === 'mkdir') os.mkdir(step.path, step.mode)
@@ -78,10 +89,14 @@ export function applyJail(os, steps, log = () => {}) {
       else throw Object.assign(new Error(`unknown op ${step.op}`), { code: 'EINVAL' })
     } catch (e) {
       code = e.code ?? 'EIO'
-      if (!(step.op === 'mkdir' && code === 'EEXIST')) {
-        log(`[priv] ${step.op} ${step.path ?? ''}: ${code}`)
-        results.push({ step, ok: false, code })
-        return { ok: false, results }
+      if (!(step.op === 'mkdir' && code === 'EEXIST')) return fail(step, code)
+      let st
+      try { st = os.lstat(step.path) } catch (e2) { return fail(step, e2.code ?? 'EIO') }
+      if (!st.isDirectory()) return fail(step, 'ENOTDIR')
+      const want = steps.slice(i + 1).find((s) => s.op === 'chown' && s.path === step.path)
+      if (st.uid !== 0) {
+        if (!(want && st.uid === want.uid && st.gid === want.gid)) return fail(step, 'EOWNER')
+        owned = step.path
       }
     }
     log(`[priv] ${step.op} ${step.path ?? step.groups?.join(',') ?? ''}: ok${code ? ` (${code})` : ''}`)

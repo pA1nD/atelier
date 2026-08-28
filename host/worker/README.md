@@ -108,8 +108,11 @@ sits between mkdir and chown because the host runs under umask 077 (row H): root
 that moment, so it needs no FOWNER, and a directory's setgid bit survives the following chown
 (the kernel kills SUID/SGID on chown for regular files only). `installPlan(spec, scratchDir)` is
 the same shape for `scratch/<inst>` (`0:<uid> 0750`), `home/` (`0700`), `build/` (`0755`).
-`applyJail(os, steps, log)` logs `[priv] <op> <path>: ok|<errno>`, tolerates `EEXIST` on mkdir,
-stops on any other errno. `afterReady` = socket `0:0` then `0700`, then the socket dir `0710` (the
+`applyJail(os, steps, log)` logs `[priv] <op> <path>: ok|<errno>`, tolerates `EEXIST` on mkdir —
+the existing inode is lstat'ed: root-owned → its chmod/chown run (the socket dir, 0710 after READY,
+is re-set 0730); already `<uid>:<gid>` as planned → they are skipped as `owned` (a re-spawn or
+resume: root cannot chmod the worker's `data/<inst>` under the plan caps); a foreign owner or a
+non-directory → `EOWNER`/`ENOTDIR` — and stops on any other errno. `afterReady` = socket `0:0` then `0700`, then the socket dir `0710` (the
 worker cannot fill the `/run/atelier` tmpfs for life; `jailPlan` re-sets `0730` before the next
 spawn). The two round trips act on an fd (`fdTrip`): `claimRoundTrip(os, appDir, uid)` =
 `setgroups([uid]) → openDir O_NOFOLLOW → fstat (directory, uid 1000, gid 1000 or <uid>; else

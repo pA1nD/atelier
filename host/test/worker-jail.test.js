@@ -60,6 +60,24 @@ test('applyJail: runs through the adapter in order, tolerates EEXIST, stops on t
   assert.equal(lines[0], `[priv] mkdir ${spec.dataDir}: ok (EEXIST)`)
   assert.equal(lines[1], `[priv] chmod ${spec.dataDir}: ok`)
 
+  // a re-spawn / resume: data and tmp already handed to the worker uid (root cannot chmod them under the
+  // plan caps) → their chmod/chown are skipped; the root-owned socket dir (0710 after READY) is re-set 0730
+  const again = { fs: {
+    [spec.dataDir]: { uid: 20001, gid: 19999, mode: 0o2770, type: 'dir' }, [spec.tmpDir]: { uid: 20001, gid: 20001, mode: 0o700, type: 'dir' },
+    [spec.sockDir]: { uid: 0, gid: 20001, mode: 0o710, type: 'dir' },
+  } }
+  const r2 = applyJail(memory(again), jailPlan(spec), (l) => lines.push(l))
+  assert.equal(r2.ok, true)
+  assert.deepEqual(again.calls.map((c) => [c[0], c[1]]), [['chmod', spec.sockDir], ['chown', spec.sockDir]])
+  assert.equal(again.fs[spec.sockDir].mode, 0o730)
+  assert.ok(lines.includes(`[priv] chmod ${spec.dataDir}: skipped (owned)`))
+  // an existing dir with a foreign owner, or not a dir, stops the plan before any chmod
+  for (const [entry, code] of [[{ uid: 20009, gid: 19999, mode: 0o2770, type: 'dir' }, 'EOWNER'], [{ uid: 1000, gid: 1000, mode: 0o777, type: 'link' }, 'ENOTDIR']]) {
+    const st = { fs: { [spec.dataDir]: entry } }
+    const f0 = applyJail(memory(st), jailPlan(spec))
+    assert.equal(f0.ok, false); assert.equal(f0.results.at(-1).code, code); assert.equal(st.calls.length, 0)
+  }
+
   const failing = memory({ answers: { chown: (p) => { if (p === spec.tmpDir) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }) } } })
   const out = []
   const f = applyJail(failing, jailPlan(spec), (l) => out.push(l))
