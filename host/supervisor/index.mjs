@@ -380,7 +380,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
     // scan() → the discovery result (index.mjs watches the `no-module-json` folders it names)
     async scan() {
-      const d = withAllGroupsSync(() => discover(appsDir, fs))
+      const d = withAllGroupsSync(() => discover(appsDir, fs, { links: cfg.appsLinks === true }))
       if (d.unreadable) {
         emit(`scan: ${appsDir} unreadable — nothing claimed, nothing tombstoned`)
         try { await registrar?.reconcile?.(null) } catch (e) { emit(`reconcile: ${e.message}`) }

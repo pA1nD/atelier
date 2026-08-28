@@ -54,6 +54,7 @@ export function config(env) {
     hostTls: env.ATELIER_HOST_TLS || null,
     nodeEnv: env.NODE_ENV ?? 'production',
     gitCommit: env.ATELIER_GIT_COMMIT !== '0',
+    appsLinks: env.ATELIER_APPS_LINKS === '1' && !spineUrl,   // symlinked app folders (shell/ local mode, DESIGN §8 H1); refused in the fleet
   }
 }
 

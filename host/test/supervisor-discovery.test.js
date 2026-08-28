@@ -84,3 +84,18 @@ test('discover() is pure over a node-fs-shaped fake', () => {
   assert.equal(d.unreadable, false)
   assert.equal(IGNORED_NAME_RE.test('ok-name'), false)
 })
+
+test('a symlink to a directory is `not-a-dir` by default and an app with {links:true} (ATELIER_APPS_LINKS=1, local mode only)', () => {
+  const root = tmp(), apps = path.join(root, 'apps')
+  fs.mkdirSync(apps)
+  const real = app(root, 'real-notes', { 'module.json': '{"name":"Notes"}', 'frontend.jsx': '' })
+  fs.symlinkSync(real, path.join(apps, 'notes'))
+  fs.symlinkSync(path.join(root, 'missing'), path.join(apps, 'dangling'))
+  let d = discover(apps)
+  assert.deepEqual(d.apps, [])
+  assert.deepEqual(d.skipped.map((s) => [s.name, s.reason]).sort(), [['dangling', 'not-a-dir'], ['notes', 'not-a-dir']])
+  d = discover(apps, undefined, { links: true })
+  assert.deepEqual(d.apps.map((a) => [a.slug, a.dir]), [['notes', path.join(apps, 'notes')]])   // the link path, not its target
+  assert.deepEqual(d.skipped.map((s) => [s.name, s.reason]), [['dangling', 'not-a-dir']])
+  fs.rmSync(root, { recursive: true, force: true })
+})
