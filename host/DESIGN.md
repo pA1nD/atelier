@@ -652,3 +652,60 @@ are sites (a) and (b).
     the plan names the file, not the path.
 15. **Package.json test script** — `host/test/*.test.js` is added by the integrator, the only
     file outside `host/` touched by step 2 besides `protocol/` fixes.
+
+## 10. Lane sections (append-only; current state)
+
+### 10.1 workers — `host/worker/`, `host/test/worker-*.test.js`
+
+Built to §4.1/§6.2 as written; the deviations, each a fact the code needs, are:
+
+1. **WorkerSpec gains `name` and `scratchDir`.** `name` = module.json `name` → `ctx.name`/`ctx.label`
+   (defaults to the slug). `scratchDir` = `scratch/<inst>` → `HOME = <scratchDir>/home` (row W); when
+   the supervisor omits it, `spawn.mjs` derives it from `dataDir`'s parent (`…/scratch/<inst>`).
+2. **Row W env gains `TMPDIR = spec.tmpDir`** (§3 names `tmp/<inst>` as the worker's `TMPDIR`; R6
+   closure). Order of keys: config keys first, then `PATH, NODE_ENV, APP_ID, HOME, HOST, PORT,
+   BASE_URL, TMPDIR, ATELIER_WORKER`; a config key never overrides a fixed one. `PATH`/`NODE_ENV`
+   come from an explicit `hostEnv` argument (default `process.env`), never a spread.
+3. **The runtime scrubs `PWD, OLDPWD, SHLVL, _, __CF_USER_TEXT_ENCODING`** from its own `process.env`
+   at start — the `sh -c` wrapper exports the first four, macOS injects the last. "env keys = row W
+   exactly" (§8.2 row 6) is asserted from inside the worker; `/proc/<pid>/environ` carries the shell's
+   exports too.
+4. **Row W spawns `detached: true`** (own process group) so `stop()` can `kill(-pid, SIGKILL)` at the
+   drain deadline (§2.3 step 2, migration-local-2 rule 1).
+5. **`spawnWorker` locks the socket itself** (`jail.afterReady`: `0:0 0700`) on READY, before the
+   promise resolves; option `lockSocket:false` for laptop tests. Extra options: `hostEnv`, `runtime`,
+   `onLog(stream, line, spec)` (stdout/stderr lines; default = the host's stderr prefixed
+   `[company/slug]`), `log`. The handle also exposes `ready` (the READY message), `child`, `exited`.
+   Rejections are Errors carrying `error`, `msg`, and for `load-failed` `code` + `detail`.
+6. **`jailPlan` emits `mkdir(mode) → chmod(mode) → chown`** per directory (not mkdir → chown): the
+   host runs under umask 077 (row H), so the mkdir mode alone lands as 0700. The chmod is on a
+   root-owned inode (no FOWNER) and precedes the chown; a directory's setgid bit survives the chown.
+   The only chmod-after-chown sites remain §6.2 (a)/(b). `jailPlan` covers `data/<inst>`,
+   `tmp/<inst>`, `w/<inst>`; `last-good/<inst>` and the marker dir are the supervisor's (it writes
+   there); `installPlan` covers `scratch/<inst>/{home,build}`.
+7. **Constants live in `jail.mjs` for now** (`AGENT`, `AGENT_DATA_GID`, `WORKER_UID_BASE`,
+   `WORKER_UID_MAX`, `INSTANCE_RE`, `appgid`) — identical to §2's; the integrator points one file at
+   the other once `hygiene.mjs` exists.
+8. **`freeze.py` argv is `<mode> <instance> <slug> <uid> <appgid> --dirfd 3`** and row F's stdio is
+   `['ignore','pipe','pipe', dirfd]`: scratch is instance-keyed (`scratch/<inst>`, not `i-<slug>`)
+   and opened relative to the inherited `.atelier` dirfd (§9.2). `thaw` is a no-op when `build/` is
+   still the worker's (nothing frozen), so every install runs thaw → copy → npm → freeze.
+9. **`installDeps` takes `beforeFreeze`** (async hook): `freeze.py freeze` SIGKILLs every process of
+   the worker uid (g2 step 1), so the supervisor stops the live worker there (teardown runs) rather
+   than losing it mid-request. Also `hostEnv`, `freeze` (script path), `timeoutMs` (10 min).
+   The manifest copy into `build/` runs as the worker via `sh -c 'cp …'` (root cannot read the
+   2750 folder without appgid).
+10. **`proxyRequest` takes `path`** (the mount-relative path + query the supervisor stripped;
+    default `req.url`) and answers **404 for `/_atelier/*`** so the worker's health route stays
+    host-only. Identity headers: `x-atelier-name` is percent-encoded, `x-atelier-claims` is
+    ASCII-escaped JSON (header values are latin1); `runtime.mjs` reverses both.
+11. **`createRouter({onError})`** — a superset of b6's `createRouter()`: the runtime's hook for
+    `{t:'http5xx'}` on a handler throw. `req.json()` is memoized (MODULES.md). A response ≥ 500 that
+    did not throw is reported from `res.on('finish')`.
+12. **Resources report** = `getActiveResourcesInfo()` after mount minus a baseline taken before the
+    import (top-level timers count), the socket server excluded by construction (not yet listening).
+    Child processes are `ProcessWrap`; the SIGTERM drain waits ≤ 1 s for them (inside the host's 2 s).
+
+Stubs: none. Not built here (other lanes): `hygiene.mjs` constants, `errors/limits.mjs`
+`rlimitsFor` (the spec carries `rlimits`), the supervisor's calls into `spawnWorker`/`installDeps`,
+the drill harness (README lists the rows this lane owes it).
