@@ -690,3 +690,45 @@ Deviations from §2.1–§2.2 as built, current state (details in `host/drill/la
    installs `drill/launcher/host-stub.mjs` in its place — no env knob for either.
 9. **Drill status:** `host/drill/launcher/run.sh` (rows 1–3 of §8.2 plus the container restart, the
    park storm and the grace-40 delete) is written, not yet run on fsn-01.
+
+## Lane: supervisor — interfaces as built and deviations (current state)
+
+Code: `host/supervisor/{index,discovery,watcher,bundle,tailwind,lastgood,serve}.mjs`, tests
+`host/test/supervisor*.test.js` (31 + a shared harness), notes `host/supervisor/README.md`.
+
+1. **Watcher shape (§6.1 "ONE recursive watch per app folder")** — one NON-recursive `fs.watch` per
+   non-excluded directory, exclusions applied at registration (g8: node's recursive watch registers
+   node_modules as well — 18 299 watches for 5 corpus apps; registration-time exclusion holds the
+   ≤ 2 k budget the same row names). Deep `node_modules` writes are therefore invisible; the heal rule
+   keys on the root `node_modules` entry and the root `package.json`/lockfile events. Every quiescence
+   pass is a full fingerprint walk (queue overflow safe); a `watch error` re-registers.
+2. **Socket per rev (§3 `w.sock`)** — `spec.sock = <sockDir>/w-<rev>.sock`. Load-beside needs the new
+   worker bound while the old serves the same instance, and a proxy's keep-alive pool is keyed by
+   socket path (measured in the swap test: the old worker kept answering under one name). The dir
+   stays `0:<uid> 0730`; `afterReady` chowns whatever `spec.sock` names.
+3. **`asset(row, rel, {rev})`** — the third argument carries `?rev=N` (the protocol server / dev shell
+   parse the query); js/css come from the rev dir, static files from the folder with the gid held.
+4. **`revision.json`** = `{rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug}`:
+   `rev` is the counter (bumped on LIVE and FAILED, persisted before the build), `live` the rev
+   `current` names, `fingerprint` the watcher fingerprint the live rev was built from (boot compares).
+5. **Log interface** — `log(line)` or `log.write(line)`; the supervisor emits `[<slug>] rev N LIVE in
+   <ms> ms | FAILED (users still on rev M | see nothing — never live) <hint> | STOPPED | RESUMED <ms> ms
+   | KILLED <why>`; `errors/agentlog.mjs` prefixes the ISO time.
+6. **Injection, not import** — `spawn` and `proxy` are required arguments (the workers lane's
+   `spawnWorker`/`proxyRequest`); `jail` and `install` are optional (without them the supervisor mkdirs
+   `data/<inst>`, `tmp/<inst>`, the socket dir itself and treats an install event as a rebuild —
+   local mode). `registrar.appConfig(instance)` is called when present (OR14), else `{}`.
+7. **App-group rule (§6.2)** — a ref-counted `os.setgroups` set (two concurrent builds never drop each
+   other's gid); discovery holds every known gid for its walk; the watcher reads through a
+   group-holding fs proxy; esbuild never touches the disk itself (stdin entry + JS `onResolve`/`onLoad`)
+   because its Go service inherits the host's groups only at its first spawn.
+8. **MOUNT-ERROR retry** — the old worker is stopped BEFORE the single retry (§6.1); when the retry fails
+   too the row is `stopped` and the next request resumes the old rev from `current` (held ≤ resume
+   time, never 502). A frontend-only app (no `backend.js`) is LIVE with no worker; `handle` → 404.
+9. **`INSTANCE_RE`** is a local copy in `lastgood.mjs` (hygiene.mjs is the launcher lane's) — the
+   integrator may re-point the import. `spawn-eagain` → `report('worker')`, rev dir removed, users
+   unchanged, no automatic retry before the next save.
+10. **Drill rows owed by this lane** — README "What the Linux drill must still prove": gid-held reads
+    inside `2750` folders (watch registration, fingerprint, module.json, static, esbuild plugin reads),
+    the inotify budget and overflow behaviour, rev-dir modes under umask 077, row G git, the real
+    runtime's READY resources and bundle-coordinate error positions, per-rev socket names in the 0730 dir.
