@@ -38,7 +38,9 @@ sed "s#__IMAGE__#$IMAGE#g; s#__NS__#$NS#g" $CODE/peer.yaml.tpl | kubectl apply -
 for i in $(seq 1 120); do [ "$($K get pod peer -o jsonpath='{.status.phase}')" = Running ] && break; sleep 1; done
 [ "$($K get pod peer -o jsonpath='{.status.phase}')" = Running ] || { echo "VERDICT: BLOCKED — peer not Running"; exit 1; }
 $K cp $CODE/code.tgz peer:/tmp/code.tgz || { echo "VERDICT: BLOCKED — kubectl cp to peer failed"; exit 1; }
-P 'mkdir -p /code && tar xzf /tmp/code.tgz -C /code && cd /code && nohup node host/drill/step2/fake-spine.mjs > /tmp/spine.out 2>&1 & sleep 1; cat /tmp/spine.out' | sed 's/^/    | /'
+P 'mkdir -p /code && tar xzf /tmp/code.tgz -C /code 2>&1 | grep -v "Ignoring unknown extended header"; ls /code' | sed 's/^/    | /'
+# a detached process inside kubectl exec keeps the exec stream open — setsid + /dev/null + a bounded exec
+timeout 10 $K exec peer -- bash -c 'cd /code && setsid -f node host/drill/step2/fake-spine.mjs < /dev/null > /tmp/spine.out 2>&1; sleep 1; cat /tmp/spine.out' 2>&1 | sed 's/^/    | /'
 PEER_IP=$($K get pod peer -o jsonpath='{.status.podIP}')
 P 'curl -s --max-time 3 http://127.0.0.1:7999/_drill/state | head -c 120' | grep -q host_id || { echo "VERDICT: BLOCKED — fake spine not answering on the peer"; exit 1; }
 log "peer $PEER_IP: fake spine up"
@@ -49,7 +51,7 @@ log "waiting for the stage init container"
 for i in $(seq 1 300); do [ "$($K get pod computer -o jsonpath='{.status.initContainerStatuses[?(@.name=="stage")].state.running.startedAt}' 2>/dev/null)" != "" ] && break; sleep 1; done
 $K cp $CODE/code.tgz computer:/tmp/code.tgz -c stage || { echo "VERDICT: BLOCKED — kubectl cp into stage failed"; exit 1; }
 t0=$(now)
-$K exec computer -c stage -- sh -c 'tar xzf /tmp/code.tgz -C /code && cd /code && timeout 300 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3 && ls /code/node_modules/@esbuild /code/node_modules/@tailwindcss && touch /code/.staged' | sed 's/^/    | /'
+$K exec computer -c stage -- sh -c 'tar xzf /tmp/code.tgz -C /code 2>&1 | grep -v "Ignoring unknown extended header"; cd /code && timeout 300 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3 && ls /code/node_modules/@esbuild /code/node_modules/@tailwindcss && touch /code/.staged' | sed 's/^/    | /'
 X_STAGED=$($K exec computer -c stage -- sh -c 'test -f /code/.staged && echo yes' 2>/dev/null)
 [ "$X_STAGED" = yes ] || { echo "VERDICT: BLOCKED — stage (untar + npm ci) failed after $(el $t0) s"; exit 1; }
 log "staged in $(el $t0) s (npm ci for the linux esbuild/tailwind binaries); waiting for Ready (fleet mode: after registration)"
@@ -190,7 +192,8 @@ X 'cat /work/.atelier/agent.log' > $OUT/agent-log-after-saves.txt; sed 's/^/    
 
 # ---- row (e): kill -9 the worker; the host never blinks
 log "row (e): kill -9 the blitzfeed worker $W_B1 under a request loop from the peer"
-P "cd /code && nohup sh -c 'for i in \$(seq 1 40); do node host/drill/step2/signer.mjs GET http://$IP:1845/api/acme/blitzfeed/state --app $INST_B | head -1; done' > /tmp/loop.txt 2>&1 &"
+P "printf 'cd /code\nfor i in \$(seq 1 40); do node host/drill/step2/signer.mjs GET http://$IP:1845/api/acme/blitzfeed/state --app $INST_B | head -1; done\n' > /tmp/loop.sh; rm -f /tmp/loop.txt"
+timeout 10 $K exec peer -- bash -c 'setsid -f bash /tmp/loop.sh < /dev/null > /tmp/loop.txt 2>&1; echo loop started' 2>&1 | sed 's/^/    | /'
 sleep 0.7
 t0=$(now); X "kill -9 $W_B1"
 W_B2=""; for i in $(seq 1 100); do W_B2=$(workerpid $UID_B); [ -n "$W_B2" ] && [ "$W_B2" != "$W_B1" ] && break; sleep 0.1; done
