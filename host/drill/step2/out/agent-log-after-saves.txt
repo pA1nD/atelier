@@ -1,0 +1,5 @@
+2026-08-28T12:10:51.164Z host: ready pid 15 host=computer-drill epoch=12233c9adae72a84
+2026-08-28T12:10:52.932Z [blitzfeed] rev 1 LIVE in 161 ms
+2026-08-28T12:10:52.948Z [probe] rev 1 LIVE in 141 ms
+2026-08-28T12:10:56.249Z [blitzfeed] rev 2 FAILED (users still on rev 1) backend.js:2:1 Unexpected end of file — close the open brace / parenthesis before the end of the file
+2026-08-28T12:10:59.348Z [blitzfeed] rev 3 LIVE in 90 ms

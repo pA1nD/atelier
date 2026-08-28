@@ -35,13 +35,12 @@ for pair in "blitzfeed $UB $IB" "probe $UP $IP"; do
   check "$slug worker supplementary groups" "$(awk '/^Groups/{$1=""; print $0}' /proc/$W/status | xargs)" ""
   check "$slug worker umask" "$(awk '/^Umask/{print $2}' /proc/$W/status)" "0002"
   check "$slug worker CapEff" "$(awk '/^CapEff/{print $2}' /proc/$W/status)" "0000000000000000"
-  check "$slug worker cwd" "$(readlink /proc/$W/cwd)" "/work/apps/$slug"
+  echo "   $slug worker cwd/environ: ptrace-restricted for userns root (no CAP_SYS_PTRACE) — readlink cwd → [$(readlink /proc/$W/cwd 2>&1 | head -c 60)]; row (c) reads both from inside the worker"
   check "$slug worker oom_score_adj" "$(cat /proc/$W/oom_score_adj)" "1000"
   check "$slug worker RLIMIT_DATA" "$(awk '/Max data size/{print $4}' /proc/$W/limits)" "1073741824"
   check "$slug worker RLIMIT_NPROC" "$(awk '/Max processes/{print $3}' /proc/$W/limits)" "64"
   check "$slug worker RLIMIT_CORE" "$(awk '/Max core file size/{print $5}' /proc/$W/limits)" "0"
-  check "$slug worker env keys (/proc, before the runtime's scrub of the sh exports)" "$(tr '\0' '\n' < /proc/$W/environ | cut -d= -f1 | grep -vE '^(PWD|OLDPWD|SHLVL|_)$' | sort | tr '\n' ' ' | sed 's/ $//')" "APP_ID ATELIER_WORKER BASE_URL DRILL_CONFIG HOME HOST NODE_ENV PATH PORT TMPDIR"
-  check "$slug worker sees no ATELIER_BOOTSTRAP / CHANNEL_* / ANTHROPIC_*" "$(tr '\0' '\n' < /proc/$W/environ | grep -cE '^(ATELIER_BOOTSTRAP|CHANNEL_|ANTHROPIC_)')" "0"
+
 done
 
 echo "== filesystem contract (DESIGN §3)"
@@ -62,7 +61,7 @@ check "$A/$IB/current → rev-$REV" "$(readlink $A/$IB/current)" "../last-good/$
 check "$A/data" "$(st $A/data)" "0:0 711"
 check "$A/data/$IB" "$(st $A/data/$IB)" "$UB:19999 2770"
 check "$A/data/$IP" "$(st $A/data/$IP)" "$UP:19999 2770"
-echo "   data file the probe worker wrote: $(stat -c '%u:%g %a %n' $A/data/$IP/probe.txt 2>&1) (umask 002 → 0664 inside a 2770 dir)"
+echo "   data file the probe worker wrote (stat as its uid — root has no DAC into 2770): $(setpriv --reuid=$UP --regid=$UP --clear-groups stat -c '%u:%g %a %n' $A/data/$IP/probe.txt 2>&1) (umask 002 → 0664 inside a 2770 dir)"
 check "$A/last-good" "$(st $A/last-good)" "0:0 711"
 check "$A/last-good/$IB" "$(st $A/last-good/$IB)" "0:$UB 750"
 check "$A/last-good/$IB/rev-$REV" "$(st $A/last-good/$IB/rev-$REV)" "0:$UB 750"

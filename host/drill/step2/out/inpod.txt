@@ -1,0 +1,154 @@
+== process tree
+       PID    PPID   UID   GID COMMAND         COMMAND
+         1       0     0     0 bash            bash /code/host/entrypoint.sh
+         7       1     0     0 MainThread      node /code/host/launcher.mjs
+        15       7     0     0 MainThread      node /code/host/index.mjs
+        16       7  1000  1000 MainThread      node /app/session-supervisor.mjs
+        59      15     0     0 esbuild         /code/node_modules/@esbuild/linux-x64/bin/esbuild --service=0.28.0 --ping
+        75      15 20001 20001 MainThread      node --max-old-space-size=380 /code/host/worker/runtime.mjs
+        81      15 20002 20002 MainThread      node --max-old-space-size=380 /code/host/worker/runtime.mjs
+       121       0     0     0 bash            bash /tmp/inpod.sh i-d90cd1c9fb6b1818 20001 i-24e749bfba3347cc 20002 1
+       129     121     0     0 sed             sed s/^/   /
+PASS PID 1 is bash = bash
+PASS launcher pid 7
+PASS host pid 15
+PASS session supervisor pid 16
+PASS host uid = 0
+PASS host fd 3 → /work/.atelier = /work/.atelier
+PASS host umask = 0077
+PASS host cwd = /
+PASS host supplementary groups (between reads: none) = 
+PASS session supervisor uid/groups = 1000/19999
+PASS blitzfeed worker pid 75 (uid 20001)
+PASS blitzfeed worker Uid line (real/effective/saved/fs) = 20001 20001 20001 20001
+PASS blitzfeed worker Gid line = 20001 20001 20001 20001
+PASS blitzfeed worker supplementary groups = 
+PASS blitzfeed worker umask = 0002
+PASS blitzfeed worker CapEff = 0000000000000000
+FAIL blitzfeed worker cwd — want [/work/apps/blitzfeed] got []
+PASS blitzfeed worker oom_score_adj = 1000
+PASS blitzfeed worker RLIMIT_DATA = 1073741824
+PASS blitzfeed worker RLIMIT_NPROC = 64
+PASS blitzfeed worker RLIMIT_CORE = 0
+/tmp/inpod.sh: line 43: /proc/75/environ: Permission denied
+FAIL blitzfeed worker env keys (/proc, before the runtime's scrub of the sh exports) — want [APP_ID ATELIER_WORKER BASE_URL DRILL_CONFIG HOME HOST NODE_ENV PATH PORT TMPDIR] got []
+/tmp/inpod.sh: line 44: /proc/75/environ: Permission denied
+PASS blitzfeed worker sees no ATELIER_BOOTSTRAP / CHANNEL_* / ANTHROPIC_* = 0
+PASS probe worker pid 81 (uid 20002)
+PASS probe worker Uid line (real/effective/saved/fs) = 20002 20002 20002 20002
+PASS probe worker Gid line = 20002 20002 20002 20002
+PASS probe worker supplementary groups = 
+PASS probe worker umask = 0002
+PASS probe worker CapEff = 0000000000000000
+FAIL probe worker cwd — want [/work/apps/probe] got []
+PASS probe worker oom_score_adj = 1000
+PASS probe worker RLIMIT_DATA = 1073741824
+PASS probe worker RLIMIT_NPROC = 64
+PASS probe worker RLIMIT_CORE = 0
+/tmp/inpod.sh: line 43: /proc/81/environ: Permission denied
+FAIL probe worker env keys (/proc, before the runtime's scrub of the sh exports) — want [APP_ID ATELIER_WORKER BASE_URL DRILL_CONFIG HOME HOST NODE_ENV PATH PORT TMPDIR] got []
+/tmp/inpod.sh: line 44: /proc/81/environ: Permission denied
+PASS probe worker sees no ATELIER_BOOTSTRAP / CHANNEL_* / ANTHROPIC_* = 0
+== filesystem contract (DESIGN §3)
+PASS /work = 1000:1000 755
+PASS /work/apps = 1000:1000 755
+PASS /work/apps/blitzfeed = 1000:20001 2750
+PASS /work/apps/probe = 1000:20002 2750
+PASS /work/apps/blitzfeed/backend.js (the agent's file, untouched; stat as the owner — root has no DAC) = 1000:1000 644
+PASS /work/.claude (the agent's) = 1000:1000 700
+PASS /work/.atelier = 0:0 755
+PASS /work/.atelier/agent.log = 0:1000 640
+PASS /work/.atelier/i-d90cd1c9fb6b1818 (marker dir) = 0:0 711
+PASS /work/.atelier/i-d90cd1c9fb6b1818/slug = 0:0 644
+PASS /work/.atelier/i-d90cd1c9fb6b1818/uid = 0:0 644
+PASS /work/.atelier/i-d90cd1c9fb6b1818/revision.json = 0:0 644
+PASS /work/.atelier/i-d90cd1c9fb6b1818/registered.json = 0:0 600
+PASS /work/.atelier/i-d90cd1c9fb6b1818/current → rev-1 = ../last-good/i-d90cd1c9fb6b1818/rev-1
+PASS /work/.atelier/data = 0:0 711
+PASS /work/.atelier/data/i-d90cd1c9fb6b1818 = 20001:19999 2770
+PASS /work/.atelier/data/i-24e749bfba3347cc = 20002:19999 2770
+   data file the probe worker wrote: stat: cannot statx '/work/.atelier/data/i-24e749bfba3347cc/probe.txt': Permission denied (umask 002 → 0664 inside a 2770 dir)
+PASS /work/.atelier/last-good = 0:0 711
+PASS /work/.atelier/last-good/i-d90cd1c9fb6b1818 = 0:20001 750
+PASS /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1 = 0:20001 750
+PASS /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/backend.js = 0:20001 640
+PASS /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/frontend/frontend.js = 0:20001 640
+PASS /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/styles.css = 0:20001 640
+PASS /work/.atelier/scratch = 0:0 711
+PASS /work/.atelier/tmp = 0:0 711
+PASS /work/.atelier/tmp/i-d90cd1c9fb6b1818 = 20001:20001 700
+PASS /run/atelier = 0:0 711
+PASS /run/atelier/w = 0:0 711
+PASS /run/atelier/w/i-d90cd1c9fb6b1818 = 0:20001 730
+PASS /run/atelier/w/i-d90cd1c9fb6b1818/w-1.sock (after READY) = 0:0 700
+PASS /run/atelier/dev = 0:1000 710
+PASS /run/atelier/dev/shell.sock = 0:1000 660
+PASS /run/atelier/bootstrap.token = 0:0 400
+PASS /run/atelier/dev.token = 0:0 400
+PASS /run/atelier/session = 1000:1000 700
+PASS /run/atelier/session/dev.token (stat as the owner) = 1000:1000 400
+PASS /run/atelier/host-ready = 0:0 644
+PASS /control = 1000:1000 700
+PASS /work/lost+found = 1000:1000 700
+PASS /tmp/tmux-1000 = 1000:1000 700
+PASS /tmp/.X11-unix = 0:0 1777
+== the agent's view (uid 1000, group 1000 only — the real agent also carries 19999)
+PASS agent reads agent.log = 2026
+PASS agent lists its app folder = backend.js frontend.jsx module.json styles.css 
+PASS agent cannot list last-good/i-d90cd1c9fb6b1818 = 1
+PASS agent cannot read bootstrap.token = 1
+PASS agent reads its dev token = 64
+PASS root-owned inodes in /work outside .atelier, as uid 1000 = 0
+   .atelier + /run/atelier tree:
+find: ‘/work/.atelier/tmp/i-d90cd1c9fb6b1818’: Permission denied
+find: ‘/work/.atelier/tmp/i-24e749bfba3347cc’: Permission denied
+find: ‘/work/.atelier/data/i-d90cd1c9fb6b1818’: Permission denied
+find: ‘/work/.atelier/data/i-24e749bfba3347cc’: Permission denied
+find: ‘/run/atelier/session’: Permission denied
+   2770 20001:19999 /work/.atelier/data/i-d90cd1c9fb6b1818
+   2770 20002:19999 /work/.atelier/data/i-24e749bfba3347cc
+   400 root:root /run/atelier/bootstrap.token
+   400 root:root /run/atelier/dev.token
+   600 root:root /work/.atelier/i-24e749bfba3347cc/registered.json
+   600 root:root /work/.atelier/i-d90cd1c9fb6b1818/registered.json
+   640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/backend.js
+   640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/backend.js.map
+   640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/frontend/frontend.js
+   640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/styles.css
+   640 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1/backend.js
+   640 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1/backend.js.map
+   640 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1/styles.css
+   640 root:node /work/.atelier/agent.log
+   644 root:root /run/atelier/host-ready
+   644 root:root /work/.atelier/i-24e749bfba3347cc/revision.json
+   644 root:root /work/.atelier/i-24e749bfba3347cc/slug
+   644 root:root /work/.atelier/i-24e749bfba3347cc/uid
+   644 root:root /work/.atelier/i-d90cd1c9fb6b1818/revision.json
+   644 root:root /work/.atelier/i-d90cd1c9fb6b1818/slug
+   644 root:root /work/.atelier/i-d90cd1c9fb6b1818/uid
+   660 root:node /run/atelier/dev/shell.sock
+   700 20001:20001 /work/.atelier/tmp/i-d90cd1c9fb6b1818
+   700 20002:20002 /work/.atelier/tmp/i-24e749bfba3347cc
+   700 node:node /run/atelier/session
+   700 root:root /run/atelier/w/i-24e749bfba3347cc/w-1.sock
+   700 root:root /run/atelier/w/i-d90cd1c9fb6b1818/w-1.sock
+   710 root:node /run/atelier/dev
+   711 root:root /run/atelier
+   711 root:root /run/atelier/w
+   711 root:root /work/.atelier/data
+   711 root:root /work/.atelier/i-24e749bfba3347cc
+   711 root:root /work/.atelier/i-d90cd1c9fb6b1818
+   711 root:root /work/.atelier/last-good
+   711 root:root /work/.atelier/scratch
+   711 root:root /work/.atelier/tmp
+   730 root:20001 /run/atelier/w/i-d90cd1c9fb6b1818
+   730 root:20002 /run/atelier/w/i-24e749bfba3347cc
+   750 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818
+   750 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1
+   750 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-1/frontend
+   750 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc
+   750 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1
+   755 root:root /work/.atelier
+   777 root:root /work/.atelier/i-24e749bfba3347cc/current
+   777 root:root /work/.atelier/i-d90cd1c9fb6b1818/current
+INPOD: pass=79 fail=4

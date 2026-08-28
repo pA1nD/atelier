@@ -23,7 +23,9 @@ AS1000="setpriv --reuid=1000 --regid=1000 --clear-groups"
 readyq(){ $K get pod computer -o jsonpath='{.status.conditions[?(@.type=="Ready")].status} rc={.status.containerStatuses[0].restartCount} phase={.status.phase}' 2>/dev/null; }
 waitready(){ local max=$1 t0=$(now); for i in $(seq 1 $((max*5))); do case "$(readyq)" in True*) echo "$(el $t0)"; return 0;; esac; sleep 0.2; done; echo "timeout"; return 1; }
 hostpid(){ X "pgrep -f '^node /code/host/index.mjs' | head -1" | tr -d '\r\n'; }
-workerpid(){ X "ps -eo pid,uid,args | awk '\$2==$1 && /worker\\/runtime.mjs/ {print \$1}' | head -1" | tr -d '\r\n'; }
+# the newest worker of that uid (the retiring one lives ≤ 500 ms + drain after a swap)
+workerpid(){ X "ps -eo pid,uid,args | awk '\$2==$1 && /worker\\/runtime.mjs/ {print \$1}' | sort -n | tail -1" | tr -d '\r\n'; }
+workercount(){ X "ps -eo pid,uid,args | awk '\$2==$1 && /worker\\/runtime.mjs/ {print \$1}' | wc -l" | tr -d '\r\n '; }
 SIGN(){ P "cd /code && node host/drill/step2/signer.mjs $*"; }
 py(){ python3 -c "$1"; }
 
@@ -127,7 +129,7 @@ def want(name, got, exp):
     ok = got == exp
     print(f"{'PASS' if ok else 'FAIL'} {name} = {json.dumps(got)}" + ('' if ok else f" (want {json.dumps(exp)})"))
     if not ok: bad.append(name)
-want('uid', j['uid'], uid); want('gid', j['gid'], uid); want('groups', j['groups'], []); want('umask', j['umask'], '2')
+want('uid', j['uid'], uid); want('gid', j['gid'], uid); want('groups (node lists the egid itself; /proc Groups is empty — inpod)', [g for g in j['groups'] if g != uid], []); want('umask', j['umask'], '2')
 want('cwd', j['cwd'], '/work/apps/probe')
 want('env keys (row W + the spine-held config key)', j['envKeys'], ['APP_ID','ATELIER_WORKER','BASE_URL','DRILL_CONFIG','HOME','HOST','NODE_ENV','PATH','PORT','TMPDIR'])
 want('DRILL_CONFIG (OR14 from the registrar)', j['DRILL_CONFIG'], 'from-spine')
@@ -141,7 +143,7 @@ for k, v in j['denied'].items(): want(f'denied.{k}', v, 'EACCES')
 print(f"PROBE: fail={len(bad)} {' '.join(bad)}")
 PY
 grep -q '^PROBE: fail=0' $OUT/probe-verdict.txt || rowfail c "$(tail -1 $OUT/probe-verdict.txt)"
-PF=$(X "stat -c '%u:%g %a %n' /work/.atelier/data/$INST_P/probe.txt"); log "row (c): the file the worker wrote: $PF"
+PF=$(X "setpriv --reuid=$UID_P --regid=$UID_P --clear-groups stat -c '%u:%g %a %n' /work/.atelier/data/$INST_P/probe.txt"); log "row (c): the file the worker wrote: $PF"
 
 # ---- row (d): broken save → old rev + ONE app-error; good save → one new rev
 log "row (d): syntax-error save as uid 1000"
@@ -178,7 +180,8 @@ for i in $(seq 1 150); do
 done
 T_SWAP=$(el $t0); log "row (d): live at rev $REV1 $T_SWAP s after the good save (rev0 $REV0)"
 [ -n "$REV1" ] || { rowfail d "no new live rev within 15 s: $A"; REV1=$REV0; }
-W_B1=$(workerpid $UID_B)
+for i in $(seq 1 50); do [ "$(workercount $UID_B)" = 1 ] && break; sleep 0.1; done   # the old worker drains ≤ 500 ms + 2 s
+W_B1=$(workerpid $UID_B); log "row (d): blitzfeed workers now: $(workercount $UID_B) (old $W_B0 retired)"
 FJ=$(SIGN GET "http://$IP:1845/modules/acme/blitzfeed/frontend.js" --app $INST_B | head -1 | awk '{print $4}'); CS=$(SIGN GET "http://$IP:1845/modules/acme/blitzfeed/styles.css" --app $INST_B | head -1 | awk '{print $4}')
 S=$(SIGN GET "http://$IP:1845/api/acme/blitzfeed/state" --app $INST_B | head -1)
 CUR=$(X "readlink /work/.atelier/$INST_B/current"); RJ=$(X "cat /work/.atelier/$INST_B/revision.json" | py 'import json,sys; j=json.load(sys.stdin); print(j["rev"], j["live"])')
