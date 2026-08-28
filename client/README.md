@@ -37,12 +37,12 @@ node --test client/test/*.test.js        # 79 tests, no browser, no host process
 
 ## Behaviour (the 4b table, DESIGN §4)
 
-- **Mount = subscribe → snapshot**; frames during a snapshot are buffered, `seq ≤ snapshot.seq` dropped. `gap` → one snapshot → `resume` at the cursor after the buffered frames. A frame with `seq ≠ cursor+1` is a gap. A stream change → snapshot. A snapshot with no stream (empty ring) resumes with `sub`; the `subscribed` echo at the same head is not a second snapshot.
+- **Mount = subscribe → snapshot**; frames during a snapshot are buffered, `seq ≤ snapshot.seq` dropped. `gap` → one snapshot → `resume` at the cursor after the buffered frames. A frame with `seq ≠ cursor+1` is a gap. A stream change → snapshot. A snapshot with no stream (empty ring) resumes with `sub`; the `subscribed` echo at the same head is not a second snapshot. Snapshot events carry `initial` (true once per topic: the first successful one). A socket still CONNECTING after 5 s is killed and redialled; a foreground after > 30 s hidden kills a CONNECTING socket like an open one.
 - **Foreground hook**: `visibilitychange` / `online` / `pageshow(persisted)`; `hiddenFor` from `Date.now()`; hidden > 30 s or a bfcache restore → reconnect at once, else a probe with a 500 ms budget.
 - **App topics**: each loaded app subscribes on its instance; `invalidate` → topic fetch → `{rev, error}`; a higher rev → re-import `frontend.js?rev=N` (token-guarded) + the sheet swap when active; `error` → the overlay for that qid, cleared when null. Never-imported apps do nothing.
 - **Rail**: `company:<c>` → rows replaced in state (new app, meta, primary); a moved `chromeRev` → `location.reload()`.
 - **Navigation**: SPA inside the company with the per-app sheet swap; another company or the picker → a full page load (portal POST / href). `meta.chrome` naming an unadvertised chrome → the error page (chrome-resolve.js).
-- **Removed**: the `shell` topic, `?v=`, `meta.eager`, `TopBarCenter`, the takeover, the observe-gated reporter, `boot.backendErrors`. Module handlers from `self.subscribe` receive `{type:'invalidate', topic:<qid>, seq}` only (1.x payload broadcasts are collapsed to invalidations — a documented 1.x break); the first mount snapshot is not delivered.
+- **Removed**: the `shell` topic, `?v=`, `meta.eager`, `TopBarCenter`, the takeover, the observe-gated reporter, `boot.backendErrors`. Module handlers from `self.subscribe` receive `{type:'invalidate', topic:<qid>, seq}` only (1.x payload broadcasts are collapsed to invalidations — a documented 1.x break); the bridge's `initial` snapshot (the one that established the topic in this document) is not delivered, every later snapshot (gap, stream change) is — a module (re)mounting on a topic the client already holds gets no mount snapshot and must not swallow the next gap.
 
 ## Stubbed / owed by other lanes
 

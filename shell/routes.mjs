@@ -16,11 +16,13 @@
 //   4c fetches      session-first: identity fails → 401 {} without Location → Host = path
 //                   company (fleet) → reserved company heads → 404                            both
 //   5  presence     registry.resolve → 404; registry.present → 404 (same as a stranger); the
-//                   chrome's /modules/global/<chrome>/* is session-gated only                  both
+//                   chrome's /modules/global/<chrome>/* and /api/global/<chrome>/* are session-
+//                   gated only (no presence); the assertion carries the chrome row's instance   both
 //   6  Origin       gate.origin on writes + the WS upgrade, only when the credential is a cookie both
 //   7  authorize    the per-app hook — none in 2.0.0 (presence is the ACL); a visible no-op    both
 //   8  proxy        /api, /modules through hostLink; /_atelier/{ws,whoami,report,topics,rail,wake}  both
-//   anything else → 404 {}; a non-GET/HEAD on a document route → 405; an Upgrade anywhere but
+//   anything else → 404 {}; a non-GET/HEAD on a document route → 401 unauthenticated (no Location,
+//   no ticket mint), 405 with a session; an Upgrade anywhere but
 //   /_atelier/ws → 426. The 1.x-only surfaces (/_atelier/inflight, client-errors, takeover, observe)
 //   do not exist in 2.0 — gone, not skipped (§4.8 N6).
 import fs from 'node:fs'
@@ -136,18 +138,20 @@ function documentCompany(ctx) {
 export async function laneDocument(ctx) {
   if (ctx.route.kind !== 'document') return null
   if (ctx.upgrade) return jsonR('document', 426, {})
-  if (ctx.method !== 'GET' && ctx.method !== 'HEAD') return jsonR('document', 405, {})
   const company = documentCompany(ctx)
   if (!company) return jsonR('document', 404, {})
   const known = ctx.providers.registry.companies?.() ?? []          // local: the workspaces; fleet: [] (the Host gate decided)
   if (known.length && !known.some((c) => c.id === company)) return jsonR('document', 404, {})
+  const isRead = ctx.method === 'GET' || ctx.method === 'HEAD'
   const id = await resolvePerson(ctx)
   if (!id.ok) {
+    if (!isRead) return jsonR('document', 401, {})                   // no Location, no ticket mint (PLAN §4.1: non-GET/HEAD 401)
     const u = ctx.gate.unauthDocument(ctx.req, { company, path: ctx.path })
     if (!u) return jsonR('document', 401, {})
     if (u.status === 302) return r('document', 302, { headers: { location: u.location, 'cache-control': 'no-store', ...(u.cookie ? { 'set-cookie': u.cookie } : {}) } })
     return r('document', u.status, { body: 'Sign-in did not stick on this origin (cookies blocked?). Open the link again from the portal.', headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } })
   }
+  if (!isRead) return jsonR('document', 405, {})
   const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, marks: ctx.marks, now: ctx.now })
   const nonce = newNonce()
   if (state.waking) {
@@ -208,8 +212,9 @@ export async function laneFetch(ctx) {
     }
     return null
   }
-  // the chrome's /modules/global/<chrome>/* is not a company path: it is served on every company origin (§2.2)
-  const isChrome = k === 'modules' && `${ctx.route.company}/${ctx.route.slug}` === chromeOf(ctx, ctx.hostCompany ?? ctx.route.company)
+  // the chrome's /modules/global/<chrome>/* and /api/global/<chrome>/* (its backend) are not company
+  // paths: they are served on every company origin (§2.2; PLAN §4.1 — the chrome is not an app)
+  const isChrome = `${ctx.route.company}/${ctx.route.slug}` === chromeOf(ctx, ctx.hostCompany ?? ctx.route.company)
   if (ctx.hostCompany && ctx.route.company !== ctx.hostCompany && !isChrome) return jsonR('fetch', 404, {})
   ctx.company = isChrome ? (ctx.hostCompany ?? ctx.route.company) : ctx.route.company
   return null
@@ -222,10 +227,17 @@ export async function lanePresence(ctx) {
   const { company, slug } = ctx.route
   const registry = ctx.providers.registry
   const qid = `${company}/${slug}`
-  if (k === 'modules') {
-    // the chrome is not an app: session-gated only, exempt from presence; served by the host that carries ATELIER_CHROME_DIR
-    const chromeCompany = ctx.hostCompany ?? (registry.companies?.() ?? []).find((c) => c.id === company)?.id ?? (registry.companies?.() ?? [])[0]?.id ?? company
-    if (qid === chromeOf(ctx, chromeCompany)) { ctx.app = { instance: `chrome:${qid}`, company, slug, chrome: true }; ctx.appCompany = chromeCompany; return null }
+  // the chrome (assets and its backend) is not an app: session-gated only, exempt from presence. It is
+  // served by the Host company's host, under that company's registry row (locally the staged
+  // `global/<chrome>` row; the host verifies the assertion's `app` against the row's instance, so a
+  // synthetic id would be a 401 there). No row → 404 with a log line: the fleet's chrome delivery
+  // (the shell serving the pinned digest, PLAN §10 item 6) is not built.
+  const chromeCompany = ctx.hostCompany ?? (registry.companies?.() ?? []).find((c) => c.id === company)?.id ?? (registry.companies?.() ?? [])[0]?.id ?? company
+  if (qid === chromeOf(ctx, chromeCompany)) {
+    const row = await registry.resolve(chromeCompany, slug)
+    if (!row) { ctx.log(`presence: 404 chrome ${qid} has no registry row on ${chromeCompany} (PLAN §10 item 6)`); return jsonR('presence', 404, {}) }
+    ctx.app = { ...row, chrome: true }; ctx.appCompany = chromeCompany
+    return null
   }
   const row = await registry.resolve(company, slug)
   if (!row) return jsonR('presence', 404, {})

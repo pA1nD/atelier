@@ -14,8 +14,11 @@
 // `subscribe(handler)`. A module still writes `self.subscribe(fn)` and never sees instance ids:
 // `subscribe` maps the qid to the app's INSTANCE through `instanceFor(company, app)` (the
 // bootstrap module row) and subscribes on that topic. 2.0 events are invalidations — the handler
-// receives `{type:'invalidate', topic:<qid>, seq}`; the very first snapshot of a subscription
-// (mount = subscribe → snapshot) is not a change and is not delivered.
+// receives `{type:'invalidate', topic:<qid>, seq}`. The bridge's `initial` snapshot (the one that
+// established the topic's state in this document) is not a change and is not delivered; every
+// later snapshot (a gap, a stream change, a re-established socket) is one — a module that
+// (re)mounts on a topic the client already holds gets no mount snapshot and must not swallow the
+// next gap.
 
 const NONE = { company: '', app: '', qid: '', base: '', modules: '', api: '', rest: '' }
 
@@ -47,14 +50,13 @@ export function self(input, { instanceFor, subscribe } = {}) {
     subscribe: (handler) => {
       if (!qid || typeof handler !== 'function' || typeof subscribe !== 'function') return () => {}
       const instance = (typeof instanceFor === 'function' && instanceFor(company, app)) || qid
-      let first = true
       return subscribe(instance, (ev) => {
         if (ev.type === 'snapshot') {
-          if (first) { first = false; return }
+          if (ev.initial) return
           handler({ type: 'invalidate', topic: qid, seq: ev.snapshot?.seq ?? null })
           return
         }
-        if (ev.type === 'invalidate') { first = false; handler({ type: 'invalidate', topic: qid, seq: ev.seq }) }
+        if (ev.type === 'invalidate') handler({ type: 'invalidate', topic: qid, seq: ev.seq })
       })
     },
   }

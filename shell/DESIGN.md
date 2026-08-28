@@ -188,13 +188,13 @@ The chrome bundle and kit are the host's `/modules/global/<chrome>/{frontend,kit
 | 3 | ticket | `gate.ticket(req, res)` on `/_t/<opaque>` — creates the session, no session needed | fleet |
 | 4a | shell-owned assets | `/assets/{react,react-dom,client,chrome-resolve}.js` — public bytes, no identity needed (the same bytes for everyone) | both |
 | 4b | document routes, **Host-first** | `/`, `/<c>/`, `/<c>/<s>[/rest]` (GET/HEAD): Host = path company else 404 (fleet) → `identity.resolve` → no session → `gate.unauthDocument` 302 (fleet) → `registry.host(c)` stale/draining/dial-fail → the waking page (§3.5) → compose (§2.1–2.3). A slug the registry does not know still renders the document (the client tidies the URL, 1.x behaviour) | both (Host and 302 fleet) |
-| 4c | fetch routes, **session-first** | `/api/<c>/<s>/*`, `/modules/<c>/<s>/*`, `/modules/global/<chrome>/*`, `/_atelier/*`: `identity.resolve` fails → 401 `{}` without `Location` (fetches cannot follow a gate redirect) → then Host = path company else 404 (fleet); `/modules/<c>` where `<c>` ∈ reserved (`modules`, `api`, …) → 404 [S:B6] | both (Host fleet) |
-| 5 | presence | `registry.resolve(c, s)` → 404; `registry.present(person.id, row.instance)` → 404 (same status as a stranger, 42/42 [S:C3]); the chrome's `/modules/global/<chrome>/*` skips this lane (session-gated only) | both |
+| 4c | fetch routes, **session-first** | `/api/<c>/<s>/*`, `/modules/<c>/<s>/*`, `/modules/global/<chrome>/*` and `/api/global/<chrome>/*`, `/_atelier/*`: `identity.resolve` fails → 401 `{}` without `Location` (fetches cannot follow a gate redirect) → then Host = path company else 404 (fleet; the chrome's two paths are exempt — served on every company origin); `/modules/<c>` where `<c>` ∈ reserved (`modules`, `api`, …) → 404 [S:B6] | both (Host fleet) |
+| 5 | presence | `registry.resolve(c, s)` → 404; `registry.present(person.id, row.instance)` → 404 (same status as a stranger, 42/42 [S:C3]); the chrome's `/modules/global/<chrome>/*` and `/api/global/<chrome>/*` skip presence (session-gated only) but still need the chrome's registry row on the Host company (`registry.resolve(hostCompany, <chrome>)` — locally the staged `global/<chrome>` row): the assertion's `app` is that row's instance, the one the host verifies; no row → 404 + a log line (PLAN §10 item 6) | both |
 | 6 | Origin | `gate.origin(req, credential)` on `POST/PUT/PATCH/DELETE` and the WS upgrade — only when `credential === 'cookie'`; `Origin: null` → 403 | both (a no-op locally by evaluation) |
 | 7 | authorize | the optional per-app hook — none in 2.0.0 (§9: no read/write gate; presence is the ACL); the lane exists as a no-op function so the order is visible | both |
 | 8 | proxy | `/api` and `/modules` through `hostLink.request` (§3.2–3.3); `/_atelier/ws` upgrade → the events socket (§3.4); `/_atelier/whoami` → `{id, name, anonymous:false}`; `/_atelier/report` (POST, ≤ 64 KiB) → forwarded to the host signed with `app = body.instance` (presence-gated on that instance); `/_atelier/topics/<topic>` → `bus.snapshot(topic)`; `/_atelier/rail` = `bus.snapshot('company:<c>')` | both |
 
-Anything else → 404 `{}`; a non-GET/HEAD on a document route → 405; an Upgrade anywhere but `/_atelier/ws` → 426. The 1.x-only surfaces (`/_atelier/inflight`, `/_atelier/client-errors`, the takeover bootstrap, `observe`) do not exist in 2.0 — they are not "skipped", they are gone (§4.8 N6).
+Anything else → 404 `{}`; a non-GET/HEAD on a document route → 401 `{}` unauthenticated (no `Location`, no ticket mint — PLAN §4.1) and 405 with a session; an Upgrade anywhere but `/_atelier/ws` → 426. The 1.x-only surfaces (`/_atelier/inflight`, `/_atelier/client-errors`, the takeover bootstrap, `observe`) do not exist in 2.0 — they are not "skipped", they are gone (§4.8 N6).
 
 ---
 
@@ -404,7 +404,7 @@ Screenshots per row into `shell/drill/out/`; the run script `shell/drill/run.sh`
 
 - **H1 (host, ~2 lines, gates step 4's local wiring):** `host/supervisor/discovery.mjs` L77 treats a symlink to a directory in `/work/apps` as a folder when `ATELIER_APPS_LINKS=1` — local mode only; `host/index.mjs config()` refuses the variable in fleet mode (a symlink in `/work/apps` planted by the agent must stay `not-a-dir` there). Without it the staging of §5.3 cannot work; the alternative (pointing a host's apps root at the instance folder itself) writes `CLAIM-REFUSED.txt` into every `$<ws>/` folder and is rejected.
 - **H2 (host, later, not gating):** `localTransport` takes the shell's public key and writes the host's `<epoch>.<token>` to `$ATELIER_RUN/host-link.json` (0600) so the local shell can dial the protocol port with a verified assertion instead of the dev lane. Until then §1.5's local row holds.
-- **The chrome's backend** (catalyst-chrome ships `backend.js`, [S:migration-local-3] surprise 5): the host mounts the chrome folder as a worker only when it is under `/work/apps`; `ATELIER_CHROME_DIR` is assets + sheet only. Local mode therefore stages the chrome folder as an app too (`global/<chrome>`, `module.json` from its literal meta) so `/api/global/catalyst-chrome/docs` answers; the shell's chrome exemption from presence applies to `/modules/global/<chrome>/*`; its API goes through lane 5 like any app (locally: present).
+- **The chrome's backend** (catalyst-chrome ships `backend.js`, [S:migration-local-3] surprise 5): the host mounts the chrome folder as a worker only when it is under `/work/apps`; `ATELIER_CHROME_DIR` is assets + sheet only. Local mode therefore stages the chrome folder as an app too (`global/<chrome>`, `module.json` from its literal meta) so `/api/global/catalyst-chrome/docs` answers; the shell's chrome exemption from presence covers `/modules/global/<chrome>/*` and `/api/global/<chrome>/*` alike (PLAN §4.1) — both signed with the staged row's instance, the one the host's protocol lane verifies.
 - **Resolutions:** (1) one shell socket frame set — 1.x payload broadcasts are collapsed to invalidations (§1.4), the doctor names the break; (2) the overlay stays, fed by the snapshot's `error` (local only; the fleet snapshot never carries one — OR16); (3) `primary` locally = `module.json`'s value (no portal to apply it); (4) local mode = one chrome; a `meta.chrome` naming another renders the client's error; (5) `?token=` never reaches a browser in 2.0 local mode; (6) every local wait is per request with a 1 s dial cap and a `VERDICT`-ended background task in the drill — the CLI never blocks on a host boot.
 
 ---
@@ -430,14 +430,25 @@ from §1–§3 as built, each a stated choice:
 4. **Gap on a fresh subscription**: a `subscribed` at an empty ring has cursor `{stream:null, seq:0}`;
    the pump treats a first delivered seq ≠ 1 on that cursor as a gap (the ring rotated past the
    subscription) — `since()` alone answers `streamChange` for a null cursor.
-5. **Chrome routing**: `/modules/global/<chrome>/*` is exempt from the fleet's Host = path company
-   check as well as from presence (it is served on every company origin by the Host company's host);
-   the chrome's `/api/global/<chrome>/*` is an app lane (the staged chrome row, `isChrome`, hidden
-   from the rail and the bootstrap).
+5. **Chrome routing**: `/modules/global/<chrome>/*` and the chrome's backend `/api/global/<chrome>/*`
+   are exempt from the fleet's Host = path company check as well as from presence (served on every
+   company origin by the Host company's host — PLAN §4.1: the chrome is not an app). Both are signed
+   with the chrome's registry row on the Host company (locally the staged row, `isChrome`, hidden
+   from the rail and the bootstrap): the host verifies the assertion's `app` against the row's
+   instance, so a synthetic id is a 401 on the protocol lane. No row → 404 with a log line; the
+   shell serving a pinned chrome digest in the fleet (PLAN §10 item 6) is not built.
 6. **Unknown company locally → 404** on document routes (the fleet's Host gate does this in lane 2;
    locally the registry's workspace list decides) — without it every typo was a waking page.
-7. **The loop breaker** (§10 item 14): `__Host-tried=1` (Max-Age 30) set with the 302; a document
-   request that still carries it with no session answers 403 with a one-line text page.
+7. **The loop breaker** (§10 item 14), two layers: `__Host-tried=1` (Max-Age 30) set with the 302; a
+   document request that still carries it with no session answers 403 with a one-line text page —
+   this covers only a client that stores cookies at all (one that drops `__Host-session` drops
+   `__Host-tried` too, same attributes). The ticket lane is the second layer: a ticket for the same
+   person + `next` consumed within 30 s of the previous one, on a request without a session cookie,
+   is burnt and answered with the same 403 page instead of another 302 — the cycle ends at the
+   shell after two tickets (per replica, an in-memory map; `/go` refusing the second mint on the
+   portal is step 5). `next` itself is trusted only as a normalised `/<c>/<slug>[/rest]` of the
+   ticket's company (no `//`, scheme, dot segments out of it, API/ticket paths, reserved head as
+   the slug); anything else lands on `/<c>/`.
 8. **Assets**: `/assets/client.js` is an esbuild BUNDLE (client.jsx + its `./bridge.js`… + `chrome-resolve.js`),
    so the preload list's depth is 3 with one client request; `/assets/<name>.js` also serves the plain
    files under `client/` for a fork that prefers separate modules. Until `client/client.jsx` exists

@@ -51,16 +51,25 @@ test('subscribe maps the qid to the instance and delivers invalidations only', (
   const got = []
   const unsub = s.subscribe((ev) => got.push(ev))
   assert.equal(subs[0].topic, 'inst-42')                                          // the module never sees the instance
-  subs[0].fn({ type: 'snapshot', topic: 'inst-42', snapshot: { seq: 3 } })          // the mount snapshot is not a change
+  subs[0].fn({ type: 'snapshot', topic: 'inst-42', snapshot: { seq: 3 }, initial: true })   // the mount snapshot is not a change
   assert.deepEqual(got, [])
   subs[0].fn({ type: 'invalidate', topic: 'inst-42', seq: 4, stream: 'h:e' })
   assert.deepEqual(got, [{ type: 'invalidate', topic: 'acme/todo', seq: 4 }])
-  subs[0].fn({ type: 'snapshot', topic: 'inst-42', snapshot: { seq: 9 } })          // a gap snapshot is
+  subs[0].fn({ type: 'snapshot', topic: 'inst-42', snapshot: { seq: 9 }, initial: false })  // a gap snapshot is
   assert.deepEqual(got[1], { type: 'invalidate', topic: 'acme/todo', seq: 9 })
   subs[0].fn({ type: 'denied', topic: 'inst-42' })
   assert.equal(got.length, 2)
   unsub()
   assert.equal(subs.length, 0)
+})
+
+test('a handler added to a topic the client already holds gets no mount snapshot: the next gap snapshot is a change', () => {
+  const subs = []
+  const s = self('/modules/acme/todo/frontend.js', { instanceFor: () => 'inst-42', subscribe: (topic, fn) => { subs.push({ topic, fn }); return () => {} } })
+  const got = []
+  s.subscribe((ev) => got.push(ev))                                                // a remount after a hot re-import
+  subs[0].fn({ type: 'snapshot', topic: 'inst-42', snapshot: { seq: 301 } })        // the gap snapshot, not `initial`
+  assert.deepEqual(got, [{ type: 'invalidate', topic: 'acme/todo', seq: 301 }])
 })
 
 test('subscribe falls back to the qid when the row is unknown', () => {

@@ -16,15 +16,19 @@
 // app-level loopback pair of shell/events.mjs: the tab sends `pong {at}`, the shell echoes
 // `ping {at}` (any frame back answers the probe); no answer within PING_MS = dead → kill() +
 // reconnect at once. A `sub` that is not acked within SUB_ACK_MS on an open socket is the same
-// verdict. The foreground hook
+// verdict. A handshake is not trusted either: a socket still CONNECTING after CONNECT_TIMEOUT_MS
+// is killed (a blackholed handshake on the phone would otherwise wait for the browser's own TCP
+// timeout). The foreground hook
 // (visibilitychange / online / pageshow(persisted)) measures `hiddenFor` with Date.now()
 // (performance.now() may not advance in iPhone sleep): hidden > STALE_HIDE_MS or a bfcache
-// restore → reconnect at once, else probe with a FG_PONG_MS budget. A false kill costs one
-// reconnect and N idempotent resumes.
+// restore → reconnect at once (a CONNECTING socket included), else probe with a FG_PONG_MS
+// budget. A false kill costs one reconnect and N idempotent resumes.
 //
-// Handlers receive: {type:'snapshot', topic, snapshot} · {type:'invalidate', topic, seq, stream} ·
-// {type:'denied', topic} · {type:'waking', topic}. The `atelier:connection` banner state
-// ('online' | 'offline' | 'unauthed') is reported through `onState`.
+// Handlers receive: {type:'snapshot', topic, snapshot, initial} · {type:'invalidate', topic, seq,
+// stream} · {type:'denied', topic} · {type:'waking', topic}. `initial` is true on the snapshot
+// that established the topic's state in this document (the first successful one); every later
+// snapshot (gap, stream change) is a change a handler must act on. The `atelier:connection`
+// banner state ('online' | 'offline' | 'unauthed') is reported through `onState`.
 //
 // Everything the browser owns is injected (WebSocket, fetch, clock, timers, visibility) so the
 // state machine runs under node --test.
@@ -33,6 +37,7 @@ export const PING_MS = 1000
 export const FG_PONG_MS = 500
 export const STALE_HIDE_MS = 30_000
 export const SUB_ACK_MS = 2000
+export const CONNECT_TIMEOUT_MS = 5000
 export const OFFLINE_GRACE_MS = 2500
 export const BACKOFF_MIN_MS = 250
 export const BACKOFF_MAX_MS = 5000
@@ -57,7 +62,7 @@ export function createBridge({
   log = () => {},
 }) {
   const topics = new Map()   // topic → st
-  let ws = null, backoff = BACKOFF_MIN_MS, reconnectTimer = null, pingTimer = null, fgTimer = null
+  let ws = null, backoff = BACKOFF_MIN_MS, reconnectTimer = null, pingTimer = null, fgTimer = null, connectTimer = null
   let probeAt = null, lastFrameAt = 0, hiddenAt = null, connState = 'online', offlineTimer = null
   let inflight = 0, sockets = 0, stopped = false
 
@@ -65,7 +70,7 @@ export function createBridge({
     let s = topics.get(topic)
     if (!s) {
       s = { stream: null, seq: 0, pending: null, handlers: new Set(), denied: false, acked: true, sentAt: null, retry: null, retryTimer: null,
-            gaps: 0, snapshots: 0, received: 0, dup: 0, errors: [] }
+            established: false, gaps: 0, snapshots: 0, received: 0, dup: 0, errors: [] }
       topics.set(topic, s)
     }
     return s
@@ -109,14 +114,17 @@ export function createBridge({
     try { s = new WebSocket(url) } catch { armOfflineTimer(); scheduleReconnect(); return }
     ws = s; sockets++; probeAt = null
     log('connect', { n: sockets, reason })
+    clearTimeout(connectTimer)
+    connectTimer = setTimeout(() => { connectTimer = null; if (s === ws && s.readyState === 0) kill('connect-timeout') }, CONNECT_TIMEOUT_MS)
     s.onopen = () => {
       if (s !== ws) return
+      clearTimeout(connectTimer); connectTimer = null
       backoff = BACKOFF_MIN_MS; lastFrameAt = now(); probeAt = null
       clearOfflineTimer(); setState('online')
       for (const [topic, t] of wanted()) announce(topic, t)
     }
     s.onmessage = (m) => { if (s !== ws) return; let f; try { f = JSON.parse(m.data) } catch { return } onFrame(f) }
-    s.onclose = (e) => { if (s !== ws) return; ws = null; probeAt = null; log('close', { code: e && e.code }); armOfflineTimer(); scheduleReconnect() }
+    s.onclose = (e) => { if (s !== ws) return; clearTimeout(connectTimer); connectTimer = null; ws = null; probeAt = null; log('close', { code: e && e.code }); armOfflineTimer(); scheduleReconnect() }
     s.onerror = () => {}
   }
   function scheduleReconnect() {
@@ -130,6 +138,7 @@ export function createBridge({
     if (!s) { connect('after-' + reason); return }
     log('dead', { reason, readyState: s.readyState })
     s.onmessage = s.onclose = s.onerror = s.onopen = null
+    clearTimeout(connectTimer); connectTimer = null
     ws = null; probeAt = null
     try { s.close() } catch {}
     backoff = BACKOFF_MIN_MS
@@ -197,7 +206,8 @@ export function createBridge({
     s.retry = null
     s.stream = snap.stream ?? null; s.seq = snap.seq
     const pend = s.pending; s.pending = null
-    emit(s, topic, { type: 'snapshot', topic, snapshot: snap })
+    const initial = !s.established; s.established = true
+    emit(s, topic, { type: 'snapshot', topic, snapshot: snap, initial })
     for (let i = 0; i < pend.length; i++) {
       const f = pend[i]
       if (s.pending !== null) { s.pending.push(...pend.slice(i)); break }    // a nested snapshot started: hand it the rest
@@ -232,8 +242,8 @@ export function createBridge({
     const hf = hiddenFor(hiddenAt, now()); hiddenAt = null
     log('fg', { how, hiddenFor: hf })
     if (!ws) { connect('fg-' + how); return }
-    if (ws.readyState !== 1) return                       // still connecting; onclose/backoff handles it
-    if (reconnectOnForeground(how, hf)) { kill(how === 'pageshow' ? 'bfcache-restore' : 'stale-after-hide'); return }
+    if (reconnectOnForeground(how, hf)) { kill(how === 'pageshow' ? 'bfcache-restore' : 'stale-after-hide'); return }   // an open OR still-connecting socket
+    if (ws.readyState !== 1) return                       // still connecting after a short hide: the connect timeout / onclose handles it
     probeAt = null
     if (!probe()) return
     clearTimeout(fgTimer)
@@ -258,7 +268,7 @@ export function createBridge({
   function stop() {
     stopped = true
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
-    clearTimeout(reconnectTimer); clearTimeout(fgTimer); clearOfflineTimer()
+    clearTimeout(reconnectTimer); clearTimeout(fgTimer); clearTimeout(connectTimer); connectTimer = null; clearOfflineTimer()
     for (const s of topics.values()) if (s.retryTimer) { clearTimeout(s.retryTimer); s.retryTimer = null }
     const s = ws; ws = null
     if (s) { s.onmessage = s.onclose = s.onerror = s.onopen = null; try { s.close() } catch {} }

@@ -10,20 +10,47 @@
 //                     (sec-fetch-dest document ∧ mode navigate ∧ user ?1 ∧ no Sec-Purpose); any other
 //                     fetch gets the Continue page (a same-origin POST is the second gesture path);
 //                     used/expired → 410, wrong aud → 403 (not burnt), unknown → 404; on success the
-//                     session cookie is set and the person lands on `next` (302)
-//   unauthDocument:   302 `https://portal/go/<c>/<path>` (path only, query dropped) + the loop breaker:
-//                     a `__Host-tried` cookie set with the 302; a request that still carries it and
-//                     still has no session → 403 loop page instead of a second mint (§10 item 14)
+//                     session cookie is set and the person lands on `next` (302). `next` is trusted
+//                     only as a normalised app path of THIS company (`/<c>/<slug>[/rest]`, no `//`,
+//                     scheme, dot segments, reserved head as the slug) — anything else lands on `/<c>/`
+//   the loop breaker (PLAN §4.1, §10 item 14) — a client that does not store `__Host-session` loops
+//                     deep → /go → /_t → deep, minting a ticket per cycle. Two layers:
+//                     (1) `__Host-tried` set with the 302; a document request that still carries it
+//                         and has no session → 403 loop page. Cheap, but it covers only a client
+//                         that stores cookies at all: one that drops `__Host-session` drops this one
+//                         too (same `__Host-`/Secure/HttpOnly/SameSite=Lax attributes).
+//                     (2) the ticket lane refuses to redirect a second ticket for the same
+//                         person + next within LOOP_WINDOW_MS when the request carries no session
+//                         cookie: the ticket is consumed (single use holds), the answer is the 403
+//                         loop page, not another 302 — the cycle ends at the shell's door after two
+//                         tickets. Per replica (an in-memory map); /go's own refusal on the
+//                         portal/spine (the same rule, store-backed) is step 5.
 //   origin:           only when the credential is a cookie; `Origin` must equal the company origin
 import { originRule } from './gate-local.mjs'
+import { normalise, parseRoute, RESERVED_HEADS } from '../routes.mjs'
 
 export const PORTAL_HOST = 'portal.pa1nd.de'
 export const TRIED_COOKIE = '__Host-tried'
+export const SESSION_COOKIE = '__Host-session'
+export const LOOP_WINDOW_MS = 30_000
+export const LOOP_MAP_MAX = 4096
 export const HSTS = 'max-age=63072000; includeSubDomains'
 export const CONTINUE_PAGE = (path) => `<!doctype html><meta charset="utf-8"><title>Continue</title><form method="post" action="${path}"><button>Continue to Atelier</button></form>`
+export const LOOP_PAGE = 'Sign-in did not stick on this origin (cookies blocked?). Open the link again from the portal.'
 
 const hostOf = (req) => String(req.headers?.host ?? '').replace(/:\d+$/, '').toLowerCase()
 const cookie = (req, name) => { const m = new RegExp(`(?:^|;\\s*)${name.replace(/[-]/g, '\\-')}=([^;]*)`).exec(req.headers?.cookie ?? ''); return m ? m[1] : null }
+
+// safeNext(next, company) → the normalised path (+ query) to land on, or null
+export function safeNext(next, company) {
+  if (typeof next !== 'string' || !next.startsWith('/') || next.startsWith('//')) return null
+  const n = normalise(next)
+  if (!n.ok) return null
+  const route = parseRoute(n.path)
+  if (route.kind !== 'document' || route.company !== company) return null
+  if (route.slug && RESERVED_HEADS.has(route.slug)) return null
+  return n.forward
+}
 
 /**
  * createGateFleet({ domain, companies, tickets, sessions, now })
@@ -32,9 +59,19 @@ const cookie = (req, name) => { const m = new RegExp(`(?:^|;\\s*)${name.replace(
  *   tickets.peek(id)    → Promise<{aud} | null>                (the wrong-aud check must not burn it)
  *   sessions.create({person, company}) → Promise<sessionId>
  */
-export function createGateFleet({ domain = PORTAL_HOST, companies = () => false, tickets, sessions, now = Date.now } = {}) {
+export function createGateFleet({ domain = PORTAL_HOST, companies = () => false, tickets, sessions, now = Date.now, loopWindowMs = LOOP_WINDOW_MS } = {}) {
   const companyOf = (host) => (host.endsWith('.' + domain) ? host.slice(0, -(domain.length + 1)) : null)
   const isNavigation = (h) => h['sec-fetch-dest'] === 'document' && h['sec-fetch-mode'] === 'navigate' && h['sec-fetch-user'] === '?1' && !h['sec-purpose'] && !h['purpose']
+  const consumed = new Map()      // `${company}|${person.id}|${next}` → at (the loop breaker's second layer)
+  const loopPage = (res) => { res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }); res.end(LOOP_PAGE) }
+  function recentlyConsumed(key) {
+    const t = now()
+    for (const [k, at] of consumed) if (t - at > loopWindowMs) consumed.delete(k)
+    const hit = consumed.has(key)
+    consumed.set(key, t)
+    if (consumed.size > LOOP_MAP_MAX) consumed.delete(consumed.keys().next().value)
+    return hit
+  }
   return {
     kind: 'fleet',
     https(req) {
@@ -67,9 +104,12 @@ export function createGateFleet({ domain = PORTAL_HOST, companies = () => false,
       if (peek.aud !== company) { res.writeHead(403, { 'cache-control': 'no-store' }); res.end(); return true }   // not burnt
       const t = await tickets.consume(id)
       if (!t.ok) { res.writeHead(t.reason === 'unknown' ? 404 : 410, { 'cache-control': 'no-store' }); res.end(); return true }
+      const next = safeNext(t.next, company) ?? `/${company}/`
+      // the same person landing on the same next again within the window, still without a session
+      // cookie: the previous ticket's cookie was never stored — a loop, not a sign-in
+      if (recentlyConsumed(`${company}|${t.person?.id}|${next}`) && !cookie(req, SESSION_COOKIE)) { loopPage(res); return true }
       const sid = await sessions.create({ person: t.person, company })
-      const next = typeof t.next === 'string' && t.next.startsWith('/') && !t.next.startsWith('//') ? t.next : `/${company}/`
-      res.writeHead(302, { location: next, 'cache-control': 'no-store', 'set-cookie': [`__Host-session=${encodeURIComponent(sid)}; Path=/; Secure; HttpOnly; SameSite=Lax`, `${TRIED_COOKIE}=; Path=/; Secure; HttpOnly; Max-Age=0`] })
+      res.writeHead(302, { location: next, 'cache-control': 'no-store', 'set-cookie': [`${SESSION_COOKIE}=${encodeURIComponent(sid)}; Path=/; Secure; HttpOnly; SameSite=Lax`, `${TRIED_COOKIE}=; Path=/; Secure; HttpOnly; Max-Age=0`] })
       res.end(); return true
     },
     unauthDocument(req, { company, path }) {

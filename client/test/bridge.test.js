@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createBridge, hiddenFor, reconnectOnForeground, PING_MS, FG_PONG_MS, STALE_HIDE_MS, SUB_ACK_MS, OFFLINE_GRACE_MS } from '../bridge.js'
+import { createBridge, hiddenFor, reconnectOnForeground, PING_MS, FG_PONG_MS, STALE_HIDE_MS, SUB_ACK_MS, OFFLINE_GRACE_MS, CONNECT_TIMEOUT_MS } from '../bridge.js'
 import { isClientMessage } from '../../protocol/events.js'
 import { fakeClock, FakeWebSocket, fakeFetch } from './fakes.js'
 
@@ -51,7 +51,7 @@ test('mount = sub → subscribed → one snapshot → cursor at the snapshot', a
   H.sock().receive({ type: 'subscribed', topic: 't1', stream: 'h:e1', seq: 5 })
   await H.clock.flush()
   assert.equal(H.fetch.calls.filter((c) => c.url.startsWith('/_atelier/topics/')).length, 1)
-  assert.deepEqual(H.events, [{ type: 'snapshot', topic: 't1', snapshot: { stream: 'h:e1', seq: 5, rev: 3, error: null } }])
+  assert.deepEqual(H.events, [{ type: 'snapshot', topic: 't1', snapshot: { stream: 'h:e1', seq: 5, rev: 3, error: null }, initial: true }])
   const st = H.bridge.state().topics.t1
   assert.equal(st.stream, 'h:e1'); assert.equal(st.seq, 5); assert.equal(st.snapshots, 1); assert.equal(st.pending, null)
   assert.deepEqual(H.states, [])                                   // 'online' is the initial state: no event
@@ -130,7 +130,7 @@ test('a non-contiguous seq is treated as a gap: one snapshot, then resume', asyn
   H.events.length = 0
   H.sock().receive({ type: 'invalidate', topic: 't1', stream: 'h:e1', seq: 8 })      // 6 and 7 never came
   await H.clock.flush()
-  assert.deepEqual(H.events, [{ type: 'snapshot', topic: 't1', snapshot: { stream: 'h:e1', seq: 9 } }])
+  assert.deepEqual(H.events, [{ type: 'snapshot', topic: 't1', snapshot: { stream: 'h:e1', seq: 9 }, initial: false }])   // a gap snapshot is a change, never `initial`
   assert.deepEqual(H.sock().ops('resume'), [{ op: 'resume', topic: 't1', stream: 'h:e1', seq: 9 }])
   assert.equal(H.bridge.state().topics.t1.gaps, 1)
 })
@@ -143,7 +143,7 @@ test('a stream change (host restart) → one snapshot, no resume needed', async 
   H.events.length = 0
   H.sock().receive({ type: 'invalidate', topic: 't1', stream: 'h:e2', seq: 1 })
   await H.clock.flush()
-  assert.deepEqual(H.events, [{ type: 'snapshot', topic: 't1', snapshot: { stream: 'h:e2', seq: 1 } }])
+  assert.deepEqual(H.events, [{ type: 'snapshot', topic: 't1', snapshot: { stream: 'h:e2', seq: 1 }, initial: false }])
   assert.deepEqual(H.sock().ops('resume'), [])
   assert.equal(H.bridge.state().topics.t1.stream, 'h:e2')
   H.sock().receive({ type: 'invalidate', topic: 't1', stream: 'h:e2', seq: 2 })
@@ -260,8 +260,37 @@ test('foreground with no socket → connect; while connecting → wait for onclo
   assert.equal(H.bridge.state().open, false)
   H.bridge.onForeground('visibilitychange')
   assert.equal(FakeWebSocket.instances.length, 2)                 // connected at once
-  H.bridge.onForeground('online')                                  // readyState 0 → nothing
+  H.bridge.onForeground('online')                                  // readyState 0 after a short hide → nothing
   assert.equal(FakeWebSocket.instances.length, 2)
+})
+
+test('a socket stuck CONNECTING is not trusted: killed after CONNECT_TIMEOUT_MS, and at once on a foreground after a long hide', async () => {
+  const H = harness()
+  H.bridge.start(); H.on('t1')
+  const first = H.sock(); assert.equal(first.readyState, 0)
+  await H.clock.advance(CONNECT_TIMEOUT_MS)                        // the handshake never completes
+  assert.equal(first.closedByClient, true); assert.equal(FakeWebSocket.instances.length, 2)   // killed + reconnected
+  await H.openNow()                                                // the second opens: its timer is cleared
+  H.h.hidden = true; H.bridge.onHidden()
+  await H.clock.advance(STALE_HIDE_MS)                             // no probe while hidden, no connect timer either
+  assert.equal(H.sock().closedByClient, false)
+  H.sock().serverClose(); await H.clock.advance(300)               // dies while hidden → the backoff reconnect is in flight
+  const third = H.sock(); assert.equal(third.readyState, 0); assert.equal(FakeWebSocket.instances.length, 3)
+  H.h.hidden = false; H.bridge.onForeground('visibilitychange')    // hidden > 30 s with a CONNECTING socket: killed at once, not trusted
+  assert.equal(third.closedByClient, true); assert.equal(FakeWebSocket.instances.length, 4)
+})
+
+test('`initial` marks only the snapshot that established the topic; a later handler on a live topic sees a gap snapshot as a change', async () => {
+  const H = harness({ snapshots: { t1: { stream: 'h:e1', seq: 5 } } })
+  H.bridge.start(); H.on('t1'); await H.openNow()
+  H.sock().receive({ type: 'subscribed', topic: 't1', stream: 'h:e1', seq: 5 }); await H.clock.flush()
+  assert.equal(H.events[0].initial, true)
+  const late = []
+  H.bridge.subscribe('t1', (ev) => late.push(ev))                 // a module (re)mounting on the topic the client already holds
+  assert.equal(H.sock().ops('sub').length, 1)                      // no second announce, no mount snapshot
+  H.snaps.t1 = { stream: 'h:e1', seq: 301 }
+  H.sock().receive({ type: 'gap', topic: 't1', stream: 'h:e1' }); await H.clock.flush()
+  assert.deepEqual(late, [{ type: 'snapshot', topic: 't1', snapshot: { stream: 'h:e1', seq: 301 }, initial: false }])
 })
 
 test('hiddenFor / reconnectOnForeground', () => {

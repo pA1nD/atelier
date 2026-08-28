@@ -328,9 +328,13 @@ function App() {
   }, [chromeQid]);
 
   // Loading is LAZY: the chrome plus the app being viewed, nothing else. `loadingRef` dedupes;
-  // `revRef` is the rev each qid was last imported at; `tokenRef` guards out-of-order re-imports.
+  // `revRef` is the rev each qid is being IMPORTED at (set when the import starts — the sheet swap
+  // and the ≤-known dedupe read it), `runningRef` the rev whose bundle is RENDERING (set when the
+  // import commits — error reports read it: an error thrown by the old bundle during a re-import
+  // window belongs to the old rev); `tokenRef` guards out-of-order re-imports.
   const loadingRef = useRef(new Set());
   const revRef = useRef(new Map());
+  const runningRef = useRef(new Map());
   const tokenRef = useRef(new Map());
   const importAt = (qid, rev) => {
     const token = (tokenRef.current.get(qid) || 0) + 1;
@@ -339,6 +343,7 @@ function App() {
     loadModuleBundle(qid, rev).then(async (res) => {
       if (tokenRef.current.get(qid) !== token) return;   // superseded by a newer rev
       if (res.status === 'error' && await probeWaking()) { setWaking(true); return; }
+      if (res.status === 'ok') runningRef.current.set(qid, rev);
       setLoaded((l) => ({ ...l, [qid]: res }));
     });
   };
@@ -362,7 +367,7 @@ function App() {
   const activeMod = (urlState.ws && urlState.id) ? modules.find((m) => m.workspace === urlState.ws && m.id === urlState.id) : null;
   const activeQid = activeMod?.qid || null;
   activeRef.qid = activeQid;
-  activeRef.rev = activeQid ? (revRef.current.get(activeQid) ?? activeMod?.rev ?? null) : null;
+  activeRef.rev = activeQid ? (runningRef.current.get(activeQid) ?? null) : null;   // never the importing rev; the reporter falls back to the row's rev before the first import commits
 
   useEffect(() => { if (activeMod?.hasFrontend) loadOne(activeMod.qid); }, [activeQid]);
 

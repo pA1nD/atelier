@@ -123,10 +123,10 @@ test('local: fetch routes through the proxy — identity minted, cookie/authoriz
   assert.equal((await r.go('/api/global/nope/x')).status, 404)
   assert.equal((await r.go('/modules/modules/x/y')).status, 404)
   assert.equal((await r.go('/api/global/todo/x', { method: 'PUT' })).status, 200)
-  // the chrome's assets: session-gated only, routed to the host that carries the chrome
+  // the chrome's assets: session-gated only, routed to the host that carries the chrome; the assertion names the staged row's instance (the host verifies `app` against it)
   const c = await r.go('/modules/global/catalyst-chrome/kit.js'); assert.equal(c.status, 200); assert.equal(c.text, 'export const kit = 1')
-  assert.equal(r.host.seen.at(-1).identity.app, 'chrome:global/catalyst-chrome')
-  // the chrome's API is an app lane (staged as an app, present)
+  assert.equal(r.host.seen.at(-1).identity.app, CHROME_APP)
+  // the chrome's backend: the same chrome lane (session-gated, no presence), signed with the same instance
   assert.equal((await r.go('/api/global/catalyst-chrome/docs')).json().app, CHROME_APP)
 })
 
@@ -241,6 +241,9 @@ test('fleet: unauth document → 302 to /go with the path only + the loop breake
   assert.equal(d.status, 302); assert.equal(d.headers.get('location'), 'https://portal.pa1nd.de/go/acme/todo/deep')
   assert.equal(d.headers.get('cache-control'), 'no-store'); assert.match(d.headers.get('set-cookie'), /^__Host-tried=1; Path=\/; Secure; HttpOnly/)
   const loop = await r.go('/acme/todo', { cookie: false, headers: { cookie: '__Host-tried=1' } }); assert.equal(loop.status, 403)
+  // a non-GET/HEAD on a document route: 401 without Location and without a ticket mint when unauthenticated, 405 with a session
+  const post = await r.go('/acme/todo', { method: 'POST', cookie: false }); assert.equal(post.status, 401); assert.equal(post.headers.get('location'), null); assert.equal(post.headers.get('set-cookie'), null)
+  assert.equal((await r.go('/acme/todo', { method: 'POST' })).status, 405)
   const f = await r.go('/api/acme/todo/x', { cookie: false }); assert.equal(f.status, 401); assert.equal(f.headers.get('location'), null); assert.equal(f.text, '{}')
   assert.equal((await r.go('/modules/acme/todo/frontend.js', { cookie: false })).status, 401)
   assert.equal((await r.go('/_atelier/whoami', { cookie: false })).status, 401)
@@ -269,8 +272,13 @@ test('fleet: presence 404 identical to a stranger; Origin 403 on cookie writes a
   const get = await r.go('/api/acme/todo/items', { headers: { origin: 'https://evil.example' } }); assert.equal(get.status, 200)
   const pre = await r.go('/api/acme/todo/items', { method: 'OPTIONS', headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' } })
   assert.equal(pre.status, 204); assert.equal(pre.headers.get('access-control-allow-origin'), null)
-  // the chrome is exempt from presence
+  // the chrome (assets and its backend) is exempt from presence and from the Host = path company check, served by the Host company's host under its row
   assert.equal((await r.go('/modules/global/catalyst-chrome/kit.js')).status, 200)
+  assert.equal(r.host.seen.at(-1).identity.app, CHROME_APP)
+  const docs = await r.go('/api/global/catalyst-chrome/docs'); assert.equal(docs.status, 200); assert.equal(docs.json().app, CHROME_APP)
+  // no row for the chrome on this Host company → 404 (the fleet's shell-served chrome is PLAN §10 item 6, not built)
+  r.registry.chrome = () => ({ qid: 'global/other-chrome', dir: null, digest: 1 })
+  assert.equal((await r.go('/modules/global/other-chrome/kit.js')).status, 404); assert.equal(r.traces.at(-1).lane, 'presence')
 })
 
 test('fleet: the ticket lane — Continue page without a user gesture, 302 + session on one, wrong aud 403 (not burnt), used 410, unknown 404, query 404', async (t) => {
@@ -290,6 +298,36 @@ test('fleet: the ticket lane — Continue page without a user gesture, 302 + ses
   const sid = /__Host-session=([^;]+)/.exec(sc)[1]
   const doc = await r.go('/acme/todo/x', { cookie: false, headers: { cookie: `__Host-session=${sid}` } })
   assert.equal(doc.status, 200); assert.match(doc.text, /"id":"p9"/)
+})
+
+test('fleet: the ticket lands only on a normalised app path of this company; the loop breaker refuses a second ticket for the same person + next from a client that stores no cookie', async (t) => {
+  const r = await rig(t, { mode: 'fleet' })
+  const nav = { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-user': '?1' }
+  let n = 0
+  const redeem = async (next, person = { id: 'p9', name: 'Nine' }, headers = {}) => {
+    const id = `tkt-${String(++n).padStart(16, '0')}`
+    r.stores.tickets.map.set(id, { aud: 'acme', person, next })
+    return r.go(`/_t/${id}`, { cookie: false, headers: { ...nav, ...headers } })
+  }
+  const land = async (next, person) => { const x = await redeem(next, person); assert.equal(x.status, 302, next); return x.headers.get('location') }
+  // one assertion per rejected shape — each lands on the company home
+  assert.equal(await land('//evil.example/x', { id: 'a1' }), '/acme/')
+  assert.equal(await land('https://evil.example/x', { id: 'a2' }), '/acme/')
+  assert.equal(await land('/beta/todo', { id: 'a3' }), '/acme/')                    // another company
+  assert.equal(await land('/api/acme/todo/items', { id: 'a4' }), '/acme/')          // an API path
+  assert.equal(await land('/_t/tkt-0123456789abcdef', { id: 'a5' }), '/acme/')      // a ticket path
+  assert.equal(await land('/acme/../beta/todo', { id: 'a6' }), '/acme/')            // dot segments out of the company
+  assert.equal(await land('/acme/_atelier/ws', { id: 'a7' }), '/acme/')             // a reserved head as the slug
+  assert.equal(await land('/acme//todo/../wiki/deep?tab=2', { id: 'a8' }), '/acme/wiki/deep?tab=2')   // normalised, query kept
+  assert.equal(await land(42, { id: 'a9' }), '/acme/')
+  // the loop: ticket 1 → 302 + cookie; the client drops every Set-Cookie and comes back through /go with ticket 2 → refused, not another 302
+  const first = await redeem('/acme/todo/x'); assert.equal(first.status, 302); assert.match(first.headers.get('set-cookie'), /__Host-session=/)
+  const second = await redeem('/acme/todo/x'); assert.equal(second.status, 403); assert.match(second.text, /did not stick/); assert.equal(second.headers.get('set-cookie'), null)
+  assert.equal(r.stores.tickets.map.get(`tkt-${String(n).padStart(16, '0')}`).used, true)   // single use holds: the refused ticket is burnt
+  // a re-tap WITH the session cookie is not a loop; a different next is not one either
+  const sid = /__Host-session=([^;]+)/.exec(first.headers.get('set-cookie'))[1]
+  assert.equal((await redeem('/acme/todo/x', undefined, { cookie: `__Host-session=${sid}` })).status, 302)
+  assert.equal((await redeem('/acme/wiki')).status, 302)
 })
 
 test('fleet: a stale heartbeat or a draining host is the waking page without a dial', async (t) => {
