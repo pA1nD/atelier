@@ -15,6 +15,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 export const O_DIRFD = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+export const O_FILEFD = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
 
 // setpriv/prlimit argv builders are pure and shared by every implementation (tests assert them).
 export function setprivArgv({ uid, gid, groups = [] }) {
@@ -65,8 +66,14 @@ function real({ privileged }) {
     // --- filesystem (paths may be `at(fd, rel)` forms) ---
     at: (fd, rel) => (process.platform === 'linux' ? path.posix.join(`/proc/self/fd/${fd}`, rel) : path.join(fdPaths.get(fd) ?? '', rel)),
     openDir: (p) => { const fd = fs.openSync(p, O_DIRFD); fdPaths.set(fd, fs.realpathSync(p)); return fd },
+    // openFile: O_RDONLY|O_NOFOLLOW on the final component — a planted symlink is ELOOP, never followed
+    openFile: (p) => { const fd = fs.openSync(p, O_FILEFD); fdPaths.set(fd, fs.realpathSync(p)); return fd },
     readlinkFd: (fd) => (process.platform === 'linux' ? fs.readlinkSync(`/proc/self/fd/${fd}`) : fdPaths.get(fd)),
     closeFd: (fd) => { fs.closeSync(fd); fdPaths.delete(fd) },
+    // the fd-based trio: ownership round trips act on the inode the fd pins, never on a path (jail.mjs)
+    fstat: (fd) => fs.fstatSync(fd),
+    fchown: (fd, uid, gid) => (privileged ? fs.fchownSync(fd, uid, gid) : skip),
+    fchmod: (fd, mode) => (privileged ? fs.fchmodSync(fd, mode) : skip),
     mkdir: (p, mode) => fs.mkdirSync(p, { mode }),
     chown: (p, uid, gid) => (privileged ? fs.chownSync(p, uid, gid) : skip),
     lchown: (p, uid, gid) => (privileged ? fs.lchownSync(p, uid, gid) : skip),
@@ -106,12 +113,19 @@ export function memory(state = {}) {
   const rec = (op, ...args) => { state.calls.push([op, ...args]); return state.answers?.[op]?.(...args) }
   let nextFd = 3
   const ent = (p) => state.fs[p]
+  const errno = (code) => Object.assign(new Error(code), { code })
   return {
     kind: 'memory', privileged: true, platform: 'linux',
     at: (fd, rel) => path.posix.join(state.fds.get(fd) ?? `/fd/${fd}`, rel),
-    openDir: (p) => { const fd = nextFd++; state.fds.set(fd, p); rec('openDir', p, fd); return fd },
+    // openDir/openFile: a `link` entry is ELOOP (O_NOFOLLOW); a missing entry is fine for openDir (the
+    // launcher's plan opens what it just created) and ENOENT for openFile
+    openDir: (p) => { const e = ent(p); if (e?.type === 'link') throw errno('ELOOP'); const fd = nextFd++; state.fds.set(fd, p); rec('openDir', p, fd); return fd },
+    openFile: (p) => { const e = ent(p); if (!e) throw errno('ENOENT'); if (e.type === 'link') throw errno('ELOOP'); const fd = nextFd++; state.fds.set(fd, p); rec('openFile', p, fd); return fd },
     readlinkFd: (fd) => state.fds.get(fd),
     closeFd: (fd) => { state.fds.delete(fd); rec('closeFd', fd) },
+    fstat: (fd) => { const e = ent(state.fds.get(fd)); if (!e) throw errno('EBADF'); return { uid: e.uid, gid: e.gid, mode: e.mode, isDirectory: () => e.type === 'dir', isFile: () => e.type === 'file', isSymbolicLink: () => e.type === 'link', nlink: e.nlink ?? 1 } },
+    fchown: (fd, uid, gid) => { const e = ent(state.fds.get(fd)); if (e) { e.uid = uid; e.gid = gid } rec('fchown', fd, uid, gid) },
+    fchmod: (fd, mode) => { const e = ent(state.fds.get(fd)); if (e) e.mode = mode; rec('fchmod', fd, mode) },
     mkdir: (p, mode) => { if (ent(p)) { const e = new Error('EEXIST'); e.code = 'EEXIST'; throw e } state.fs[p] = { uid: 0, gid: 0, mode, type: 'dir' }; rec('mkdir', p, mode) },
     chown: (p, uid, gid) => { const e = ent(p); if (e) { e.uid = uid; e.gid = gid } rec('chown', p, uid, gid) },
     lchown: (p, uid, gid) => { const e = ent(p); if (e) { e.uid = uid; e.gid = gid } rec('lchown', p, uid, gid) },
@@ -136,7 +150,10 @@ function fakeChild(spec, argv) {
   const { EventEmitter } = eventsMod
   const c = new EventEmitter()
   c.pid = ++fakePid; c.spec = spec; c.argv = argv; c.exitCode = null; c.signalCode = null
-  c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); c.stdio = [null, c.stdout, c.stderr, new EventEmitter()]
+  c.stdout = new EventEmitter(); c.stderr = new EventEmitter()
+  // stdin as a recording sink when the spec asked for a pipe (the worker's config lane, spawn.mjs)
+  c.stdin = spec.stdio?.[0] === 'pipe' ? Object.assign(new EventEmitter(), { written: [], ended: false, write(d) { this.written.push(String(d)); return true }, end(d) { if (d !== undefined) this.written.push(String(d)); this.ended = true } }) : null
+  c.stdio = [c.stdin, c.stdout, c.stderr, new EventEmitter()]
   c.kill = (signal = 'SIGTERM') => { if (c.onSignal) c.onSignal(signal); return true }
   c.exit = (code, signal = null) => { c.exitCode = code; c.signalCode = signal; c.emit('exit', code, signal) }
   return c

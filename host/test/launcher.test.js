@@ -33,11 +33,12 @@ test('bootPlan: the step list is byte-exact (DESIGN §2.1 steps 1–3b)', () => 
   const plan = bootPlan(CFG, { bootstrap: 'B', devToken: 'D' })
   assert.deepEqual(plan, [
     { op: 'umask', mode: 0 },
-    { op: 'mkdir', path: '/work/.atelier', mode: 0o755, owner: [0, 0] },
+    { op: 'mkdir', path: '/work/.atelier', mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: '/work/.atelier/data', mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: '/work/.atelier/last-good', mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: '/work/.atelier/scratch', mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: '/run/atelier', mode: 0o711, owner: [0, 0] },
+    { op: 'chmodIfRootOwned', path: '/run/atelier', mode: 0o711 },
     { op: 'mkdir', path: '/run/atelier/dev', mode: 0o710, owner: [0, 1000] },
     { op: 'chown', path: '/run/atelier/dev', uid: 0, gid: 1000 },
     { op: 'mkdir', path: '/run/atelier/session', mode: 0o700, owner: [1000, 1000], reclaim: true },
@@ -59,8 +60,10 @@ test('bootPlan: the step list is byte-exact (DESIGN §2.1 steps 1–3b)', () => 
     { op: 'chown', path: '/run/atelier/session', uid: 1000, gid: 1000 },
     { op: 'umask', mode: 0o077 },
   ])
-  // no chmod anywhere; every mkdir carries its final mode; the bootstrap write is absent without a secret
+  // no chmod after a chown anywhere: the one chmod op is the root-owned $run mount root, before every chown; every mkdir carries its final mode; the bootstrap write is absent without a secret
   assert.equal(plan.some((s) => s.op === 'chmod'), false)
+  assert.equal(plan.findIndex((s) => s.op === 'chmodIfRootOwned'), plan.findIndex((s) => s.op === 'mkdir' && s.path === '/run/atelier') + 1)
+  assert.ok(plan.findIndex((s) => s.op === 'chmodIfRootOwned') < plan.findIndex((s) => s.op === 'chown'))
   assert.ok(plan.filter((s) => s.op === 'mkdir').every((s) => typeof s.mode === 'number'))
   assert.equal(bootPlan(CFG, { devToken: 'D' }).some((s) => s.path === '/run/atelier/bootstrap.token' && s.op === 'write'), false)
 })
@@ -101,10 +104,10 @@ test('runPlan on a fresh volume: order, chown-iff-0:0, populate-then-chown, mode
   assert.deepEqual(state.fs['/run/atelier/dev'], { uid: 0, gid: 1000, mode: 0o710, type: 'dir' })
   assert.deepEqual(state.fs['/run/atelier'], { uid: 0, gid: 0, mode: 0o711, type: 'dir' })
   for (const p of ['/work/.atelier/data', '/work/.atelier/last-good', '/work/.atelier/scratch']) assert.deepEqual(state.fs[p], { uid: 0, gid: 0, mode: 0o711, type: 'dir' })
-  assert.deepEqual(state.fs['/work/.atelier'], { uid: 0, gid: 0, mode: 0o755, type: 'dir' })
+  assert.deepEqual(state.fs['/work/.atelier'], { uid: 0, gid: 0, mode: 0o711, type: 'dir' })
   // the previous life's sentinel is unlinked before anything is spawned
   assert.ok(ops.includes('unlink'))
-  assert.match(logs[1], /^mkdir \/work\/.atelier 0755: ok$/)
+  assert.match(logs[1], /^mkdir \/work\/.atelier 0711: ok$/)
   assert.match(logs.find((l) => l.startsWith('chownIf /work ')), /0:0 → 1000:1000/)
 })
 
@@ -112,7 +115,7 @@ test('runPlan on a migrated volume: /work 1000:1000 untouched, existing markers 
   const state = { fs: {
     '/work': { uid: 1000, gid: 1000, mode: 0o2775, type: 'dir' },
     '/work/apps': { uid: 1000, gid: 1000, mode: 0o755, type: 'dir' },
-    '/work/.atelier': { uid: 0, gid: 0, mode: 0o755, type: 'dir' },
+    '/work/.atelier': { uid: 0, gid: 0, mode: 0o711, type: 'dir' },
     '/work/.atelier/data': { uid: 1000, gid: 1000, mode: 0o711, type: 'dir' },   // wrong owner: logged, left
     '/run/atelier': { uid: 0, gid: 0, mode: 0o711, type: 'dir' },
     '/run/atelier/session': { uid: 1000, gid: 1000, mode: 0o700, type: 'dir' },  // the previous container life
@@ -136,6 +139,23 @@ test('runPlan on a migrated volume: /work 1000:1000 untouched, existing markers 
   assert.deepEqual(state.fs['/run/atelier/session/dev.token'], { uid: 1000, gid: 1000, mode: 0o400, type: 'file', data: 'NEW' })
   assert.deepEqual([state.fs['/run/atelier/session'].uid, state.fs['/run/atelier/session'].gid], [1000, 1000])
   assert.equal(state.fs['/run/atelier/host-ready'], undefined, 'stale sentinel unlinked')
+})
+
+test('runPlan: the $run tmpfs mount root arrives 0:0 1777 → chmodded 0711 before any token or spawn; a non-root $run is left and logged', () => {
+  const state = { fs: { '/work': { uid: 0, gid: 0, mode: 0o755, type: 'dir' }, '/run/atelier': { uid: 0, gid: 0, mode: 0o1777, type: 'dir' } } }
+  const os = memory(state), io = fakeIo(state), logs = []
+  const r = runPlan(bootPlan(CFG, { devToken: 'D' }), { os, io, log: (l) => logs.push(l) })
+  assert.equal(r.failed, undefined)
+  assert.deepEqual(state.calls.filter((c) => c[0] === 'chmod'), [['chmod', '/run/atelier', 0o711]])
+  assert.equal(state.fs['/run/atelier'].mode, 0o711)
+  const at = (op, p) => state.calls.findIndex((c) => c[0] === op && c[1] === p)
+  assert.ok(at('chmod', '/run/atelier') < at('write', '/run/atelier/dev.token') && at('chmod', '/run/atelier') < state.calls.findIndex((c) => c[0] === 'chown'))
+  assert.match(logs.find((l) => l.startsWith('chmodIfRootOwned /run/atelier')), /1777 → 0711/)
+  const state2 = { fs: { '/work': { uid: 0, gid: 0, mode: 0o755, type: 'dir' }, '/run/atelier': { uid: 1000, gid: 1000, mode: 0o1777, type: 'dir' } } }
+  const logs2 = []
+  runPlan(bootPlan(CFG, { devToken: 'D' }), { os: memory(state2), io: fakeIo(state2), log: (l) => logs2.push(l) })
+  assert.equal(state2.calls.some((c) => c[0] === 'chmod'), false)
+  assert.match(logs2.find((l) => l.startsWith('chmodIfRootOwned /run/atelier')), /1000:1000 1777 — not root-owned, left/)
 })
 
 test('runPlan: a failing step stops the plan and is reported; the launcher exits 2 before any spawn', () => {

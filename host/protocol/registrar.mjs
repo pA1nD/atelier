@@ -19,7 +19,10 @@
 //   - a refusal (4xx from the registry, or a bad slug) lands as `CLAIM-REFUSED.txt` in the app
 //     folder, written AS UID 1000 (never root into an agent-owned dir, §4.3 symlink rule), `wx`.
 //   - the host's markers (`<inst>/slug`, `uid`, `registered.json`) are dirfd-relative writes into
-//     root-owned `/work/.atelier/<inst>/`; never into the app folder.
+//     root-owned `/work/.atelier/<inst>/` (0711), each 0600 — nothing outside the host reads them, and
+//     a worker must not enumerate its peers' instance ids / slugs; never into the app folder.
+//   - `lane` = the two push lanes (events, appError) routed through `call()`: a `401 host-epoch-moved`
+//     on either re-registers and retries once, the same as every registry write.
 //   - reconcile: rows with no folder are unlinked only after `/work/apps` was readable for a
 //     5 s settle, at most 5 per pass (more → one loud log line, the rest next pass).
 import fs from 'node:fs'
@@ -140,8 +143,8 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     try { os.mkdir(dir, 0o711) } catch (e) { if (e.code !== 'EEXIST') throw e }
     os.chmod(dir, 0o711)   // the host runs under umask 077: the mode is set explicitly (root-owned, before any chown)
     const put = (name, text, mode) => { const p = os.at(dirfd, `${instance}/${name}`); fsx.writeFile(p, text, mode); os.chmod(p, mode) }
-    put('slug', slug + '\n', 0o644)
-    put('uid', uid + '\n', 0o644)
+    put('slug', slug + '\n', 0o600)
+    put('uid', uid + '\n', 0o600)
     put('registered.json', JSON.stringify({ instance, slug, uid, company: st.company }) + '\n', 0o600)
   }
   function refuse(dir, code, error) {
@@ -222,6 +225,7 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     register, claim, unlink, modulesChanged, heartbeat, beat, served, reconcile, visibleApps,
     draining: () => call('draining'),
     appConfig: (instance) => call('appConfig', instance),
+    lane: { events: (batch) => call('events', batch), appError: (body) => call('appError', body) },
     publicKey: () => st.pubKey,
     apps: () => apps,
     lowestFreeUid,

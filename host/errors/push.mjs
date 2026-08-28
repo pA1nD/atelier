@@ -5,8 +5,9 @@
 //   `kind` is build|backend|frontend|http|worker; the spine's parseAppError is protocol/'s
 //   validateAppError, so the same validator runs here FIRST: a refused event is a host bug
 //   (logged `push: schema <reason>`, dropped), never a 400 at the spine.
-// The transport (protocol/registrar.mjs, fleet only) owns the URL, the bearer token, the epoch
-// and the re-registration on `401 host-epoch-moved`; push owns the queue and the retry ladder:
+// The lane (`registrar.lane.appError`, fleet only) owns the URL, the bearer token, the epoch and
+// the re-registration on `401 host-epoch-moved` (registrar `call()`: re-register, retry once);
+// push owns the queue and the retry ladder:
 //   - one request in flight; the queue holds ≤ QUEUE_MAX events, the OLDEST is dropped past it
 //     (a full queue means the spine was unreachable for a while — the freshest state matters
 //     when it returns; what was dropped is counted and logged once per DROP_LOG_EVERY);

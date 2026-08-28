@@ -26,12 +26,13 @@ import { createServe } from './serve.mjs'
 export const DEFAULT_TIMING = Object.freeze({
   quiesceMs: 100, idleMs: 60_000, keepMs: 600_000, swapStopMs: 500, drainMs: 2000, readyTimeoutMs: 8000,
   backoffMs: [500, 1000, 2000, 4000, 8000, 16000, 30000],
+  stableMs: 60_000,          // a resumed worker alive this long resets the crash ladder (a LIVE build resets it at once)
   rlimits: { data: 1024 * 1024 * 1024, core: 0, nproc: 64, nofile: 1024 },
 })
 
 /** @typedef {{instance, slug, company, uid, rev:number|null, state:'live'|'stopped'|'loading'|'failed'|'unclaimed', pid?:number, sock?:string, dataDir, dir}} AppRow */
 
-export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report = () => {}, registrar, onSwap = () => {}, spawn, proxy, fs = nodeFs, timing = {}, jail = null, install = null, onBroadcast = () => {}, hostVersion = '2.0.0' }) {
+export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report = () => {}, registrar, onSwap = () => {}, spawn, proxy, fs = nodeFs, timing = {}, jail = null, install = null, onBroadcast = () => {}, hostVersion = '2.0.0', treeOk = () => true }) {
   const T = { ...DEFAULT_TIMING, ...timing }
   const emit = typeof log === 'function' ? log : (line) => log.write(line)
   const store = createStore({ os, dirfd, fs, log: emit, hostVersion })
@@ -68,7 +69,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       dataDir: realPath(os.at(dirfd, `data/${instance}`)), tmpDir: realPath(os.at(dirfd, `tmp/${instance}`)),
       sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
       state: 'unclaimed', claimed: false, rev: null, live: null, retiring: new Set(), kept: [], counter: 0, fingerprint: null,
-      building: null, pending: false, broken: null, watcher: null,
+      building: null, pending: false, broken: null, watcher: null, installing: null, git: Promise.resolve(),
       resources: null, suspendable: false, lastServedAt: 0, inflight: 0, idleTimer: null, restarts: 0, resuming: null,
       armIdle: () => armIdle(row),
     }
@@ -90,14 +91,22 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       baseUrl: `${origin()}/api/${row.company}/${row.slug}`, origin: origin(), configEnv, rlimits: T.rlimits,
     }
   }
+  // prepareDirs: a failed mkdir/chown/chmod of data/<inst>, tmp/<inst> or w/<inst> (ENOSPC, a wrong-owner
+  // EEXIST, a failed chown) is a host-side `worker` failure, never a spawn into a half-made jail.
   function prepareDirs(row, spec) {
-    if (jail) { jail.applyJail(os, jail.jailPlan(spec)); return }
+    if (jail) {
+      const r = jail.applyJail(os, jail.jailPlan(spec), (l) => emit(`[${row.slug}] ${l}`))
+      if (!r.ok) { const f = r.results.at(-1); throw { error: 'jail', msg: `${f.step.op} ${f.step.path ?? ''}: ${f.code}` } }
+      return
+    }
     for (const d of [row.dataDir, row.tmpDir, row.sockDir]) { try { fs.mkdirSync(d, { recursive: true, mode: 0o700 }) } catch {} }
     try { fs.rmSync(spec.sock, { force: true }) } catch {}
   }
 
   // startWorker(row, rev, codeDir) → {pid, sock, handle, rev, resources, suspendable} ; throws {error, msg, failed?}
+  //   error: 'no-ready' | 'spawn-eagain' | 'load-failed' | 'jail' | 'host-fault' (the .atelier tree moved: no real path may leave the host)
   async function startWorker(row, rev, codeDir) {
+    if (!treeOk()) throw { error: 'host-fault', msg: '/work/.atelier renamed or removed' }
     const spec = await workerSpec(row, rev, codeDir)
     prepareDirs(row, spec)
     const st = { ready: null, failed: null, suspendable: false }
@@ -130,8 +139,20 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
   // --- build = one revision (§6.1) -------------------------------------------------------------
   async function build(row) {
+    if (!treeOk()) { emit(`[${row.slug}] build refused: /work/.atelier renamed or removed (host fault)`); return null }
     const t0 = os.now()
-    const rev = store.nextRev(row.instance)
+    // the snapshot store: a failed write (ENOSPC, EIO, EACCES) is a build failure the agent hears about,
+    // with last-good serving; the half-written rev-N.tmp is removed
+    const snapshotFailed = (e, rev) => {
+      const code = e?.code ?? e?.message ?? String(e)
+      report('build', row.instance, rev ?? row.counter ?? 0, { message: `snapshot write failed: ${code}`, hint: `the computer cannot write the snapshot (${code}) — free space on the volume (or ask the operator to grow it) and re-save`, file: 'backend.js', line: 1, col: 1 })
+      emit(`[${row.slug}] rev ${rev ?? '?'} FAILED (users ${usersLine(row)}) snapshot write failed: ${code}`)
+      if (rev != null) { try { store.remove(row.instance, rev) } catch {} }
+      if (!row.live) row.state = row.rev != null ? 'stopped' : 'failed'
+      return null
+    }
+    let rev
+    try { rev = store.nextRev(row.instance) } catch (e) { return snapshotFailed(e, null) }
     row.counter = rev
     row.state = row.live ? 'live' : 'loading'
     const fail = (problems, kind = 'build') => {
@@ -157,7 +178,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         buildSheet({ chromeDir: cfg.chromeDir, appDir: row.dir, fs }),
       ]))
     } catch (e) { if (e?.problems) return fail(e.problems); throw e }
-    const written = store.write(row.instance, rev, row.uid, { backend: backend?.code ?? null, map: backend?.map ?? null, frontend: frontend.files, css: sheet.css })
+    let written
+    try { written = store.write(row.instance, rev, row.uid, { backend: backend?.code ?? null, map: backend?.map ?? null, frontend: frontend.files, css: sheet.css }) } catch (e) { return snapshotFailed(e, rev) }
     let next = { live: { rev, sock: null, pid: null, handle: null }, resources: {}, suspendable: false }
     if (backend) {
       const map = backend.map ? sourceMapLookup(JSON.parse(backend.map)) : null
@@ -173,9 +195,10 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
             continue
           }
           store.remove(row.instance, rev)
-          if (e.error === 'spawn-eagain') {
-            report('worker', row.instance, rev, { message: `spawn failed: ${e.msg}`, hint: 'the host could not spawn the worker (process cap or memory) — not an app bug' })
-            emit(`[${row.slug}] rev ${rev} FAILED (users ${usersLine(row)}) spawn: ${e.msg}`)
+          const hostSide = { 'spawn-eagain': 'the host could not spawn the worker (process cap or memory) — not an app bug', jail: 'the host could not prepare the worker\'s directories (disk full or a wrong owner under /work/.atelier) — not an app bug; free space or tell the operator', 'host-fault': 'the computer\'s /work/.atelier was renamed or removed — the operator restores it; nothing is served until then' }[e.error]
+          if (hostSide) {
+            report('worker', row.instance, rev, { message: `${e.error === 'spawn-eagain' ? 'spawn failed' : e.error}: ${e.msg}`, hint: hostSide })
+            emit(`[${row.slug}] rev ${rev} FAILED (users ${usersLine(row)}) ${e.error}: ${e.msg}`)
             if (!row.live) row.state = row.rev != null ? 'stopped' : 'failed'
             return null
           }
@@ -203,7 +226,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     onSwap(row.instance, rev)
     emit(`[${row.slug}] rev ${rev} LIVE in ${Math.round(ms)} ms`)
     armIdle(row)
-    if (cfg.gitCommit !== false) commitGit({ os, appDir: row.dir, rev, log: emit }).catch(() => {})
+    // row G, one commit per LIVE rev, serialized per app (two quick saves never race on .git/index.lock)
+    if (cfg.gitCommit !== false) row.git = row.git.then(() => commitGit({ os, appDir: row.dir, rev, log: emit })).catch(() => {})
   }
   function prune(row) {
     const now = os.now()
@@ -248,7 +272,10 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       try {
         const next = await startWorker(row, cur.rev, cur.dir)
         if (row.live) { await stopLive(row, next.live, 'superseded'); return row.live }
-        row.live = next.live; row.rev = cur.rev; row.state = 'live'; row.resources = next.resources; row.suspendable = next.suspendable; row.restarts = 0
+        row.live = next.live; row.rev = cur.rev; row.state = 'live'; row.resources = next.resources; row.suspendable = next.suspendable
+        // the crash ladder resets only once the resumed worker has stayed up for stableMs — a worker that
+        // dies right after READY climbs it (0.5 → 30 s), never relaunches every 500 ms
+        later(T.stableMs, () => { if (row.live === next.live) row.restarts = 0 })
         emit(`[${row.slug}] rev ${cur.rev} RESUMED ${Math.round(os.now() - t0)} ms`)
         armIdle(row)
         return row.live
@@ -262,6 +289,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     return row.resuming
   }
   function crashed(row, live, code, signal) {
+    if (row.installing) { row.live = null; row.state = 'stopped'; emit(`[${row.slug}] rev ${live.rev} stopped by the install's freeze`); return }   // freeze.py SIGKILLs the worker uid
     row.live = null; row.state = 'failed'
     const why = signal ? `signal ${signal}` : `exit ${code}`
     report('worker', row.instance, live.rev, { message: `worker died: ${why}` })
@@ -302,21 +330,30 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     })
     withGroupSync(row.uid, () => row.watcher.start())
   }
+  // installThenRebuild: `row.installing` holds requests that would resume a worker while the install
+  // runs (serve.mjs) — the freeze SIGKILLs every process of the worker uid, so a resume into that window
+  // would die as a spurious `worker died` report; the live worker (if any) keeps serving until beforeFreeze.
   async function installThenRebuild(row) {
-    if (install) {
-      const r = await install({ os, dirfd, spec: await workerSpec(row, row.counter, null), log: emit }).catch((e) => ({ ok: false, class: 'install', message: e.message }))
-      if (!r?.ok) { report('build', row.instance, row.counter, { message: `install failed: ${r?.message ?? '?'}`, hint: `package.json:1:1 ${r?.class ?? 'install'}: ${r?.message ?? '?'} — fix package.json and re-save`, file: 'package.json', line: 1, col: 1 }); emit(`[${row.slug}] install FAILED ${r?.message ?? ''}`); return }
-      emit(`[${row.slug}] install ok ${r.ms ?? ''} ms`)
-    }
-    rebuild(row)
+    if (row.installing) return row.installing
+    row.installing = (async () => {
+      if (install) {
+        const r = await install({ os, dirfd, spec: await workerSpec(row, row.counter, null), log: emit }).catch((e) => ({ ok: false, class: 'install', message: e.message }))
+        if (!r?.ok) { report('build', row.instance, row.counter, { message: `install failed: ${r?.message ?? '?'}`, hint: `package.json:1:1 ${r?.class ?? 'install'}: ${r?.message ?? '?'} — fix package.json and re-save`, file: 'package.json', line: 1, col: 1 }); emit(`[${row.slug}] install FAILED ${r?.message ?? ''}`); return }
+        emit(`[${row.slug}] install ok ${r.ms ?? ''} ms`)
+      }
+      rebuild(row)
+    })().finally(() => { row.installing = null })
+    return row.installing
   }
-  async function gone(row) {
+  // gone(row, {unlink}): the folder is not there — the row leaves resolve()/handle() (snapshot kept);
+  // `unlink:false` when the registrar's reconcile already tombstoned it.
+  async function gone(row, { unlink = true } = {}) {
     if (row.watcher) { row.watcher.stop(); row.watcher = null }
     const live = row.live
-    row.live = null; row.state = 'unclaimed'
+    row.live = null; row.state = 'unclaimed'; row.claimed = false
     if (live) await stopLive(row, live, 'folder-gone')
     emit(`[${row.slug}] folder removed — unlinked (snapshot kept ${row.rev != null ? `at rev ${row.rev}` : ''})`)
-    try { await registrar?.unlink?.(row.instance) } catch (e) { emit(`[${row.slug}] unlink: ${e.message}`) }
+    if (unlink) { try { await registrar?.unlink?.(row.instance) } catch (e) { emit(`[${row.slug}] unlink: ${e.message}`) } }
   }
 
   // --- the public surface (§4.1) --------------------------------------------------------------
@@ -335,12 +372,20 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         const row = mkRow({ instance: inst, slug, uid: Number.isFinite(uid) ? uid : 0, company: registered?.company ?? company(), dir: path.join(appsDir, slug) })
         row.rev = cur.rev; row.state = 'stopped'; row.counter = revision?.rev ?? cur.rev; row.fingerprint = revision?.fingerprint ?? null
         row.meta = null
+        const swept = store.sweepTmp(inst)
+        if (swept.length) emit(`boot: ${slug} swept ${swept.join(', ')} (a previous host life died mid-write)`)
         prune(row)
       }
     },
 
+    // scan() → the discovery result (index.mjs watches the `no-module-json` folders it names)
     async scan() {
       const d = withAllGroupsSync(() => discover(appsDir, fs))
+      if (d.unreadable) {
+        emit(`scan: ${appsDir} unreadable — nothing claimed, nothing tombstoned`)
+        try { await registrar?.reconcile?.(null) } catch (e) { emit(`reconcile: ${e.message}`) }
+        return d
+      }
       for (const p of d.problems) {
         const row = rowBySlug(p.slug)
         if (row) rebuild(row)
@@ -360,7 +405,14 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         const fp = withGroupSync(row.uid, () => fingerprint(row.dir, fs).hash)
         if (row.rev == null || fp !== row.fingerprint) rebuild(row)
       }
-      try { await registrar?.reconcile?.(sup.apps()) } catch (e) { emit(`reconcile: ${e.message}`) }
+      // boot reconcile (PLAN §4.3): the registrar tombstones rows with no folder on disk — the DISCOVERED
+      // folders are its input (a boot row restored from last-good is not a folder); every row it
+      // unlinked leaves the table (snapshot kept, served no more)
+      try {
+        const r = await registrar?.reconcile?.(d.apps)
+        for (const inst of r?.unlinked ?? []) { const row = rows.get(inst); if (row && row.state !== 'unclaimed') await gone(row, { unlink: false }) }
+      } catch (e) { emit(`reconcile: ${e.message}`) }
+      return d
     },
 
     apps: () => [...rows.values()].map(appRow),

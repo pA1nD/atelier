@@ -30,6 +30,7 @@ test('write → commit: rev dir renamed into place, files in place, checksum, re
   const r1 = s.store.nextRev(INST)
   assert.equal(r1, 1)
   assert.equal(s.store.revision(INST).rev, 1, 'the counter is persisted before anything is built')
+  assert.equal((fs.statSync(path.join(s.dot, INST, 'revision.json')).mode & 0o777), 0o600, 'markers are the host\'s alone')
   const fe = new Map([['frontend.js', 'export default 1'], ['views/deep.js', 'export const d = 1']])
   const w1 = s.store.write(INST, 1, 20001, { backend: 'export default {}', map: '{"version":3}', frontend: fe, css: '.a{}' })
   assert.equal(w1.dir, path.join(s.dot, 'last-good', INST, 'rev-1'))
@@ -61,6 +62,9 @@ test('write → commit: rev dir renamed into place, files in place, checksum, re
   assert.equal(s.store.read(INST, 9, 'styles.css'), null)
   s.store.remove(INST, 1)
   assert.deepEqual(s.store.list(INST), [3])
+  fs.mkdirSync(path.join(s.dot, 'last-good', INST, 'rev-9.tmp-4242')); fs.mkdirSync(path.join(s.dot, 'last-good', INST, 'rev-x'))
+  assert.deepEqual(s.store.sweepTmp(INST), ['rev-9.tmp-4242'])
+  assert.deepEqual(fs.readdirSync(path.join(s.dot, 'last-good', INST)).sort(), ['rev-3', 'rev-x'])
   assert.deepEqual(s.store.instances(), [INST])
   s.store.writeMarker(INST, 'slug', 'alpha')
   assert.equal(s.store.readMarker(INST, 'slug'), 'alpha')
@@ -68,7 +72,7 @@ test('write → commit: rev dir renamed into place, files in place, checksum, re
   s.done()
 })
 
-test('ownership: every rev inode is chmod-then-chown 0:<uid> through the adapter (0750 dirs, 0640 files); markers 0711/0644', () => {
+test('ownership: every rev inode is chmod-then-chown 0:<uid> through the adapter (0750 dirs, 0640 files); markers 0711/0600', () => {
   const s = setup()
   s.store.ensure(INST, 20001)
   assert.deepEqual(s.calls, [['chmod', INST, 0o711], ['chmod', `last-good/${INST}`, 0o750], ['chown', `last-good/${INST}`, 0, 20001]])
@@ -84,7 +88,7 @@ test('ownership: every rev inode is chmod-then-chown 0:<uid> through the adapter
   assert.ok(!s.calls.some((c) => c[1].endsWith('rev-1') && !c[1].includes('tmp')), 'ownership is set on the tmp tree, the rename carries it')
   s.calls.length = 0
   s.store.writeMarker(INST, 'slug', 'alpha')
-  assert.deepEqual(s.calls, [['chmod', `${INST}/slug`, 0o644]])
+  assert.deepEqual(s.calls, [['chmod', `${INST}/slug`, 0o600]])
   s.done()
 })
 
@@ -114,15 +118,21 @@ test('commitGit: row G spec (uid 1000, cleared groups, exact env, umask 022) and
   assert.deepEqual(spawned[0].argv.slice(0, 9), ['sh', '-c', 'umask 22; exec "$@"', 'sh', 'setpriv', '--reuid=1000', '--regid=1000', '--clear-groups', '--'])
   spawned[0].exit(0)
   await new Promise((r) => setImmediate(r))
+  // .git/info/exclude as uid 1000 after init, before add: node_modules/, data/, .atelier, CLAIM-REFUSED.txt never enter a commit
+  assert.deepEqual(spawned[1].spec.argv, ['sh', '-c', 'mkdir -p -- "$1/.git/info" && printf %s "$2" > "$1/.git/info/exclude"', 'sh', '/work/apps/alpha', 'node_modules/\ndata/\n.atelier\nCLAIM-REFUSED.txt\n'])
+  assert.equal(spawned[1].spec.uid, 1000); assert.deepEqual(spawned[1].spec.groups, [])
   spawned[1].exit(0)
   await new Promise((r) => setImmediate(r))
-  assert.deepEqual(spawned[2].spec.argv, ['git', '-C', '/work/apps/alpha', 'commit', '-qm', 'rev 4'])
-  spawned[2].stdout.emit('data', 'nothing to commit, working tree clean'); spawned[2].exit(1)
+  assert.deepEqual(spawned[2].spec.argv, ['git', '-C', '/work/apps/alpha', 'add', '-A', '.'])
+  spawned[2].exit(0)
+  await new Promise((r) => setImmediate(r))
+  assert.deepEqual(spawned[3].spec.argv, ['git', '-C', '/work/apps/alpha', 'commit', '-qm', 'rev 4'])
+  spawned[3].stdout.emit('data', 'nothing to commit, working tree clean'); spawned[3].exit(1)
   assert.deepEqual(await p, { ok: true, noop: true })
   const lines = []
   const p2 = commitGit({ os: mem, appDir: '/work/apps/alpha', rev: 5, log: (l) => lines.push(l) })
   await new Promise((r) => setImmediate(r))
-  state.spawned[3].stderr.emit('data', 'fatal: not a git repository'); state.spawned[3].exit(128)
+  state.spawned[4].stderr.emit('data', 'fatal: not a git repository'); state.spawned[4].exit(128)
   assert.deepEqual(await p2, { ok: false, step: 'init', code: 128 })
   assert.match(lines[0], /^git init in \/work\/apps\/alpha: rc=128 fatal/)
   assert.equal(gitSpec({ appDir: '/a', args: ['x'] }).groups.length, 0)

@@ -69,37 +69,72 @@ test('applyJail: runs through the adapter in order, tolerates EEXIST, stops on t
   assert.equal(out.at(-1), `[priv] chown ${spec.tmpDir}: EPERM`)
 })
 
-test('afterReady: the socket becomes 0:0 0700 (chown first, chmod while root owns it)', () => {
-  const state = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o755, type: 'socket' } } }
+test('afterReady: the socket becomes 0:0 0700 (chown first, chmod while root owns it); the socket dir drops the worker write bit (0710)', () => {
+  const state = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o755, type: 'socket' }, [spec.sockDir]: { uid: 0, gid: 20001, mode: 0o730, type: 'dir' } } }
   const os = memory(state)
   assert.equal(afterReady(os, spec).ok, true)
-  assert.deepEqual(state.calls, [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700]])
+  assert.deepEqual(state.calls, [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700], ['chmod', spec.sockDir, 0o710]])
   assert.deepEqual(state.fs[spec.sock], { uid: 0, gid: 0, mode: 0o700, type: 'socket' })
+  assert.equal(state.fs[spec.sockDir].mode, 0o710)
+  // jailPlan re-opens it for the next spawn
+  applyJail(os, jailPlan(spec))
+  assert.equal(state.fs[spec.sockDir].mode, 0o730)
 })
 
-test('claimRoundTrip §6.2(a): chown 0:<uid> → setgroups([uid]) → chmod 2750 → chown 1000:<uid> → groups restored', () => {
+test('claimRoundTrip §6.2(a) on an fd: setgroups([uid]) → openDir O_NOFOLLOW → fstat guard → fchown 0:<uid> → fchmod 2750 → fchown 1000:<uid> → close → groups restored', () => {
   const state = { groups: [7], fs: { '/work/apps/demo': { uid: 1000, gid: 1000, mode: 0o755, type: 'dir' } } }
   const os = memory(state)
   const r = claimRoundTrip(os, '/work/apps/demo', 20001)
   assert.equal(r.ok, true)
   assert.deepEqual(state.calls, [
-    ['chown', '/work/apps/demo', 0, 20001],
     ['setgroups', [20001]],
-    ['chmod', '/work/apps/demo', 0o2750],
-    ['chown', '/work/apps/demo', 1000, 20001],
+    ['openDir', '/work/apps/demo', 3],
+    ['fchown', 3, 0, 20001],
+    ['fchmod', 3, 0o2750],
+    ['fchown', 3, 1000, 20001],
+    ['closeFd', 3],
     ['setgroups', [7]],
   ])
   assert.deepEqual(state.fs['/work/apps/demo'], { uid: 1000, gid: 20001, mode: 0o2750, type: 'dir' })
   assert.deepEqual(os.getgroups(), [7])
+  // a re-claim of an already-claimed folder (1000:<uid>) passes the guard the same way
+  assert.equal(claimRoundTrip(memory({ fs: { '/work/apps/demo': { uid: 1000, gid: 20001, mode: 0o2750, type: 'dir' } } }), '/work/apps/demo', 20001).ok, true)
 })
 
-test('dataFileRoundTrip §6.2(b): an agent-created 0644 -wal becomes <uid>:19999 0660 via root', () => {
+test('claimRoundTrip refuses what is not the agent\'s directory: a planted symlink (ELOOP), a root-owned inode swapped in (EOWNER), a file (ENOTDIR) — nothing is chowned, groups restored', () => {
+  for (const [entry, code] of [
+    [{ uid: 1000, gid: 1000, mode: 0o777, type: 'link' }, 'ELOOP'],
+    [{ uid: 0, gid: 0, mode: 0o400, type: 'dir' }, 'EOWNER'],
+    [{ uid: 1000, gid: 1000, mode: 0o644, type: 'file' }, 'ENOTDIR'],
+    [{ uid: 1000, gid: 20009, mode: 0o2750, type: 'dir' }, 'EOWNER'],     // another app's gid
+  ]) {
+    const state = { groups: [], fs: { '/work/apps/demo': { ...entry } } }
+    const os = memory(state)
+    const lines = []
+    const r = claimRoundTrip(os, '/work/apps/demo', 20001, (l) => lines.push(l))
+    assert.equal(r.ok, false, code)
+    assert.equal(r.results.at(-1).code, code)
+    assert.equal(state.calls.some((c) => c[0] === 'fchown' || c[0] === 'fchmod' || c[0] === 'chown' || c[0] === 'chmod'), false, `${code}: no ownership call`)
+    assert.deepEqual(state.fs['/work/apps/demo'], entry, `${code}: untouched`)
+    assert.deepEqual(os.getgroups(), [], `${code}: groups restored`)
+    assert.match(lines.at(-1), new RegExp(`/work/apps/demo: ${code}$`))
+  }
+})
+
+test('dataFileRoundTrip §6.2(b) on an fd: an agent-created 0644 -wal becomes <uid>:19999 0660; a symlink, a hard link or a foreign owner is refused', () => {
   const state = { fs: { '/d/app.db-wal': { uid: 1000, gid: 19999, mode: 0o644, type: 'file' } } }
   const os = memory(state)
   assert.equal(dataFileRoundTrip(os, '/d/app.db-wal', 20001).ok, true)
   assert.deepEqual(state.calls, [
-    ['chown', '/d/app.db-wal', 0, 19999],
-    ['chmod', '/d/app.db-wal', 0o660],
-    ['chown', '/d/app.db-wal', 20001, 19999],
+    ['openFile', '/d/app.db-wal', 3],
+    ['fchown', 3, 0, 19999],
+    ['fchmod', 3, 0o660],
+    ['fchown', 3, 20001, 19999],
+    ['closeFd', 3],
   ])
+  assert.deepEqual(state.fs['/d/app.db-wal'], { uid: 20001, gid: 19999, mode: 0o660, type: 'file' })
+  assert.equal(dataFileRoundTrip(memory({ fs: { '/d/x': { uid: 1000, gid: 19999, mode: 0o644, type: 'link' } } }), '/d/x', 20001).results.at(-1).code, 'ELOOP')
+  assert.equal(dataFileRoundTrip(memory({ fs: { '/d/x': { uid: 1000, gid: 19999, mode: 0o644, type: 'file', nlink: 2 } } }), '/d/x', 20001).results.at(-1).code, 'EMLINK')
+  assert.equal(dataFileRoundTrip(memory({ fs: { '/d/x': { uid: 0, gid: 0, mode: 0o644, type: 'file' } } }), '/d/x', 20001).results.at(-1).code, 'EOWNER')
+  assert.equal(dataFileRoundTrip(memory({}), '/d/none', 20001).results.at(-1).code, 'ENOENT')
 })

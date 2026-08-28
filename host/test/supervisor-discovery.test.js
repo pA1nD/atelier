@@ -73,13 +73,14 @@ test('module.json classification: missing / invalid JSON / no name → file:line
 
 test('discover() is pure over a node-fs-shaped fake', () => {
   const fake = {
-    readdirSync: (p) => (p === '/apps' ? [{ name: 'a', isDirectory: () => true }, { name: 'b', isDirectory: () => true }] : []),
+    readdirSync: (p) => { if (p === '/apps') return [{ name: 'a', isDirectory: () => true }, { name: 'b', isDirectory: () => true }]; throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) },
     existsSync: (p) => p === '/apps/a/module.json' || p === '/apps/b/module.json' || p === '/apps/b/CLAIM-REFUSED.txt',
     readFileSync: (p) => (p === '/apps/a/module.json' ? '{"name":"A"}' : (() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) })()),
   }
   const d = discover('/apps', fake)
   assert.deepEqual(d.apps.map((a) => a.slug), ['a'])
   assert.deepEqual(d.skipped, [{ name: 'b', dir: '/apps/b', reason: 'claim-refused' }])
-  assert.deepEqual(discover('/missing', fake), { apps: [], refused: [], skipped: [], problems: [] })
+  assert.deepEqual(discover('/missing', fake), { apps: [], refused: [], skipped: [], problems: [], unreadable: true })
+  assert.equal(d.unreadable, false)
   assert.equal(IGNORED_NAME_RE.test('ok-name'), false)
 })

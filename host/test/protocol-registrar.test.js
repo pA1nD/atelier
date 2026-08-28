@@ -104,8 +104,8 @@ test('claim: 201 → claimed with uid 20001, markers under the dirfd; a second a
     assert.deepEqual(r.registrar.apps().get(a.instance), { slug: 'todo', uid: 20001, rev: null, meta: { name: 'Todo', icon: '✅' }, tombstone_at: null })
     // markers: mkdir 0711 on the dirfd path, files with their modes, never in the app folder
     assert.ok(r.state.calls.some((c) => c[0] === 'mkdir' && c[1] === `/work/.atelier/${a.instance}` && c[2] === 0o711))
-    assert.deepEqual(r.fsx.files.get(`/work/.atelier/${a.instance}/slug`), { data: 'todo\n', mode: 0o644 })
-    assert.deepEqual(r.fsx.files.get(`/work/.atelier/${a.instance}/uid`), { data: '20001\n', mode: 0o644 })
+    assert.deepEqual(r.fsx.files.get(`/work/.atelier/${a.instance}/slug`), { data: 'todo\n', mode: 0o600 })
+    assert.deepEqual(r.fsx.files.get(`/work/.atelier/${a.instance}/uid`), { data: '20001\n', mode: 0o600 })
     assert.deepEqual(JSON.parse(r.fsx.files.get(`/work/.atelier/${a.instance}/registered.json`).data), { instance: a.instance, slug: 'todo', uid: 20001, company: 'acme' })
     assert.equal(r.fsx.files.get(`/work/.atelier/${a.instance}/registered.json`).mode, 0o600)
     assert.ok(![...r.fsx.files.keys()].some((p) => p.startsWith('/work/apps/')))
@@ -181,6 +181,15 @@ test('401 host-epoch-moved on any call → register again with a new epoch, then
     assert.ok(r.logs.some((l) => l.includes(EPOCH_MOVED)))
     assert.deepEqual(await r.registrar.draining(), { ok: true })
     assert.deepEqual(await r.registrar.appConfig('i-x'), { env: { K: 'V' } })
+    // the two push lanes go through the same call(): a moved epoch re-registers and retries once
+    spine.revoke()
+    const e2 = r.registrar.epoch
+    assert.deepEqual(await r.registrar.lane.appError({ kind: 'app-error', error: {} }), { ok: true })
+    assert.notEqual(r.registrar.epoch, e2)
+    assert.deepEqual(spine.calls.slice(-3).map((c) => c.path), ['/v1/host/event', '/v1/host/register', '/v1/host/event'])
+    spine.revoke()
+    assert.deepEqual(await r.registrar.lane.events([]), { accepted: 0, rejected: [] })
+    assert.deepEqual(spine.calls.slice(-3).map((c) => c.path), ['/v1/host/events', '/v1/host/register', '/v1/host/events'])
     // a non-epoch error is thrown, not retried
     const bad = spineTransport({ spineUrl: spine.url }, { bootstrapToken: 'wrong' })
     await assert.rejects(bad.register({}), (e) => e instanceof TransportError && e.status === 401 && e.body.error === 'bad-bootstrap')

@@ -54,8 +54,10 @@ export function helperEnv(podEnv) { return scrub(podEnv, ['PATH']) }
  * Ops: umask · mkdir (mode at creation; EEXIST tolerated and audited; `reclaim` chowns an existing
  * dir back to 0:0 so root can populate it again) · openDir (kept for life) · unlink (ENOENT fine) ·
  * chownIf (only when the inode is owned `ifOwner`; `missingOk` skips ENOENT) · mkdirIfMissing
- * (mkdir + chown, nothing when present) · chown · write (`wx`, mode at creation). There is no
- * chmod op: every mode is set at creation and nothing is chmod'ed after its chown.
+ * (mkdir + chown, nothing when present) · chown · write (`wx`, mode at creation) ·
+ * chmodIfRootOwned (the one chmod: an EXISTING `0:0` directory with another mode — the `/run/atelier`
+ * tmpfs mount root arrives `1777` — is chmodded while root owns it; a non-root owner is logged and
+ * left). Every other mode is set at creation and nothing is chmod'ed after its chown.
  * Container-restart semantics (restartPolicy Always, `/run/atelier` and `/work` outlive the container):
  * every marker may already exist — the sentinel of the previous life is unlinked, the tokens are
  * re-minted (unlink, then exclusive create), the agent-owned session dir is reclaimed first.
@@ -67,11 +69,12 @@ export function bootPlan(cfg, { bootstrap, devToken }) {
   return [
     { op: 'umask', mode: 0o000 },                                   // modes below are exact, not masked
     // 1. root-owned markers, before anything else
-    { op: 'mkdir', path: `${W}/.atelier`, mode: 0o755, owner: [0, 0] },
+    { op: 'mkdir', path: `${W}/.atelier`, mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: `${W}/.atelier/data`, mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: `${W}/.atelier/last-good`, mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: `${W}/.atelier/scratch`, mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: R, mode: 0o711, owner: [0, 0] },
+    { op: 'chmodIfRootOwned', path: R, mode: 0o711 },                // the tmpfs mount arrives 0:0 1777: closed before any uid-1000 process exists
     { op: 'mkdir', path: `${R}/dev`, mode: 0o710, owner: [0, AGENT.gid] },
     { op: 'chown', path: `${R}/dev`, uid: 0, gid: AGENT.gid },
     { op: 'mkdir', path: `${R}/session`, mode: 0o700, owner: [AGENT.uid, AGENT.gid], reclaim: true },   // chowned in 3b, once populated

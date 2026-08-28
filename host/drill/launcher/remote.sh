@@ -93,7 +93,7 @@ log "row 4: second life plan lines:"; $K logs computer -c session 2>&1 | grep -E
 $K logs computer -c session 2>&1 | grep -q 'mkdir /run/atelier/session 0700: ok (exists 1000:1000 0700 — reclaimed 0:0)' || fail "row 4: session dir not reclaimed in the second life"
 check5=$(X 'stat -c "%u:%g %a %n" /run/atelier/session /run/atelier/session/dev.token /run/atelier/dev.token /run/atelier/host-ready /work /work/.atelier 2>&1' | tr '\n' '|')
 log "row 4: stats after restart: $check5"
-echo "$check5" | grep -q '1000:1000 700 /run/atelier/session|1000:1000 400 /run/atelier/session/dev.token|0:0 400 /run/atelier/dev.token|0:0 644 /run/atelier/host-ready|1000:1000 755 /work|0:0 755 /work/.atelier' || fail "row 4: ownership after the restart"
+echo "$check5" | grep -q '1000:1000 700 /run/atelier/session|1000:1000 400 /run/atelier/session/dev.token|0:0 400 /run/atelier/dev.token|0:0 644 /run/atelier/host-ready|1000:1000 755 /work|0:0 711 /work/.atelier' || fail "row 4: ownership after the restart"
 [ "$(X 'cat /run/atelier/session/dev.token' | tr -d '\r\n')" = "$DT1" ] || fail "row 4: session copy differs from the host copy after the restart"
 PREV=$($K logs computer -c session --previous 2>&1); echo "$PREV" | grep -q 'SIGTERM: host first' || fail "row 4: first life has no SIGTERM order line"
 echo "$PREV" | grep -q '\[host-stub\] SIGTERM → teardown' || fail "row 4: the host was not signalled before exit"

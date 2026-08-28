@@ -30,8 +30,12 @@ test('inbound: framing conflicts are 400 on the RAW headers; a content-length ov
   assert.equal(inbound({ headers: {} }).ok, true)
 })
 
-test('stampUser: the three internal headers, claims as JSON', () => {
+test('stampUser: the three internal headers, latin1-safe (percent-encoded name, ASCII-escaped claims) — the one encoding the proxy and the runtime share', () => {
   assert.deepEqual(stampUser({ accept: '*/*' }, { id: 'p1', name: 'Ada' }), { accept: '*/*', 'x-atelier-user': 'p1', 'x-atelier-name': 'Ada', 'x-atelier-claims': '{}' })
+  const h = stampUser({}, { id: 'p1', name: 'Ünïcode 名', claims: { k: 'ä' } })
+  for (const v of Object.values(h)) assert.ok(/^[\x20-\x7e]*$/.test(v), v)
+  assert.equal(h['x-atelier-name'], encodeURIComponent('Ünïcode 名'))
+  assert.equal(h['x-atelier-claims'], '{"k":"\\u00e4"}')
 })
 
 test('outbound: set-cookie and www-authenticate never leave; Location rewritten only when root-absolute; unknown headers dropped', () => {

@@ -13,10 +13,15 @@
 //   - a failed push keeps its instances pending and retries with a bounded backoff; frames are
 //     never re-sent as they were — they are re-minted (the ring wants monotonic seq per stream,
 //     and a re-mint after a stream change is the only correct shape).
+//   - a frame the ring REJECTED as `stale-epoch` / `unregistered` (minted under an epoch the host
+//     has since moved past, or before the registration landed) is an invalidation not yet
+//     delivered: its instance goes back to pending and is re-minted under the current stream.
+//     Other rejections (`seq-gap`, `bad-frame`) are logged and dropped — a host bug, not a retry.
 import { validEvent } from '../../protocol/index.js'
 
 export const MAX_BATCH = 128
 export const RETRY_MS = [50, 200, 1000, 5000]
+export const REQUEUE_REASONS = new Set(['stale-epoch', 'unregistered'])
 
 /**
  * createEvents({ transport, hostId, epoch, flushMs, maxBatch, log, setTimer, clearTimer })
@@ -30,7 +35,7 @@ export function createEvents({ transport, hostId, epoch, flushMs = 10, maxBatch 
   const seqs = new Map()              // topic → last seq, valid for `seqStream`
   let seqStream = null
   let timer = null, inflight = null, retries = 0
-  const stats = { pushed: 0, failed: 0, batches: 0, maxBatch: 0, rejected: 0 }
+  const stats = { pushed: 0, failed: 0, batches: 0, maxBatch: 0, rejected: 0, requeued: 0 }
   let stopped = false
 
   function stream() {
@@ -69,7 +74,15 @@ export function createEvents({ transport, hostId, epoch, flushMs = 10, maxBatch 
       .then((r) => {
         retries = 0
         stats.pushed += batch.length
-        if (r && Array.isArray(r.rejected) && r.rejected.length) { stats.rejected += r.rejected.length; log(`events: ${r.rejected.length} rejected ${JSON.stringify(r.rejected.slice(0, 3))}`) }
+        if (r && Array.isArray(r.rejected) && r.rejected.length) {
+          stats.rejected += r.rejected.length
+          log(`events: ${r.rejected.length} rejected ${JSON.stringify(r.rejected.slice(0, 3))}`)
+          for (const rej of r.rejected) {
+            if (!REQUEUE_REASONS.has(rej?.reason)) continue
+            const frame = Number.isInteger(rej.index) ? batch[rej.index] : null
+            if (frame) { pending.add(frame.topic); stats.requeued++ }
+          }
+        }
       })
       .catch((e) => {
         stats.failed += batch.length

@@ -156,6 +156,14 @@ test('app routes are the supervisor’s (same functions as the protocol port): /
     const j = JSON.parse(res.body.toString())
     assert.deepEqual(j.user, { id: 'p-agent', name: 'Bayard', claims: {} }); assert.equal(j.url, '/api/acme/todo/items?x=1'); assert.equal(j.bytes, 5)
     assert.deepEqual(r.registrar.servedList, ['i-0123456789abcdef'])
+    // the dev token in the URL never reaches the worker: stripped before supervisor.handle, the rest of the query kept
+    res = await request(t, { method: 'POST', path: '/api/acme/todo/items?token=dev-secret&x=1&y=2', body: 'hi' })
+    assert.equal(res.status, 200)
+    assert.equal(JSON.parse(res.body.toString()).url, '/api/acme/todo/items?x=1&y=2')
+    assert.equal(r.supervisor.handled.at(-1).url, '/api/acme/todo/items?x=1&y=2')
+    res = await request(t, { method: 'POST', path: '/api/acme/todo/items?token=dev-secret', body: 'hi' })
+    assert.equal(JSON.parse(res.body.toString()).url, '/api/acme/todo/items')
+    assert.equal(r.supervisor.handled.some((h) => /token=/.test(h.url)), false)
     res = await request(t, { path: '/modules/acme/todo/frontend.js', headers: tok })
     assert.equal(res.status, 200); assert.equal(res.body.toString(), '// todo rev3'); assert.equal(res.headers.etag, '"rev-3"')
     assert.equal((await request(t, { path: '/modules/acme/todo/frontend.js?rev=9', headers: tok })).status, 404)
@@ -201,6 +209,23 @@ test('the socket is chowned 0:1000 and chmodded 0660 after bind (recorded by mem
   try {
     assert.deepEqual(r.state.calls.filter((c) => c[0] === 'chown' || c[0] === 'chmod'), [['chown', r.sock, 0, 1000], ['chmod', r.sock, 0o660]])
   } finally { await r.dev.close() }
+})
+
+test('refuse(): a host fault answers 503 on the dev shell before auth or any route', async () => {
+  const r = rig()
+  let fault = null
+  const dev = createDevShell({ cfg: { nodeEnv: 'production' }, os: unprivileged(), supervisor: r.supervisor, collector: r.collector, registrar: r.registrar, auth: r.auth, sockPath: path.join(r.dir, 'f.sock'), devPort: null, refuse: () => fault })
+  await dev.listen()
+  try {
+    const t = { socketPath: path.join(r.dir, 'f.sock') }
+    assert.equal((await request(t, { path: '/_atelier/whoami', headers: tok })).status, 200)
+    fault = '.atelier renamed'
+    const res = await request(t, { path: '/_atelier/whoami', headers: tok })
+    assert.equal(res.status, 503); assert.deepEqual(JSON.parse(res.body.toString()), { error: 'host fault', reason: '.atelier renamed' })
+    assert.equal((await request(t, { path: '/api/acme/todo/x', headers: tok })).status, 503)
+    fault = null
+    assert.equal((await request(t, { path: '/_atelier/whoami', headers: tok })).status, 200)
+  } finally { await dev.close() }
 })
 
 test('no dev token file: both listeners answer 401 to everything (OR12: no fallback)', async () => {

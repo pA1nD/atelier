@@ -15,8 +15,13 @@
 // `req.url` reaches the supervisor untouched: the mount prefix `/api/<company>/<slug>` is
 // derivable from the row and is stripped by serve.mjs/proxy.mjs before the worker's router.
 // mTLS: `cfg.hostTls = 'cert.pem,key.pem,ca.pem'` turns the listener into https with
-// requestCert + rejectUnauthorized (step 5 turns it on; the drill proves a worker's dial is
-// TLS-refused before HTTP).
+// requestCert + rejectUnauthorized. In the fleet it is mandatory (PLAN §4.3 "Beyond uid": a worker's
+// dial is TLS-refused before HTTP) — index.mjs refuses to start a fleet host without it; the
+// explicit `plain` value is the step-2 drill's opt-out, logged as INSECURE on every start.
+// `refuse()` (index.mjs): a non-null reason answers every request 503 — the host-fault state (the
+// `.atelier` tree renamed or removed) — before any route runs.
+// `close(drainMs)`: stop accepting, close idle keep-alive sockets, let in-flight requests finish for
+// up to drainMs (the §4.7 25 s long-poll fits), then cut what is left.
 import http from 'node:http'
 import https from 'node:https'
 import fs from 'node:fs'
@@ -99,12 +104,28 @@ export function tlsOptions(spec) {
  * createServer({ cfg, auth, supervisor, collector, registrar, log, frontendReport, listen })
  *   listen: {path} for a Unix socket (tests) or {port, host}; default cfg.hostPort on 0.0.0.0.
  */
-export function createServer({ cfg = {}, auth, supervisor, collector, registrar, log = () => {}, frontendReport, listen: listenOpts }) {
+export const LISTENER_DRAIN_MS = 25_000
+export const HOST_TLS_PLAIN = 'plain'
+
+/** closeDraining(server, drainMs) — the one listener shutdown (the dev shell shares it). */
+export function closeDraining(server, drainMs = LISTENER_DRAIN_MS) {
+  return new Promise((resolve) => {
+    server.closeIdleConnections?.()
+    const t = setTimeout(() => server.closeAllConnections?.(), drainMs)
+    t.unref?.()
+    server.close(() => { clearTimeout(t); resolve() })
+  })
+}
+
+export function createServer({ cfg = {}, auth, supervisor, collector, registrar, log = () => {}, frontendReport, listen: listenOpts, refuse = () => null }) {
   const report = frontendReport ?? frontendReportHandler({ collector })
   const startedAt = Date.now()
   const where = listenOpts ?? { port: cfg.hostPort ?? DEFAULT_HOST_PORT, host: cfg.hostBind ?? '0.0.0.0' }
+  const tls = cfg.hostTls && cfg.hostTls !== HOST_TLS_PLAIN ? cfg.hostTls : null
 
   async function handle(req, res) {
+    const fault = refuse()
+    if (fault) { req.resume(); return json(res, 503, { error: 'host fault', reason: fault }) }
     let url
     try { url = new URL(req.url, 'http://host') } catch { return json(res, 400, {}) }
     const p = url.pathname
@@ -149,17 +170,17 @@ export function createServer({ cfg = {}, auth, supervisor, collector, registrar,
   }
 
   const onRequest = (req, res) => { handle(req, res).catch((e) => { log(`server: 500 ${req.method} ${req.url}: ${e?.stack ?? e}`); if (!res.headersSent) json(res, 500, {}); else res.destroy() }) }
-  const server = cfg.hostTls ? https.createServer(tlsOptions(cfg.hostTls), onRequest) : http.createServer(onRequest)
+  const server = tls ? https.createServer(tlsOptions(tls), onRequest) : http.createServer(onRequest)
   server.on('upgrade', (req, socket) => { socket.end('HTTP/1.1 426 Upgrade Required\r\nconnection: close\r\ncontent-length: 0\r\n\r\n') })
 
   return {
     server,
     listen: () => new Promise((resolve, reject) => {
       server.once('error', reject)
-      const done = () => { server.off('error', reject); const a = server.address(); log(`server: listening ${typeof a === 'string' ? a : `${a.address}:${a.port}`}${cfg.hostTls ? ' (mTLS)' : ''}`); resolve(a) }
+      const done = () => { server.off('error', reject); const a = server.address(); log(`server: listening ${typeof a === 'string' ? a : `${a.address}:${a.port}`}${tls ? ' (mTLS)' : cfg.hostTls === HOST_TLS_PLAIN ? ' (INSECURE: plain HTTP by ATELIER_HOST_TLS=plain)' : ''}`); resolve(a) }
       if (where.path) { try { fs.unlinkSync(where.path) } catch {} server.listen(where.path, done) } else server.listen(where.port, where.host, done)
     }),
-    close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()) }),
+    close: (drainMs = LISTENER_DRAIN_MS) => closeDraining(server, drainMs),
     address: () => server.address(),
   }
 }

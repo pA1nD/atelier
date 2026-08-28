@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild'
 import { PROTOCOL } from '../../protocol/index.js'
-import { json, parseMount, safeRel, readJson, serveAssetResult, appsView, findInstance, frontendReportHandler } from './server.mjs'
+import { json, parseMount, safeRel, readJson, serveAssetResult, appsView, findInstance, frontendReportHandler, closeDraining, LISTENER_DRAIN_MS } from './server.mjs'
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const DEFAULT_DEV_PORT = 1844
@@ -65,7 +65,7 @@ function maxMtimeRecursive(rootDir) {
  *                  chromeSheet, repoRoot, sockPath, devPort, devHost })
  *   chromeSheet: () => Promise<{body:Buffer, type}> — the chrome's compiled sheet (supervisor lane); absent = pass-through
  */
-export function createDevShell({ cfg = {}, os, supervisor, collector, registrar, auth, principal, log = () => {}, frontendReport, chromeSheet, repoRoot = REPO_ROOT, sockPath, devPort, devHost = '127.0.0.1' }) {
+export function createDevShell({ cfg = {}, os, supervisor, collector, registrar, auth, principal, log = () => {}, frontendReport, chromeSheet, repoRoot = REPO_ROOT, sockPath, devPort, devHost = '127.0.0.1', refuse = () => null }) {
   const report = frontendReport ?? frontendReportHandler({ collector })
   const startedAt = Date.now()
   const prod = (cfg.nodeEnv ?? process.env.NODE_ENV ?? 'production') === 'production'
@@ -164,7 +164,13 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     res.end(req.method === 'HEAD' ? undefined : buf)
   }
 
+  // stripToken(url): the dev token never reaches a worker — a `?token=` on an /api request is the
+  // agent's credential (OR12), and a worker holding it could dial this shell as the chat's principal.
+  const stripToken = (url) => { if (!url.searchParams.has('token')) return null; url.searchParams.delete('token'); return url.pathname + url.search }
+
   async function handle(req, res) {
+    const fault = refuse()
+    if (fault) { req.resume(); return json(res, 503, { error: 'host fault', reason: fault }) }
     let url
     try { url = new URL(req.url, 'http://dev') } catch { return json(res, 400, {}) }
     const a = auth.devRequest(req)
@@ -204,7 +210,7 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     if (mount) {
       const row = supervisor.resolve(mount.company, mount.slug)
       if (!row) return json(res, 404, {})
-      if (mount.kind === 'api') { registrar.served?.(row.instance); return supervisor.handle(row, req, res, user) }
+      if (mount.kind === 'api') { const stripped = stripToken(url); if (stripped !== null) req.url = stripped; registrar.served?.(row.instance); return supervisor.handle(row, req, res, user) }
       const rel = safeRel(mount.rel)
       if (!rel) return json(res, 404, {})
       const revQ = url.searchParams.get('rev')
@@ -236,7 +242,8 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
   const mk = () => { const s = http.createServer(onRequest); s.on('upgrade', onUpgrade); servers.push(s); return s }
   const listenOne = (s, ...args) => new Promise((resolve, reject) => { s.once('error', reject); s.listen(...args, () => { s.off('error', reject); resolve(s.address()) }) })
 
-  const close = () => Promise.all(servers.splice(0).map((s) => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()) }))).then(() => { for (const ws of clients) { try { ws.terminate() } catch {} } })
+  // close(drainMs): in-flight requests finish (≤ drainMs), WS clients are terminated (the shell reconnects)
+  const close = (drainMs = LISTENER_DRAIN_MS) => { for (const ws of clients) { try { ws.terminate() } catch {} } return Promise.all(servers.splice(0).map((s) => closeDraining(s, drainMs))) }
   return {
     async listen() {
       const out = {}

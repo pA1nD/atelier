@@ -6,7 +6,7 @@
 //                          worker starts); `live` = the rev `current` names; `fingerprint` = the
 //                          watcher fingerprint of the source the live rev was built from.
 //   <inst>/current         symlink → ../last-good/<inst>/rev-N, swapped by rename
-//   <inst>/slug, uid, registered.json   markers (0644 / 0600), written by the supervisor/registrar
+//   <inst>/slug, uid, registered.json   markers (0600 — the host's alone), written by the supervisor/registrar
 //   last-good/<inst>/rev-N/{backend.js, backend.js.map, frontend/<rel>.js, styles.css}
 //                          written to rev-N.tmp-<pid>, every file fsynced, the dir renamed into
 //                          place, `0:<uid> 0750` dirs / 0640 files (the host's own inodes: chmod
@@ -52,7 +52,7 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       ignoreEexist(() => { fs.mkdirSync(markerDir(inst), { mode: 0o711 }); os.chmod(markerDir(inst), 0o711) })
       ignoreEexist(() => mkdirOwned(lastGood(inst), uid))
     },
-    writeMarker(inst, name, text, mode = 0o644) {
+    writeMarker(inst, name, text, mode = 0o600) {
       const p = path.join(markerDir(inst), name)
       fsyncFile(p, String(text)); os.chmod(p, mode)
     },
@@ -63,7 +63,7 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
     nextRev(inst) {
       const cur = store.revision(inst) ?? {}
       const rev = (cur.rev ?? cur.live ?? 0) + 1
-      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev }, 0o644)
+      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev }, 0o600)
       return rev
     },
 
@@ -99,7 +99,7 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), {
         rev: Math.max(cur.rev ?? 0, rev), live: rev, sha256, bytes, builtAt: new Date(os.now()).toISOString(),
         host: hostVersion, chrome, protocol: PROTOCOL, fingerprint, slug,
-      }, 0o644)
+      }, 0o600)
       const link = path.join(markerDir(inst), 'current'), tmp = path.join(markerDir(inst), `.current-tmp-${process.pid}`)
       fs.rmSync(tmp, { force: true })
       fs.symlinkSync(`../last-good/${inst}/rev-${rev}`, tmp)
@@ -123,6 +123,14 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       fs.rmSync(revDir(inst, rev), { recursive: true, force: true })
       fs.rmSync(`${revDir(inst, rev)}.tmp-${process.pid}`, { recursive: true, force: true })
     },
+    // sweepTmp(inst) → [names]: every `rev-N.tmp-<pid>` left by a host life that died mid-write (boot).
+    sweepTmp(inst) {
+      let ents
+      try { ents = fs.readdirSync(lastGood(inst)) } catch { return [] }
+      const gone = ents.filter((n) => /^rev-\d+\.tmp-\d+$/.test(n))
+      for (const n of gone) fs.rmSync(path.join(lastGood(inst), n), { recursive: true, force: true })
+      return gone
+    },
     read(inst, rev, rel) {
       const base = revDir(inst, rev), p = path.resolve(base, rel)
       if (!p.startsWith(base + path.sep)) return null
@@ -145,21 +153,30 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
 }
 
 // commitGit({os, appDir, rev, log}) → Promise<{ok, step?, code?}> — row G, never throws.
+// `.git/info/exclude` (written as uid 1000 after `init`, every time) keeps node_modules/ (the frozen
+// tree), data/ (1.x apps that write there), .atelier and CLAIM-REFUSED.txt out of every commit: the
+// dependency tree is never duplicated into .git on the volume, and a save costs one pass over the
+// sources only. The supervisor serializes commits per app (swap → `row.git` chain).
 export const GIT_ENV = { HOME: '/work', GIT_AUTHOR_NAME: 'atelier', GIT_AUTHOR_EMAIL: 'atelier@local', GIT_COMMITTER_NAME: 'atelier', GIT_COMMITTER_EMAIL: 'atelier@local' }
+export const GIT_EXCLUDE = 'node_modules/\ndata/\n.atelier\nCLAIM-REFUSED.txt\n'
 export function gitSpec({ appDir, args, home = GIT_ENV.HOME }) {
   return { argv: ['git', '-C', appDir, ...args], uid: 1000, gid: 1000, groups: [], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...GIT_ENV, HOME: home }, umask: 0o022, cwd: appDir, stdio: ['ignore', 'pipe', 'pipe'] }
+}
+/** The exclude write: uid 1000, `mkdir -p .git/info` then the list — through the adapter like every git step. */
+export function excludeSpec({ appDir }) {
+  return { ...gitSpec({ appDir, args: [] }), argv: ['sh', '-c', 'mkdir -p -- "$1/.git/info" && printf %s "$2" > "$1/.git/info/exclude"', 'sh', appDir, GIT_EXCLUDE] }
 }
 export async function commitGit({ os, appDir, rev, log = () => {}, home }) {
   const run = (args) => new Promise((resolve) => {
     let child
-    try { child = os.spawn(gitSpec({ appDir, args, home })) } catch (e) { return resolve({ code: -1, err: e.message }) }
+    try { child = os.spawn(args === 'exclude' ? excludeSpec({ appDir }) : gitSpec({ appDir, args, home })) } catch (e) { return resolve({ code: -1, err: e.message }) }
     let err = ''
     child.stdout?.on?.('data', (d) => { err += d })
     child.stderr?.on?.('data', (d) => { err += d })
     child.on('error', (e) => resolve({ code: -1, err: e.message }))
     child.on('exit', (code) => resolve({ code, err }))
   })
-  for (const [step, args] of [['init', ['init', '-q']], ['add', ['add', '-A', '.']], ['commit', ['commit', '-qm', `rev ${rev}`]]]) {
+  for (const [step, args] of [['init', ['init', '-q']], ['exclude', 'exclude'], ['add', ['add', '-A', '.']], ['commit', ['commit', '-qm', `rev ${rev}`]]]) {
     const r = await run(args)
     if (r.code !== 0) {
       if (step === 'commit' && /nothing to commit/.test(r.err)) return { ok: true, noop: true }

@@ -66,6 +66,12 @@ export function runPlan(steps, { os, io, log }) {
         try { os.lstat(s.path); return 'present' } catch (e) { if (e.code !== 'ENOENT') throw e }
         os.mkdir(s.path, s.mode); os.chown(s.path, s.uid, s.gid); return `created ${s.uid}:${s.gid}`
       case 'chown': os.chown(s.path, s.uid, s.gid); return
+      case 'chmodIfRootOwned': {
+        const st = os.lstat(s.path), mode = st.mode & 0o7777
+        if (st.uid !== 0 || st.gid !== 0) return `${st.uid}:${st.gid} ${oct(mode)} — not root-owned, left`
+        if (mode === s.mode) return 'already'
+        os.chmod(s.path, s.mode); return `${oct(mode)} → ${oct(s.mode)}`
+      }
       case 'write': io.write(s.path, s.data, s.mode); return
       default: throw new Error(`unknown plan op ${s.op}`)
     }

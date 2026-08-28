@@ -28,10 +28,14 @@ plans byte-exact.
 defaults to the slug) and `scratchDir` (`scratch/<inst>`; `HOME` = `<scratchDir>/home`; derived
 from `dataDir`'s parent when absent). `spawnPlan(spec, {hostEnv, runtime})` returns the row-W
 SpawnSpec: `argv = ['node', '--max-old-space-size=<(data − 576 MB) × 0.85, min 256>', runtime.mjs]`,
-env exactly `{<configEnv keys>, PATH, NODE_ENV, APP_ID, HOME, HOST, PORT, BASE_URL, TMPDIR, ATELIER_WORKER}`
-(config keys never override the fixed ones), `cwd '/'`, `uid = gid = spec.uid`, `groups []`,
-`rlimits`, `oomScoreAdj 1000`, `umask 002`, `stdio ['ignore','pipe','pipe','pipe']`, `detached true`
-(own process group, for the SIGKILL sweep). `HOST`/`PORT`/`BASE_URL` come from `spec.origin` and
+env exactly `{PATH, NODE_ENV, APP_ID, HOME, HOST, PORT, BASE_URL, TMPDIR, ATELIER_WORKER}` — no
+config key: that env is handed to the root wrapper chain (`sh` → `prlimit` → `setpriv`) before the
+uid drop, so a config key such as `LD_PRELOAD` would execute as userns-root. The OR14 config goes
+over the worker's stdin instead (`configEnvOf(spec)` → `{env, dropped}`: the fixed keys and
+`LD_*`/`DYLD_*`/`NODE_*`/`ATELIER_*` are dropped; `configPayload(spec)` = `{"env":{K:V}}` written
+once, then EOF), `cwd '/'`, `uid = gid = spec.uid`, `groups []`, `rlimits`, `oomScoreAdj 1000`,
+`umask 002`, `stdio ['pipe','pipe','pipe','pipe']` (stdin = the config lane, fd 3 = control),
+`detached true` (own process group, for the SIGKILL sweep). `HOST`/`PORT`/`BASE_URL` come from `spec.origin` and
 `spec.baseUrl` (§9.12). `PATH`/`NODE_ENV` come from `hostEnv` (an explicit argument, default
 `process.env`) — nothing else of the host's env reaches a worker.
 
@@ -42,12 +46,15 @@ Rejections are Errors with `error: 'no-ready' | 'spawn-eagain' | 'load-failed'`,
 `load-failed` the runtime's `code` (`LOAD-ERROR | MOUNT-ERROR | ERR_MODULE_NOT_FOUND | RUNTIME-DEAD`)
 and `detail` (the control message: message, stack, file, line, col). Exit 134, a signal, or a
 spawn `error` before READY is `spawn-eagain`; any other exit before READY is `load-failed` /
-`RUNTIME-DEAD`. `stop()` sends SIGTERM, waits ≤ `drainMs` for the exit, then SIGKILLs the process
-group (`kill(-pid)`) and the pid; it resolves `{code, signal, killed}`.
+`RUNTIME-DEAD`. `stop()` sends SIGCONT (a no-op on a running worker; a watchdog-stopped one could
+not run its teardown otherwise), then SIGTERM, waits ≤ `drainMs` for the exit, then SIGKILLs the
+process group (`kill(-pid)`) and the pid; it resolves `{code, signal, killed}`.
 
 ### `runtime.mjs` (the worker)
 
-Reads `ATELIER_WORKER` (the spec JSON minus `configEnv`/`rlimits`) and writes NDJSON to fd 3.
+Reads `ATELIER_WORKER` (the spec JSON minus `configEnv`/`rlimits`), the config document on stdin
+(`readConfig(0)` → assigned to `process.env` after the uid drop, before the import; row-W keys win),
+and writes NDJSON to fd 3.
 Order: uncaught-exception/rejection handlers → SIGTERM handler → `chdir(appDir)` →
 `import(codeDir/backend.js)` → frozen `ctx` → router → `mountRoutes` → resource snapshot →
 listen on `spec.sock` → `{t:'ready', mountMs, importMs, resources, teardown}`.
@@ -73,8 +80,9 @@ listen on `spec.sock` → `{t:'ready', mountMs, importMs, resources, teardown}`.
 - `resources` = `process.getActiveResourcesInfo()` counted by type after mount, minus the process's
   own baseline taken before the import (so a `setInterval` at module top level counts). The
   socket server is not in it. Empty = idle-stop candidate (R14).
-- SIGTERM: `server.close()` → `await teardown?.()` → wait ≤ 1 s for `ProcessWrap` handles to go →
-  `exit(0)`. Never a bare exit before teardown.
+- SIGTERM: `server.close()` + idle keep-alive sockets closed → `await teardown?.()` → wait ≤ 1.5 s
+  (`CHILD_DRAIN_MS`, below the host's 2 s) for the in-flight responses AND the `ProcessWrap` handles
+  to go → `exit(0)`. Never a bare exit before teardown; never an exit with a response half-sent.
 - The runtime deletes `PWD, OLDPWD, SHLVL, _, __CF_USER_TEXT_ENCODING` from its own env at start:
   the spawn wrapper's `sh` exports the first four, macOS injects the last. `process.env` inside the
   worker is row W exactly; `/proc/<pid>/environ` still shows the shell's exports.
@@ -101,9 +109,14 @@ that moment, so it needs no FOWNER, and a directory's setgid bit survives the fo
 (the kernel kills SUID/SGID on chown for regular files only). `installPlan(spec, scratchDir)` is
 the same shape for `scratch/<inst>` (`0:<uid> 0750`), `home/` (`0700`), `build/` (`0755`).
 `applyJail(os, steps, log)` logs `[priv] <op> <path>: ok|<errno>`, tolerates `EEXIST` on mkdir,
-stops on any other errno. `afterReady` = socket `0:0` then `0700`. `claimRoundTrip(os, appDir, uid)`
-= `chown 0:<uid> → setgroups([uid]) → chmod 2750 → chown 1000:<uid> → setgroups(previous)`.
-`dataFileRoundTrip(os, file, uid)` = `chown 0:19999 → chmod 0660 → chown <uid>:19999`.
+stops on any other errno. `afterReady` = socket `0:0` then `0700`, then the socket dir `0710` (the
+worker cannot fill the `/run/atelier` tmpfs for life; `jailPlan` re-sets `0730` before the next
+spawn). The two round trips act on an fd (`fdTrip`): `claimRoundTrip(os, appDir, uid)` =
+`setgroups([uid]) → openDir O_NOFOLLOW → fstat (directory, uid 1000, gid 1000 or <uid>; else
+ELOOP/EOWNER/ENOTDIR, nothing touched) → fchown 0:<uid> → fchmod 2750 → fchown 1000:<uid> → close →
+setgroups(previous)`. `dataFileRoundTrip(os, file, uid)` = `openFile O_NOFOLLOW → fstat (regular
+file, nlink 1, uid 1000; else ELOOP/EMLINK/ENOTREG/EOWNER) → fchown 0:19999 → fchmod 0660 → fchown
+<uid>:19999 → close`. Nothing is ever chowned or chmodded by path inside an agent-owned directory.
 
 ### `install.mjs` + `freeze.py`
 
@@ -136,7 +149,8 @@ host's `HOME`, no scratch, no freeze (logged).
 3. `jailPlan` on ext4 under `hostUsers:false`: `data/<inst>` ends `<uid>:19999 2770` with the setgid
    bit intact after the chown; the agent (groups `{1000, 19999}`) reads and writes it, a peer uid
    gets EACCES; `tmp/<inst>` 0700; `w/<inst>` 0730 — the worker binds, cannot list, a peer cannot
-   connect; after READY the socket is `0:0 0700` and a resumed worker re-binds in the 0730 dir.
+   connect; after READY the socket is `0:0 0700` and the dir `0710`; a resumed worker re-binds in the
+   dir re-set to 0730 by `prepareDirs`.
 4. `claimRoundTrip` under `{SETUID, SETGID, CHOWN, KILL}`: the setgid bit sticks with `setgroups([uid])`
    around the chmod (PLAN §10 item 3, site (a)); `dataFileRoundTrip` on an agent-created `-wal` (site (b)).
 5. `freeze.py` 10/10 (g2 run-3 shape): cold install ≤ 5 s, freeze ≤ 100 ms, thaw/no-op/freeze#2 rc=0,

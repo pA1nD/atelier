@@ -13,7 +13,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const JSON_BODY_CAP = 10 * 1024 * 1024
 export const CTL_FD = 3
-export const CHILD_DRAIN_MS = 1000
+export const CONFIG_FD = 0
+export const CHILD_DRAIN_MS = 1500     // below the host's 2 s drain (spawn.mjs DRAIN_MS): the worker exits on its own before the pgroup SIGKILL
 /** MODULES.md "ctx exposes exactly" + `suspendable` (R14). Frozen at mount. */
 export const CTX_KEYS = ['id', 'name', 'workspace', 'qualifiedId', 'label', 'port', 'host', 'baseUrl', 'dataDir', 'log', 'broadcast', 'module', 'suspendable']
 
@@ -154,7 +155,15 @@ const errorDetail = (e) => {
 // ---------------------------------------------------------------------------------------------
 // The worker.
 
-export async function main({ spec = JSON.parse(process.env.ATELIER_WORKER), ctlFd = CTL_FD, drainMs = CHILD_DRAIN_MS } = {}) {
+/** readConfig(fd) → {K:V}: the OR14 config the host wrote to stdin (one JSON document, then EOF); {} when stdin carries nothing. */
+export function readConfig(fd = CONFIG_FD) {
+  let text = ''
+  try { text = fs.readFileSync(fd, 'utf8') } catch { return {} }
+  if (!text.trim()) return {}
+  try { const j = JSON.parse(text); return j && typeof j.env === 'object' && j.env ? j.env : {} } catch { return {} }
+}
+
+export async function main({ spec = JSON.parse(process.env.ATELIER_WORKER), ctlFd = CTL_FD, configFd = CONFIG_FD, drainMs = CHILD_DRAIN_MS } = {}) {
   const send = (msg) => { try { fs.writeSync(ctlFd, JSON.stringify(msg) + '\n') } catch {} }
   const qid = `${spec.company}/${spec.slug}`
   const log = (...a) => process.stderr.write(`[${qid}] ${format(...a)}\n`)
@@ -163,24 +172,31 @@ export async function main({ spec = JSON.parse(process.env.ATELIER_WORKER), ctlF
   // the spawn wrapper's shell exports its own bookkeeping (and macOS's libSystem injects __CF_USER_TEXT_ENCODING);
   // the module sees row W exactly
   for (const k of ['PWD', 'OLDPWD', 'SHLVL', '_', '__CF_USER_TEXT_ENCODING']) delete process.env[k]
+  // the OR14 config: read after the uid drop, before the import — never through the root wrapper chain's env
+  for (const [k, v] of Object.entries(readConfig(configFd))) if (!(k in process.env)) process.env[k] = String(v)
   let teardown = null
   let stopping = false
+  let inflight = 0
 
   // 7. the process stays up on async failures; the host hears every one (registered before the import so
   //    import-time async throws are reported, not fatal).
   process.on('uncaughtException', (e) => send({ t: 'error', kind: 'backend', ...errorDetail(e) }))
   process.on('unhandledRejection', (r) => send({ t: 'error', kind: 'backend', ...errorDetail(r) }))
 
-  // 9. SIGTERM → close the socket, run the module's teardown, drain child processes ≤ drainMs, exit.
-  //    Never a bare exit before teardown (a bare process.exit(0) orphans children — migration-local-2).
+  // 9. SIGTERM → stop accepting (idle keep-alive sockets closed, in-flight responses kept), run the
+  //    module's teardown, wait ≤ drainMs for the in-flight responses AND the module's child processes,
+  //    then exit. Never a bare exit before teardown (a bare process.exit(0) orphans children —
+  //    migration-local-2); never an exit with a response half-sent (the proxy would turn it into a 502).
   let server = null
   process.on('SIGTERM', async () => {
     if (stopping) return
     stopping = true
-    server?.close()
-    try { await teardown?.() } catch (e) { log(`teardown threw: ${e.message}`) }
     const deadline = Date.now() + drainMs
-    while ((countResources().ProcessWrap ?? 0) > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+    try { server?.close(); server?.closeIdleConnections?.() } catch {}
+    try { await teardown?.() } catch (e) { log(`teardown threw: ${e.message}`) }
+    while ((inflight > 0 || (countResources().ProcessWrap ?? 0) > 0) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+    if (inflight > 0) log(`exiting with ${inflight} response(s) still open after ${drainMs} ms`)
+    try { server?.closeAllConnections?.() } catch {}
     process.exit(0)
   })
 
@@ -247,6 +263,8 @@ export async function main({ spec = JSON.parse(process.env.ATELIER_WORKER), ctlF
       return res.end(JSON.stringify({ rev: spec.rev, uptime: Math.round(performance.now() - t0) }))
     }
     req.user = userFromHeaders(req.headers)
+    inflight++
+    res.once('close', () => { inflight-- })
     res.on('finish', () => {
       if (res.statusCode >= 500 && !res.__atelierReported) send({ t: 'http5xx', method: req.method, path: url.pathname, status: res.statusCode, message: `response ${res.statusCode}` })
     })

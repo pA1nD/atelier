@@ -61,16 +61,18 @@ export function checkModuleJson(dir, fs = nodeFs) {
 }
 
 /**
- * discover(appsDir, fs) → {apps, refused, skipped, problems}
+ * discover(appsDir, fs) → {apps, refused, skipped, problems, unreadable}
+ *   unreadable: true when the apps root itself could not be listed (EACCES/ENOENT/not mounted yet) —
+ *               the caller must not treat the empty `apps` as "every folder is gone" (reconcile(null))
  *   apps:     [{slug, dir, meta, requested, dropped, invalid}]   claimable rows (registrar.claim input)
  *   refused:  [{slug, dir, code:'bad-slug', error}]              the registrar writes CLAIM-REFUSED.txt
  *   skipped:  [{name, dir, reason:'ignored-name'|'claim-refused'|'not-a-dir'|'no-module-json'}]
  *   problems: [{slug, dir, error: ModuleJsonProblem}]             module.json present but invalid → build report
  */
 export function discover(appsDir, fs = nodeFs) {
-  const out = { apps: [], refused: [], skipped: [], problems: [] }
+  const out = { apps: [], refused: [], skipped: [], problems: [], unreadable: false }
   let ents
-  try { ents = fs.readdirSync(appsDir, { withFileTypes: true }) } catch { return out }
+  try { ents = fs.readdirSync(appsDir, { withFileTypes: true }) } catch { out.unreadable = true; return out }
   for (const ent of ents) {
     const name = ent.name, dir = path.join(appsDir, name)
     if (!ent.isDirectory()) { out.skipped.push({ name, dir, reason: 'not-a-dir' }); continue }

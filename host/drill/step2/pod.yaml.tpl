@@ -60,6 +60,7 @@ spec:
     - { name: CHANNEL_TOKEN, value: canary-channel-token }
     - { name: CHANNEL_CHAT, value: spike-host-step2 }
     - { name: ATELIER_BOOTSTRAP, value: drill-bootstrap-secret }
+    - { name: ATELIER_HOST_TLS, value: plain }   # the drill's signer dials plain HTTP; a fleet host refuses to start without this explicit opt-out
     volumeMounts:
     - { name: work, mountPath: /work }
     - { name: control, mountPath: /control }

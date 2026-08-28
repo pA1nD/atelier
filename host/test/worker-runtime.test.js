@@ -31,6 +31,7 @@ export default {
     router.get('/cast', (req, res) => { ctx.broadcast({ type: 'x', topic: 'evil' }); ctx.suspendable(); ctx.log('hello', { a: 1 }); res.json({}) })
     router.get('/slot', (req, res) => { const s = ctx.module('other'); s.n = (s.n || 0) + 1; res.json({ n: ctx.module('other').n, same: s === ctx.module('other') }) })
     router.get('/items/:id/*', (req, res) => res.json({ params: req.params, query: req.query }))
+    router.get('/slow', (req, res) => setTimeout(() => res.json({ slow: true }), 400))
     return () => { child.kill('SIGTERM'); process.stderr.write('TEARDOWN ran\\n') }
   },
 }
@@ -48,7 +49,7 @@ function fixture(backend = BACKEND) {
     codeDir, appDir, dataDir: path.join(root, 'data'), tmpDir: path.join(root, 'tmp'), sockDir: path.join(root, 'w'), sock: path.join(root, 'w', 'w.sock'),
     scratchDir: path.join(root, 'scratch'),
     baseUrl: 'http://127.0.0.1:1844/api/acme/demo', origin: 'http://127.0.0.1:1844',
-    configEnv: { DEMO_KEY: 'v' }, rlimits: { data: 1024 * MB, core: 0, nproc: 64, nofile: 1024 },
+    configEnv: { DEMO_KEY: 'v', LD_PRELOAD: '/tmp/evil.so', PATH: '/evil' }, rlimits: { data: 1024 * MB, core: 0, nproc: 64, nofile: 1024 },
   }
   return { root, spec }
 }
@@ -82,7 +83,8 @@ test('a real worker: ctx shape, env, req.user, control lane, health, teardown on
   assert.equal(typeof h.ready.mountMs, 'number')
   assert.equal(typeof h.ready.importMs, 'number')
 
-  // ctx = MODULES.md's keys + suspendable, frozen; cwd = the app folder; env = row W exactly (+ config keys)
+  // ctx = MODULES.md's keys + suspendable, frozen; cwd = the app folder; env = row W exactly + the config keys
+  // that came over stdin (LD_PRELOAD / PATH dropped by the host)
   const user = { id: 'p1', name: 'Björn Ü', claims: { role: 'admin', tags: ['ä'] } }
   const r = await call(spec.sock, 'GET', '/ctx', { headers: userHeaders(user) })
   assert.equal(r.status, 200)
@@ -147,10 +149,13 @@ test('a real worker: ctx shape, env, req.user, control lane, health, teardown on
   const slot = await call(spec.sock, 'GET', '/slot')
   assert.deepEqual(slot.json, { n: 2, same: true })
 
-  // SIGTERM → teardown runs (the module's child dies) → exit 0
+  // SIGTERM → teardown runs (the module's child dies) → the in-flight response still completes → exit 0
   assert.doesNotThrow(() => process.kill(childPid, 0))
+  const slow = call(spec.sock, 'GET', '/slow')
+  await new Promise((r) => setTimeout(r, 50))
   const stopped = await h.stop(3000)
   assert.deepEqual(stopped, { code: 0, signal: null, killed: false })
+  assert.deepEqual((await slow).json, { slow: true }, 'a response in flight at SIGTERM is finished, not cut')
   assert.ok(await until(() => { try { process.kill(childPid, 0); return false } catch { return true } }))
   assert.ok(logs.some(([, l]) => l === 'TEARDOWN ran'))
   assert.deepEqual(exits, [[0, null]])

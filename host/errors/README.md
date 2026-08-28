@@ -13,7 +13,7 @@ re-implemented; the spine runs the same file (ported, vectors copied: `agent-orc
 | `collector.mjs` | the one entry point; fingerprint, the 1 s tally, stale-rev, fan-out | `createCollector({log, now, timers})` → `.report(kind, instance, rev, detail)`, `.setRunning(instance, rev)`, `.running(instance)`, `.sink(fn)`, `.recent(instance, n)`, `.flush()`; `exitDetail(code, signal)` |
 | `report.mjs` | `POST /_atelier/report` body → a `frontend` event | `frontendReport({collector})` → `(body, {instance})` → `{ok, fingerprint}` \| `{ok:false, reason}` |
 | `agentlog.mjs` | `/work/.atelier/agent.log` writer, `0:1000 0640`, never throws | `agentLog({os, path, slugOf})` → `.line`, `.live/.failed/.stopped/.resumed/.killed`, `.appError` (the sink), `.lost`; `formatAppError(ev, {slug, running})` |
-| `push.mjs` | app-error → spine through the registrar transport | `push({transport, running, log})` → `sink(ev)` with `.size() .inFlight() .dropped() .idle() .stop()` |
+| `push.mjs` | app-error → spine through `registrar.lane.appError` (re-registers on `401 host-epoch-moved`) | `push({transport, running, log})` → `sink(ev)` with `.size() .inFlight() .dropped() .idle() .stop()` |
 | `watchdog.mjs` | RSS kill, CPU throttle, disk + /dev/shm stop/resume | `createWatchdog({os, workers, report, kill, dataRoot, now, timers, log})` → `.start() .stop() .tick() .diskTick() .duTick() .state()` |
 | `limits.mjs` | the rlimit numbers | `rlimitsFor(instance, {data?})`, `maxOldSpaceMb(data)`, `nodeArgv(rlimits)`, `rssCapKb(data)` |
 
@@ -112,8 +112,8 @@ default 1 GiB, core 0, the formulas. `host/test/errors.helpers.js` is the fake c
    names it; freeing to < 90 % resumes it.
 5. `agent.log` stat `0:1000 0640` under the dirfd; a full volume → the line on stderr and
    `.lost` > 0, host alive.
-6. The push against the real registrar transport: `401 host-epoch-moved` → re-registration by the
-   transport and the retried event delivered once.
+6. The push against the real registrar lane: `401 host-epoch-moved` → re-registration by the
+   registrar's `call()` and the retried event delivered once.
 
 ## Open (this lane)
 

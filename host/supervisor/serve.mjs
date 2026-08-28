@@ -34,8 +34,9 @@ export function safeRel(rel) {
  */
 // mountRelative(url, row) → the path the worker's router sees: `/api/<company>/<slug>` stripped
 // (DESIGN §4.3: req.url reaches the supervisor untouched; the mount is derivable from the row).
+export const mountOf = (row) => `/api/${row.company}/${row.slug}`
 export function mountRelative(url, row) {
-  const mount = `/api/${row.company}/${row.slug}`
+  const mount = mountOf(row)
   if (url === mount || url.startsWith(mount + '/') || url.startsWith(mount + '?')) {
     const rest = url.slice(mount.length)
     return rest.startsWith('/') ? rest : '/' + rest
@@ -50,6 +51,7 @@ export function createServe({ row: rowOf, store, proxy, resume, awaitBuild = asy
     const row = rowOf(appRow.instance)
     if (!row || row.state === 'unclaimed') return json(res, 404, { error: 'not found' })
     let live = row.live
+    if (!live && row.installing) { await row.installing; live = row.live }     // a two-phase install: the freeze SIGKILLs the worker uid — no resume into it
     if (!live && row.building) { await awaitBuild(row); live = row.live }
     if (!live && row.rev != null) live = await resume(row)
     if (!live) return json(res, 503, { error: 'app not ready' })
@@ -58,7 +60,7 @@ export function createServe({ row: rowOf, store, proxy, resume, awaitBuild = asy
     row.inflight++
     row.lastServedAt = Date.now()
     try {
-      return await proxy({ sock: live.sock, req, res, user, path: mountRelative(req.url, row), bodyCap: timing.bodyCap, timeoutMs: timing.proxyTimeoutMs })
+      return await proxy({ sock: live.sock, req, res, user, path: mountRelative(req.url, row), mount: mountOf(row), bodyCap: timing.bodyCap, timeoutMs: timing.proxyTimeoutMs })
     } finally {
       row.inflight--
       row.lastServedAt = Date.now()

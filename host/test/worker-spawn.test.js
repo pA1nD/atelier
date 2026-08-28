@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { memory } from '../adapters/os.mjs'
-import { spawnPlan, spawnWorker, workerEnv, workerJson, maxOldSpaceMb, publishedAddress, lineSplitter, RUNTIME_PATH, MB } from '../worker/spawn.mjs'
+import { spawnPlan, spawnWorker, workerEnv, workerJson, configEnvOf, configPayload, maxOldSpaceMb, publishedAddress, lineSplitter, RUNTIME_PATH, MB } from '../worker/spawn.mjs'
 
 const GiB = 1024 * MB
 const spec = {
@@ -12,7 +12,7 @@ const spec = {
   dataDir: '/proc/self/fd/3/data/i-0123456789abcdef', tmpDir: '/proc/self/fd/3/tmp/i-0123456789abcdef',
   sockDir: '/run/atelier/w/i-0123456789abcdef', sock: '/run/atelier/w/i-0123456789abcdef/w.sock',
   baseUrl: 'https://acme.portal.pa1nd.de/api/acme/demo', origin: 'https://acme.portal.pa1nd.de',
-  configEnv: { OPENAI_KEY: 'sk-x', HOME: '/evil' },
+  configEnv: { OPENAI_KEY: 'sk-x', HOME: '/evil', LD_PRELOAD: '/tmp/evil.so', NODE_OPTIONS: '--require /tmp/x', 'BAD KEY': '1', ATELIER_WORKER: '{}' },
   rlimits: { data: GiB, core: 0, nproc: 64, nofile: 1024 },
 }
 const hostEnv = { PATH: '/usr/local/bin:/usr/bin:/bin', NODE_ENV: 'production', ATELIER_BOOTSTRAP: 'secret', CHANNEL_TOKEN: 'secret' }
@@ -28,19 +28,23 @@ test('HOST/PORT/BASE_URL are published from the mount URL (§9.12)', () => {
   assert.deepEqual(publishedAddress({ ...spec, origin: 'http://127.0.0.1:1844', baseUrl: 'http://127.0.0.1:1844/api/local/demo' }), { HOST: '127.0.0.1', PORT: '1844', BASE_URL: 'http://127.0.0.1:1844/api/local/demo' })
 })
 
-test('workerEnv is row W exactly: nothing from process.env, config keys cannot override the jail keys', () => {
+test('workerEnv is row W exactly: nothing from process.env, NO config key (the env reaches the root wrapper chain); config travels on stdin minus the jail keys and the loader/runtime knobs', () => {
   const env = workerEnv(spec, hostEnv)
-  assert.deepEqual(Object.keys(env), ['OPENAI_KEY', 'PATH', 'NODE_ENV', 'APP_ID', 'HOME', 'HOST', 'PORT', 'BASE_URL', 'TMPDIR', 'ATELIER_WORKER'])
+  assert.deepEqual(Object.keys(env), ['PATH', 'NODE_ENV', 'APP_ID', 'HOME', 'HOST', 'PORT', 'BASE_URL', 'TMPDIR', 'ATELIER_WORKER'])
   assert.equal(env.HOME, '/proc/self/fd/3/scratch/i-0123456789abcdef/home')      // derived from dataDir when scratchDir is absent
   assert.equal(workerEnv({ ...spec, scratchDir: '/s/i-x' }, hostEnv).HOME, '/s/i-x/home')
   assert.equal(env.APP_ID, 'i-0123456789abcdef')
   assert.equal(env.TMPDIR, spec.tmpDir)
-  assert.equal(env.OPENAI_KEY, 'sk-x')
+  assert.equal('OPENAI_KEY' in env, false)
+  assert.equal('LD_PRELOAD' in env, false)
   assert.equal('ATELIER_BOOTSTRAP' in env, false)
   assert.equal('CHANNEL_TOKEN' in env, false)
   assert.deepEqual(JSON.parse(env.ATELIER_WORKER), workerJson(spec))
   assert.equal('configEnv' in JSON.parse(env.ATELIER_WORKER), false)
   assert.equal('rlimits' in JSON.parse(env.ATELIER_WORKER), false)
+  assert.deepEqual(configEnvOf(spec), { env: { OPENAI_KEY: 'sk-x' }, dropped: ['HOME', 'LD_PRELOAD', 'NODE_OPTIONS', 'BAD KEY', 'ATELIER_WORKER'] })
+  assert.equal(configPayload(spec), '{"env":{"OPENAI_KEY":"sk-x"}}')
+  assert.deepEqual(configEnvOf({}), { env: {}, dropped: [] })
 })
 
 test('spawnPlan → SpawnSpec row W; the memory adapter wraps it byte-exact (sh umask+oom → prlimit → setpriv → node)', () => {
@@ -48,8 +52,9 @@ test('spawnPlan → SpawnSpec row W; the memory adapter wraps it byte-exact (sh 
   assert.deepEqual({ ...plan, env: null }, {
     argv: ['node', '--max-old-space-size=380', RUNTIME_PATH],
     env: null, cwd: '/', uid: 20001, gid: 20001, groups: [], rlimits: spec.rlimits, oomScoreAdj: 1000, umask: 0o002,
-    stdio: ['ignore', 'pipe', 'pipe', 'pipe'], detached: true,
+    stdio: ['pipe', 'pipe', 'pipe', 'pipe'], detached: true,
   })
+  assert.equal(Object.values(plan.env).some((v) => /sk-x|evil/.test(v)), false, 'no config value in the env the root chain receives')
   const state = {}
   const os = memory(state)
   const child = os.spawn(plan)
@@ -85,7 +90,10 @@ test('READY on fd 3 resolves the handle, locks the socket 0:0 0700, then control
   assert.equal(h.pid, child.pid)
   assert.equal(h.sock, spec.sock)
   assert.deepEqual(h.ready, ready)
-  assert.deepEqual(state.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700]])
+  // the config lane: one JSON document on stdin, then EOF — before READY, never through the env
+  assert.deepEqual(child.stdin.written, ['{"env":{"OPENAI_KEY":"sk-x"}}']); assert.equal(child.stdin.ended, true)
+  assert.equal(child.spec.env.OPENAI_KEY, undefined)
+  assert.deepEqual(state.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700], ['chmod', spec.sockDir, 0o710]])
   assert.deepEqual(control, [{ t: 'broadcast', event: { type: 'x' } }])
   child.stdio[3].emit('data', '{"t":"suspendable"}\n')
   assert.equal(control.length, 2)
@@ -116,7 +124,7 @@ test('no READY within readyTimeoutMs → no-ready and SIGKILL', async () => {
   assert.ok(os.kind === 'memory')
 })
 
-test('stop(): SIGTERM, then the process group is SIGKILLed at the drain deadline', async () => {
+test('stop(): SIGCONT (a stopped worker can run its teardown) → SIGTERM, then the process group is SIGKILLed at the drain deadline', async () => {
   let state = {}
   let { p, child } = boot(state)
   child.stdio[3].emit('data', '{"t":"ready","mountMs":1,"importMs":1,"resources":{},"teardown":false}\n')
@@ -124,7 +132,7 @@ test('stop(): SIGTERM, then the process group is SIGKILLed at the drain deadline
   const signals = []
   child.onSignal = (s) => { signals.push(s); if (s === 'SIGTERM') setTimeout(() => child.exit(0), 5) }
   let r = await h.stop(500)
-  assert.deepEqual(signals, ['SIGTERM'])
+  assert.deepEqual(signals, ['SIGCONT', 'SIGTERM'])
   assert.deepEqual(r, { code: 0, signal: null, killed: false })
 
   state = {}
@@ -135,5 +143,5 @@ test('stop(): SIGTERM, then the process group is SIGKILLed at the drain deadline
   r = await h.stop(20)
   assert.equal(r.killed, true)
   const kills = state.calls.filter((c) => c[0] === 'kill').map((c) => c.slice(1))
-  assert.deepEqual(kills, [[child.pid, 'SIGTERM'], [-child.pid, 'SIGKILL'], [child.pid, 'SIGKILL']])
+  assert.deepEqual(kills, [[child.pid, 'SIGCONT'], [child.pid, 'SIGTERM'], [-child.pid, 'SIGKILL'], [child.pid, 'SIGKILL']])
 })

@@ -133,6 +133,9 @@ export function world({ chromeDir = null, timing = {}, gitCommit = false } = {})
       return { ...c, claimed: true }
     },
     async unlink(inst) { registrar.unlinked.push(inst) },
+    // reconcile(rows): records its input (the DISCOVERED folders); `reconcileImpl` lets a test tombstone
+    reconcileCalls: [], reconcileImpl: null,
+    async reconcile(rows) { registrar.reconcileCalls.push(rows); return registrar.reconcileImpl ? registrar.reconcileImpl(rows) : { unlinked: [] } },
   }
   const make = (extra = {}) => createSupervisor({
     os: osx, dirfd, cfg: { work, run, chromeDir, gitCommit, company: 'acme' }, log: (l) => lines.push(l),

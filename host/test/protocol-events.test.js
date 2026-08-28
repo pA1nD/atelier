@@ -69,6 +69,27 @@ test('a failed push keeps the instances pending and re-mints on retry; unregiste
   held.stop()
 })
 
+test('frames the ring rejected as stale-epoch / unregistered go back to pending and are re-minted under the current stream; other rejections are dropped', async () => {
+  const t = fakeTransport()
+  let rejectNext = null
+  t.events = async (b) => { t.batches.push(b); const rejected = rejectNext ?? []; rejectNext = null; return { accepted: b.length - rejected.length, rejected } }
+  let epoch = 'e1'
+  const ev = createEvents({ transport: t, hostId: 'h', epoch: () => epoch, flushMs: 1 })
+  ev.invalidate('i-a'); ev.invalidate('i-b'); ev.invalidate('i-c')
+  rejectNext = [{ index: 0, reason: 'stale-epoch' }, { index: 1, reason: 'unregistered' }, { index: 2, reason: 'seq-not-monotonic' }]
+  await ev.flush()
+  assert.deepEqual([...ev.pending].sort(), ['i-a', 'i-b'], 'the two recoverable rejections are pending again; the seq bug is dropped')
+  assert.equal(ev.stats.requeued, 2); assert.equal(ev.stats.rejected, 3)
+  epoch = 'e2'
+  await ev.flush()
+  assert.deepEqual(t.batches[1], [
+    { stream: 'h:e2', topic: 'i-a', seq: 1, type: 'invalidate' },
+    { stream: 'h:e2', topic: 'i-b', seq: 1, type: 'invalidate' },
+  ])
+  assert.equal(ev.pending.size, 0)
+  ev.stop()
+})
+
 test('invalid instance ids are ignored; drain() pushes once within its cap', async () => {
   const t = fakeTransport()
   const ev = createEvents({ transport: t, hostId: 'h', epoch: 'e', flushMs: 10_000 })

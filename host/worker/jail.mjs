@@ -8,7 +8,9 @@
 //     then chowned. Chmod-before-chown needs no FOWNER; the directory setgid bit survives a chown
 //     (the kernel kills SUID/SGID on chown for regular files only).
 //   - the only chmod-after-chown sites are the two round trips of §6.2: claimRoundTrip (a) and
-//     dataFileRoundTrip (b) — chown to root, join the group, chmod, chown back, drop the group.
+//     dataFileRoundTrip (b) — chown to root, join the group, chmod, chown back, drop the group;
+//     both act on an O_NOFOLLOW fd after an fstat guard (`fdTrip`), never on a path, because the
+//     entry lives in an agent-owned directory the agent can swap for a symlink at any moment.
 //   - the host never writes into an agent-owned (1000) or worker-owned directory as root.
 import path from 'node:path'
 
@@ -88,40 +90,79 @@ export function applyJail(os, steps, log = () => {}) {
   return { ok: true, results }
 }
 
-/** After READY: the socket the worker bound (`<uid>:<uid>`) becomes `0:0 0700` — only the host dials it. */
+/**
+ * After READY: the socket the worker bound (`<uid>:<uid>`) becomes `0:0 0700` — only the host dials
+ * it — and the socket dir drops the worker's write bit (`0730` → `0710`): the worker cannot fill the
+ * `/run/atelier` tmpfs for life; `jailPlan` re-sets `0730` before the next spawn (prepareDirs).
+ */
 export function afterReady(os, spec, log = () => {}) {
   return applyJail(os, [
     { op: 'chown', path: spec.sock, uid: 0, gid: 0 },
     { op: 'chmod', path: spec.sock, mode: 0o700 },
+    ...(spec.sockDir ? [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }] : []),
   ], log)
 }
 
+// The fd-based round trips (§6.2). chown(2)/chmod(2) follow symlinks, and both round trips act on
+// an inode inside an AGENT-owned directory — the agent can swap the entry for a symlink between the
+// check and the chown (PLAN §4.3 "Symlink rule": realpath→open is a TOCTOU). So: open the entry
+// O_NOFOLLOW → fstat the pinned inode → refuse anything but the expected type/owner → fchown /
+// fchmod on the fd → close. A refusal or an errno stops the trip; nothing is chowned by path.
+function fdTrip(os, path, { open, expect, steps, groups }, log) {
+  const results = []
+  const fail = (step, code) => { log(`[priv] ${step.op} ${path}: ${code}`); results.push({ step, ok: false, code }); return { ok: false, results } }
+  const before = groups !== undefined ? os.getgroups() : null
+  if (groups !== undefined) { try { os.setgroups(groups) } catch (e) { return fail({ op: 'setgroups', groups }, e.code ?? 'EIO') } }
+  let fd
+  try {
+    try { fd = open() } catch (e) { return fail({ op: 'open', path }, e.code ?? 'EIO') }
+    let st
+    try { st = os.fstat(fd) } catch (e) { return fail({ op: 'fstat', path }, e.code ?? 'EIO') }
+    const why = expect(st)
+    if (why) return fail({ op: 'fstat', path }, why)
+    results.push({ step: { op: 'fstat', path }, ok: true })
+    for (const step of steps) {
+      try {
+        if (step.op === 'fchown') os.fchown(fd, step.uid, step.gid)
+        else if (step.op === 'fchmod') os.fchmod(fd, step.mode)
+      } catch (e) { return fail(step, e.code ?? 'EIO') }
+      log(`[priv] ${step.op} ${path}: ok`)
+      results.push({ step, ok: true })
+    }
+    return { ok: true, results }
+  } finally {
+    if (fd !== undefined) { try { os.closeFd(fd) } catch {} }
+    if (before) { try { os.setgroups(before) } catch (e) { log(`[priv] setgroups restore: ${e.code ?? e.message}`) } }
+  }
+}
+
 /**
- * §6.2(a) — the agent-created `1000:1000` app folder becomes `1000:<uid> 2750` at claim:
- * chown 0:<uid> → setgroups([<uid>]) → chmod 2750 → chown 1000:<uid> → restore the host's groups.
- * The setgid bit sticks only while the caller is a member of the dir's group (g2 T0b), hence the
- * setgroups around the chmod; root owns the inode at that moment, so no FOWNER is needed.
+ * §6.2(a) — the agent-created `1000:1000` app folder becomes `1000:<uid> 2750` at claim, on an fd:
+ * setgroups([<uid>]) (a re-claim finds the folder `2750 1000:<uid>` — root enters it only as a group
+ * member; the setgid bit also sticks only while the caller is in the dir's group, g2 T0b) → open
+ * O_DIRECTORY|O_NOFOLLOW → fstat must be a directory owned by 1000 with gid 1000 or <uid> (anything
+ * else — a swapped-in root inode, a symlink — is refused as EOWNER/ELOOP and left untouched) →
+ * fchown 0:<uid> → fchmod 2750 → fchown 1000:<uid> → close → the host's groups restored.
  */
 export function claimRoundTrip(os, appDir, uid, log = () => {}) {
-  const before = os.getgroups()
-  const r = applyJail(os, [
-    { op: 'chown', path: appDir, uid: 0, gid: uid },
-    { op: 'setgroups', groups: [uid] },
-    { op: 'chmod', path: appDir, mode: 0o2750 },
-    { op: 'chown', path: appDir, uid: AGENT.uid, gid: uid },
-  ], log)
-  applyJail(os, [{ op: 'setgroups', groups: before }], log)
-  return r
+  return fdTrip(os, appDir, {
+    groups: [uid],
+    open: () => os.openDir(appDir),
+    expect: (st) => (!st.isDirectory() ? 'ENOTDIR' : st.uid !== AGENT.uid || (st.gid !== AGENT.gid && st.gid !== uid) ? 'EOWNER' : null),
+    steps: [{ op: 'fchown', uid: 0, gid: uid }, { op: 'fchmod', mode: 0o2750 }, { op: 'fchown', uid: AGENT.uid, gid: uid }],
+  }, log)
 }
 
 /**
- * §6.2(b) — an agent-created sqlite `-wal`/`-shm` found `0644` inside dataDir becomes
- * `<uid>:19999 0660` by the same round trip (chown to root → chmod → chown on).
+ * §6.2(b) — an agent-created sqlite `-wal`/`-shm` found `0644` inside dataDir becomes `<uid>:19999 0660`
+ * by the same trip: open O_NOFOLLOW → fstat must be a regular file with one link owned by 1000 →
+ * fchown 0:19999 → fchmod 0660 → fchown <uid>:19999. The caller holds group 19999 (dataDir is
+ * `<uid>:19999 2770`; root without DAC cannot enter it otherwise).
  */
 export function dataFileRoundTrip(os, file, uid, log = () => {}) {
-  return applyJail(os, [
-    { op: 'chown', path: file, uid: 0, gid: AGENT_DATA_GID },
-    { op: 'chmod', path: file, mode: 0o660 },
-    { op: 'chown', path: file, uid, gid: AGENT_DATA_GID },
-  ], log)
+  return fdTrip(os, file, {
+    open: () => os.openFile(file),
+    expect: (st) => (!st.isFile() ? 'ENOTREG' : st.nlink !== 1 ? 'EMLINK' : st.uid !== AGENT.uid ? 'EOWNER' : null),
+    steps: [{ op: 'fchown', uid: 0, gid: AGENT_DATA_GID }, { op: 'fchmod', mode: 0o660 }, { op: 'fchown', uid, gid: AGENT_DATA_GID }],
+  }, log)
 }

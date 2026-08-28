@@ -55,9 +55,11 @@ fresh `i-<16 hex>`; the uid is the row's, else the `<inst>/uid` marker's, else t
 `20000+i` from 20001. Verdicts `claimed | adopted | revived`; a 4xx from the registry or a bad slug
 is `{refused:{code, error}}` plus `CLAIM-REFUSED.txt` written **as uid 1000** through
 `os.spawnSync` (row G shape: `setpriv --reuid=1000 --regid=1000 --clear-groups`, env `{PATH}`,
-umask 022, `node -e … wx 0644`) — never root into the agent's folder. Markers `<inst>/slug`
-(0644), `<inst>/uid` (0644), `<inst>/registered.json` (0600) are `os.at(dirfd, …)` writes under
-`/work/.atelier/<inst>/` (mkdir 0711). The uid reaches the spine with the first
+umask 022, `node -e … wx 0644`) — never root into the agent's folder. Markers `<inst>/slug`,
+`<inst>/uid`, `<inst>/registered.json` (each 0600 — the host's alone) are `os.at(dirfd, …)` writes
+under `/work/.atelier/<inst>/` (mkdir 0711). `registrar.lane` = `{events(batch), appError(body)}`
+routed through `call()`, so a `401 host-epoch-moved` on either push lane re-registers and retries
+once like every registry write. The uid reaches the spine with the first
 `modulesChanged(instance, rev)` (`{apps:[{instance, slug, uid, rev}]}`) and comes back in
 `register().apps`. `heartbeat(10 s)` posts `{visible_apps, last_served_at, pod_ip}`,
 `visible_apps` = live workers (`liveWorkers()`) ∪ instances served in the last 10 min

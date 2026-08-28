@@ -4,10 +4,10 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { createAuth } from '../protocol/auth.mjs'
-import { createServer, parseMount, safeRel } from '../protocol/server.mjs'
+import { createServer, parseMount, safeRel, closeDraining } from '../protocol/server.mjs'
 import { fakeRegistrar, fakeSupervisor, fakeCollector, keys, assertionFor, request, tmp } from './protocol-fixtures.mjs'
 
-function rig() {
+function rig({ refuse } = {}) {
   const { privateKey, publicKey } = keys()
   const registrar = fakeRegistrar({ hostId: 'computer-1', epoch: 'e1', token: 'tok1', publicKey })
   const rows = [
@@ -24,7 +24,7 @@ function rig() {
   const logs = []
   const auth = createAuth({ registrar, devToken: null, log: (l) => logs.push(l) })
   const dir = tmp()
-  const server = createServer({ cfg: {}, auth, supervisor, collector, registrar, log: (l) => logs.push(l), listen: { path: path.join(dir, 'h.sock') } })
+  const server = createServer({ cfg: {}, auth, supervisor, collector, registrar, log: (l) => logs.push(l), listen: { path: path.join(dir, 'h.sock') }, refuse })
   const bearer = () => ({ authorization: `Bearer ${registrar.epoch}.${registrar.token}` })
   const withId = (method, p, instance, extra = {}) => ({ ...bearer(), 'x-atelier-identity': assertionFor(privateKey, { hostId: 'computer-1', instance, method, path: p }), ...extra })
   return { privateKey, registrar, supervisor, collector, auth, server, target: { socketPath: path.join(dir, 'h.sock') }, bearer, withId, logs, rows }
@@ -145,6 +145,43 @@ test('/_atelier/apps and /_host/healthz are bearer-only; Upgrade → 426', async
     res = await request(r.target, { path: '/api/acme/todo/stream', headers: { ...r.bearer(), connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'x', 'sec-websocket-version': '13' } })
     assert.equal(res.status, 426)
   } finally { await r.server.close() }
+})
+
+test('refuse(): a host fault answers 503 before auth or any route', async () => {
+  let fault = null
+  const r = rig({ refuse: () => fault })
+  await r.server.listen()
+  try {
+    assert.equal((await request(r.target, { path: '/_host/healthz', headers: r.bearer() })).status, 200)
+    fault = '.atelier renamed'
+    const res = await request(r.target, { path: '/_host/healthz', headers: r.bearer() })
+    assert.equal(res.status, 503); assert.deepEqual(JSON.parse(res.body.toString()), { error: 'host fault', reason: '.atelier renamed' })
+    assert.equal((await request(r.target, { path: '/api/acme/todo/items', headers: r.withId('GET', '/api/acme/todo/items', 'i-0123456789abcdef') })).status, 503)
+    assert.equal(r.supervisor.handled.length, 0)
+  } finally { await r.server.close() }
+})
+
+test('close(drainMs): stops accepting, lets an in-flight request finish, cuts only at the deadline', async () => {
+  const r = rig()
+  await r.server.listen()
+  const inst = 'i-0123456789abcdef'
+  const slow = request(r.target, { path: '/api/acme/todo/x?hold=300', headers: r.withId('GET', '/api/acme/todo/x?hold=300', inst) })
+  await new Promise((res) => setTimeout(res, 50))
+  const t0 = Date.now()
+  await r.server.close(5000)
+  assert.ok(Date.now() - t0 >= 200, 'close waited for the in-flight request')
+  assert.equal((await slow).status, 200)
+  await assert.rejects(request(r.target, { path: '/_host/healthz', headers: r.bearer() }), 'no new connection after close')
+  // the deadline cuts what is still open
+  const r2 = rig()
+  await r2.server.listen()
+  const cut = request(r2.target, { path: '/api/acme/todo/x?hold=2000', headers: r2.withId('GET', '/api/acme/todo/x?hold=2000', inst) }).catch((e) => ({ status: 'cut', code: e.code }))
+  await new Promise((res) => setTimeout(res, 50))
+  const t1 = Date.now()
+  await r2.server.close(100)
+  assert.ok(Date.now() - t1 < 1500)
+  assert.equal((await cut).status, 'cut')
+  assert.equal(typeof closeDraining, 'function')
 })
 
 test('streaming: a 1 MiB body reaches the supervisor counted; a 4 MiB response streams back counted (C3 rows)', async () => {

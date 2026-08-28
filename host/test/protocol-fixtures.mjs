@@ -27,7 +27,8 @@ export function fakeCollector() {
 }
 
 // fakeSupervisor({rows}): resolve/apps/handle/asset. handle echoes the user and counts the body
-// bytes as JSON; `?big=N` streams N bytes back in 64 KiB chunks. asset serves per-rev bytes.
+// bytes as JSON; `?big=N` streams N bytes back in 64 KiB chunks; `?hold=MS` answers after MS ms
+// (an in-flight request across a listener close). asset serves per-rev bytes.
 export function fakeSupervisor({ rows = [], assets = {} } = {}) {
   const handled = []
   return {
@@ -38,8 +39,10 @@ export function fakeSupervisor({ rows = [], assets = {} } = {}) {
     handle: (row, req, res, user) => new Promise((resolve) => {
       let bytes = 0
       req.on('data', (c) => { bytes += c.length })
-      req.on('end', () => {
+      req.on('end', async () => {
         handled.push({ instance: row.instance, method: req.method, url: req.url, user, bytes })
+        const hold = /[?&]hold=(\d+)/.exec(req.url)
+        if (hold) await new Promise((r) => setTimeout(r, Number(hold[1])))
         const big = /[?&]big=(\d+)/.exec(req.url)
         if (big) {
           res.writeHead(200, { 'content-type': 'application/octet-stream' })

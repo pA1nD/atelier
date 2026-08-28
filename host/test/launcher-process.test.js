@@ -69,7 +69,7 @@ test('real process: plan on disk, fd 3 to the host, crash → helper line → re
   const out = r.out()
   assert.equal(code, 3, out)
   // the plan landed with its modes (umask 0 while the plan ran)
-  assert.equal(mode(`${p.work}/.atelier`), '0755'); assert.equal(mode(`${p.work}/.atelier/data`), '0711'); assert.equal(mode(`${p.work}/.atelier/last-good`), '0711'); assert.equal(mode(`${p.work}/.atelier/scratch`), '0711')
+  assert.equal(mode(`${p.work}/.atelier`), '0711'); assert.equal(mode(`${p.work}/.atelier/data`), '0711'); assert.equal(mode(`${p.work}/.atelier/last-good`), '0711'); assert.equal(mode(`${p.work}/.atelier/scratch`), '0711')
   assert.equal(mode(`${p.work}/apps`), '0755'); assert.equal(mode(p.run), '0711'); assert.equal(mode(`${p.run}/dev`), '0710'); assert.equal(mode(`${p.run}/session`), '0700')
   assert.equal(mode(`${p.tmp}/tmux-1000`), '0700')
   // mkdir(2) honours the sticky bit on Linux only (BSD/macOS clear it) — the Linux drill stats /tmp/.X11-unix 1777

@@ -23,14 +23,18 @@ export const VERIFIED_IN_BYTES = 1024 * 1024        // C3 row: POST 1 MiB body, 
 export const VERIFIED_OUT_BYTES = 4 * 1024 * 1024   // C3 row: GET 4 MiB chunked, counted at the shell
 export const USER_HEADERS = ['x-atelier-user', 'x-atelier-name', 'x-atelier-claims']
 
-// stampUser(headers, user) → the three internal identity headers, set after the strip.
-export function stampUser(headers, user) {
-  const out = { ...headers }
-  out['x-atelier-user'] = String(user.id)
-  out['x-atelier-name'] = String(user.name ?? '')
-  out['x-atelier-claims'] = JSON.stringify(user.claims ?? {})
-  return out
+// userHeaders(user) → the three internal identity headers. HTTP header values are latin1: the name is
+// percent-encoded and the claims JSON is ASCII-escaped (worker/runtime.mjs `userFromHeaders` reverses both).
+const asciiJson = (v) => JSON.stringify(v ?? {}).replace(/[\u007f-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
+export function userHeaders(user) {
+  return {
+    'x-atelier-user': String(user.id),
+    'x-atelier-name': encodeURIComponent(String(user.name ?? '')),
+    'x-atelier-claims': asciiJson(user.claims),
+  }
 }
+// stampUser(headers, user) → the headers with the three internal identity headers set, after the strip.
+export const stampUser = (headers, user) => ({ ...headers, ...userHeaders(user) })
 
 // inbound(req, {user, cap}) → {ok:true, headers, stripped, dropped, contentLength}
 //                           | {ok:false, status:400|413, reason:'framing'|'body-cap'}

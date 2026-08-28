@@ -196,11 +196,14 @@ supervisor alone carries `[19999]`; the host adds an `appgid` to its own supplem
 ### 2.3 Teardown order (host SIGTERM)
 
 1. `registrar.draining()` → spine `draining_at` (fleet), stop accepting new connections
-   (`server.close()`, dev shell closes).
-2. Every worker: SIGTERM → wait ≤ 2 s for exit (the runtime runs the module teardown, closes its
-   socket, exits) → `SIGKILL` the process group at the deadline.
-3. Pending event batch flushed once (best effort, 1 s cap), agent.log line `host: stopped`.
-4. Exit 0. The launcher forwards this order in §2.1 step 6 so it completes before PID 1 exits.
+   (`server.close(drainMs)` / the dev shell: idle keep-alive sockets closed, in-flight requests
+   finish for up to 20 s — the §4.7 25 s long-poll fits inside the 30 s cap — then cut).
+2. `watchdog.stop()`: SIGCONT every SIGSTOPped worker (a stopped process cannot run a teardown).
+3. Every worker: SIGCONT → SIGTERM → wait ≤ 2 s for exit (the runtime stops accepting, runs the
+   module teardown, finishes its in-flight responses ≤ 1.5 s, exits) → `SIGKILL` the process group
+   at the deadline.
+4. Pending event batch flushed once (best effort, 1 s cap), agent.log line `host: stopped`.
+5. Exit 0. The launcher forwards this order in §2.1 step 6 so it completes before PID 1 exits.
 
 ## 3. Filesystem contract
 
@@ -217,10 +220,10 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/apps/<slug>/node_modules` | `1000:<uid>` dirs 0750 files 0640 (`|050`/`|040` normalised) | freeze.py | never written by root; installed in scratch, renamed in as uid 1000 |
 | `/work/apps/<slug>/CLAIM-REFUSED.txt` | `1000:1000 0644` | registrar via row G-style uid-1000 write | the only host write into an app folder, as uid 1000, `O_NOFOLLOW`, `wx` |
 | `/work/apps/<slug>/.git` | `1000:1000` | git as 1000 (row G) | one commit per LIVE revision |
-| `/work/.atelier` | `0:0 0755` | launcher | the dirfd root; markers below are `at(dirfd, …)` writes |
+| `/work/.atelier` | `0:0 0711` | launcher | the dirfd root; markers below are `at(dirfd, …)` writes; a worker cannot enumerate its peers' instance ids |
 | `/work/.atelier/agent.log` | `0:1000 0640` | host (`errors/agentlog.mjs`) | agent reads; workers cannot (groups cleared) |
 | `/work/.atelier/registry.json` | `0:0 0600` | registrar, local mode only | the folder registry (§7 `localTransport`) |
-| `/work/.atelier/<inst>/` | `0:0 0711` | host at claim | markers: `slug` (0644), `uid` (0644), `revision.json` (0644, `{rev, sha256, bytes, builtAt, host, chrome, protocol}`), `current` → `../last-good/<inst>/rev-N` (symlink, atomic rename), `registered.json` (0600: `{instance, slug, uid, company}`) |
+| `/work/.atelier/<inst>/` | `0:0 0711` | host at claim | markers, every one `0600` (the host's alone): `slug`, `uid`, `revision.json` (`{rev, sha256, bytes, builtAt, host, chrome, protocol}`), `current` → `../last-good/<inst>/rev-N` (symlink, atomic rename), `registered.json` (`{instance, slug, uid, company}`) |
 | `/work/.atelier/data` | `0:0 0711` | launcher | |
 | `/work/.atelier/data/<inst>` | `<uid>:<agid> 2770` | host at claim (mkdir, chown) | `ctx.dataDir`; agent in group via 19999; peers EACCES; data files 0660 (worker umask 002, agent umask 002 inside — the worker chmods sqlite `-wal`/`-shm` it creates to 0660, round trip §6.2(b) for agent-created ones) |
 | `/work/.atelier/last-good` | `0:0 0711` | launcher | |
@@ -229,15 +232,15 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/.atelier/scratch` | `0:0 0711` | launcher | |
 | `/work/.atelier/scratch/<inst>` | `0:<uid> 0750` | host at first install | `home/` `<uid>:<uid> 0700` (npm HOME + cache), `build/` `<uid>:<uid> 0755` (package.json copy, node_modules) |
 | `/work/.atelier/tmp/<inst>` | `<uid>:<uid> 0700` | host at claim | worker `TMPDIR` (keeps `/dev/shm` clean) |
-| `/run/atelier` | `0:0 0711` | launcher | tmpfs |
+| `/run/atelier` | `0:0 0711` | launcher | tmpfs; the mount arrives `1777` and the launcher's plan chmods it `0711` right after its mkdir — before the tokens and before any uid-1000 process exists (`chmodIfRootOwned`); the host refuses to start when `$run`, `$run/w` or `.atelier/tmp` exist owned by another uid |
 | `/run/atelier/bootstrap.token` | `0:0 0400` | launcher | read once by the host, exchanged at registration |
 | `/run/atelier/dev.token` | `0:0 0400` | launcher | the host's copy |
 | `/run/atelier/session/` | `1000:1000 0700` | launcher (populated before chown) | `dev.token` `1000:1000 0400` — the agent's copy |
-| `/run/atelier/host-ready` | `0:0 0644` | host after both listeners are up (fleet: after registration) | the kube readiness probe (step 5); unlinked by the launcher on host exit and by the host at teardown |
+| `/run/atelier/host-ready` | `0:0 0644` | host after the audit passed and both listeners are up (fleet: after registration) | the kube readiness probe (step 5); unlink + exclusive create (`wx`) — a pre-existing entry is never adopted; unlinked by the launcher on host exit, by the host at teardown and on a host fault |
 | `/run/atelier/dev/` | `0:1000 0710` | launcher | |
 | `/run/atelier/dev/shell.sock` | `0:1000 0660` | host (dev shell) | agent connects; workers EACCES |
-| `/run/atelier/w/<inst>/` | `0:<uid> 0730` | host at spawn | socket dir: the worker binds, cannot list |
-| `/run/atelier/w/<inst>/w.sock` | `<uid>:<uid>` at bind → `0:0 0700` after READY | worker binds; host chowns+chmods after READY | the dir keeps 0730 so a resumed worker can re-bind |
+| `/run/atelier/w/<inst>/` | `0:<uid> 0730` at spawn → `0710` after READY | host at spawn (`jailPlan`, re-set before every spawn) / `afterReady` | socket dir: the worker binds, cannot list; after READY it cannot write there either (no filling the `/run/atelier` tmpfs for life) |
+| `/run/atelier/w/<inst>/w.sock` | `<uid>:<uid>` at bind → `0:0 0700` after READY | worker binds; host chowns+chmods after READY | `prepareDirs` re-sets the dir 0730 before the next spawn so a resumed worker can re-bind |
 | `/control/.host-crash` | `1000:1000 0600` | launcher via the uid-1000 helper | JSON lines; the spine reads it (spine lane) |
 | `/tmp/tmux-1000` | `1000:1000 0700` | launcher | |
 | `/tmp/.X11-unix` | `0:0 1777` | launcher | |
@@ -466,14 +469,20 @@ the app folder as the current user and skips freeze (logged).
   with requests held (≤ 100 ms in a pod), never 502; a broken folder never affects a resume.
 - Boot: table from `last-good/*/` + markers; every row starts `stopped` (lazy resume); the first
   scan re-claims folders and rebuilds only folders whose fingerprint differs from `revision.json`.
-- Every LIVE rev → `git add -A . && git commit` as uid 1000 (row G), failures logged, never fatal.
+- Every LIVE rev → `git init` → `.git/info/exclude` (`node_modules/`, `data/`, `.atelier`, `CLAIM-REFUSED.txt` — the frozen tree and 1.x data never enter a commit) → `git add -A . && git commit`, all as uid 1000 (row G), serialized per app, failures logged, never fatal.
 
 ### 6.2 workers — ownership round trips (the only foreign-inode chmods)
-(a) at claim, the agent-created `1000:1000` folder: `chown 0:<uid>` → `setgroups([<uid>])` →
-`chmod 2750` → `chown 1000:<uid>` → restore groups. (b) agent-created sqlite `-wal`/`-shm` inside
-dataDir found `0644`: same round trip to `0660 <uid>:19999` (the watchdog's du pass reports them;
-the runtime's db helper chmods its own). `freeze.py` chmods only inodes root owns at that moment
-and refuses setuid/setgid files before any chown.
+Both act on an fd, never on a path: the entry lives in an agent-owned directory the agent can swap
+for a symlink between discovery and the round trip, and `chown(2)`/`chmod(2)` follow symlinks.
+(a) at claim, the agent-created `1000:1000` folder: `setgroups([<uid>])` → open
+`O_DIRECTORY|O_NOFOLLOW` → `fstat` must be a directory owned by 1000 with gid 1000 or `<uid>`
+(anything else — a symlink `ELOOP`, a swapped-in root inode `EOWNER`, a file `ENOTDIR` — is refused
+and left untouched) → `fchown 0:<uid>` → `fchmod 2750` → `fchown 1000:<uid>` → close → restore
+groups. (b) agent-created sqlite `-wal`/`-shm` inside dataDir found `0644`: open `O_NOFOLLOW` →
+`fstat` must be a regular file with one link owned by 1000 → `fchown 0:19999` → `fchmod 0660` →
+`fchown <uid>:19999` (the watchdog's du pass reports them; the runtime's db helper chmods its own).
+`freeze.py` chmods only inodes root owns at that moment and refuses setuid/setgid files before any
+chown.
 - Jail plan per instance (§3 rows): socket dir `0:<uid> 0730`; after READY socket `0:0 0700`; spawn
   cwd `/`; worker chdir; env exactly row W; `--clear-groups`; rlimits §2.2; oom self-raise.
 - Install: cold ≤ 3 s for a lockless 4.4 k-inode tree in a pod (g2: 1 844 ms), freeze ≤ 100 ms
@@ -525,9 +534,18 @@ Budget: ≤ 50 ms cold in-process for the median corpus app (b5: 4.9 ms), ≤ 20
   `../shims/*`, minified in production), `/_atelier/whoami`, `/_atelier/ws` (accept; frames from
   worker `{t:'broadcast'}` stamped `topic = company/slug`; `shell` topic reserved), `/_atelier/events?app=`
   (collector.recent), gzip when accepted. Byte-identical to the protocol server for `/modules/*`.
-- Startup audit (before `host-ready`): refuse to serve (log + retry every 5 s) while any of
-  `/work/.claude`, `/control`, `bootstrap.token`, `last-good/<inst>`, `data/<inst>` is readable by a
-  uid outside its owner set (mode bits check via `lstat`; the memory adapter tests the rule).
+- Startup audit (before either listener binds — nothing is served, not even a snapshot, while it
+  fails): refuse to serve (log + retry every 5 s) while any of `/work/.claude`, `/control`,
+  `bootstrap.token`, `dev.token`, `/work/.claude.json`, `/work/.mcp.json`, `/work/.claude/settings.json`,
+  `last-good/<inst>`, `data/<inst>` is readable by a uid outside its owner set (mode bits check via
+  `lstat`; absent paths are logged as not checked; the memory adapter tests the rule).
+- mTLS on the protocol port is mandatory in the fleet: a fleet host without `ATELIER_HOST_TLS` exits 2;
+  the explicit value `plain` is the step-2 drill's opt-out (logged INSECURE on every start). The
+  port binds the pod IP (never `0.0.0.0`: no loopback path for a worker); local mode binds `127.0.0.1`.
+- The dev token never reaches a worker: `?token=` is deleted from the URL forwarded to
+  `supervisor.handle` (the rest of the query kept).
+- `refuse()`: while the host is in the fault state (§I1 item 17) every request on both listeners
+  is answered 503 `{error:'host fault', reason}` before auth or any route.
 
 ## 7. The spine transport (fleet) and its local twin
 
@@ -646,6 +664,10 @@ are sites (a) and (b).
     `/control/.supervisor-ready` until the step-5 pod spec moves it (nothing in step 2 edits a spec).
 12. **HOST/PORT/BASE_URL for workers** — `BASE_URL = ctx.baseUrl`
     (`<origin>/api/<company>/<slug>`), `HOST` = the origin's hostname, `PORT` = its port (443 / 1844).
+    `ctx.host`/`ctx.port` are therefore the PUBLIC origin's host and port — the address a module
+    composes URLs from — and must not be bound (a worker has no port; `listen()` is OR6's doctor
+    finding). MODULES.md's "bind address" wording for `ctx.host` is amended when step 3 forks the docs;
+    `worker-spawn.test.js` pins the choice.
 13. **Per-instance `oom_score_adj`** — self-raise to 1000 in the spawn wrapper before the drop; the
     host never writes another process's file (EACCES under the plan caps).
 14. **`agent.log` location** — `/work/.atelier/agent.log` `0:1000 0640` (agent reads, workers cannot);
@@ -866,9 +888,11 @@ Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`
    none exists), `ATELIER_GIT_COMMIT=0` disables row G. `podIp()` = the first non-internal IPv4.
 2. **Host-owned directories**: `.atelier/tmp` and `$run/w` (0711 root) are the host's — the launcher's
    plan does not create the parents `jailPlan` mkdirs into (`hostDirs()`).
-3. **Startup audit (§6.5)** is `audit(os, cfg, dirfd)` in `index.mjs`: `bootstrap.token`/`dev.token`
-   without g/o bits, `/work/.claude` and `/control` without o bits, every `last-good/<inst>` and
-   `data/<inst>` without o bits; a non-empty list logs and retries every 5 s before `host-ready`.
+3. **Startup audit (§6.5)** is `audit(os, cfg, dirfd)` in `index.mjs` → `{bad, absent}`:
+   `bootstrap.token`/`dev.token`/`.claude.json`/`.mcp.json`/`.claude/settings.json` without g/o bits,
+   `/work/.claude` and `/control` without o bits, every `last-good/<inst>` and `data/<inst>` without
+   o bits; a non-empty `bad` logs and retries every 5 s BEFORE either listener binds (snapshots are
+   loaded, nothing is served); `absent` is logged once as "not present (not checked)".
 4. **`registrar.appConfig()` → `{env:{K:V}}`** (§7); the supervisor reads `.env` (was passing the
    whole reply as `configEnv`).
 5. **`supervisor.workers()` rows carry `rev` and `rlimits`** — the watchdog's report rev and RSS cap.
@@ -880,22 +904,61 @@ Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`
    SIGKILLs the worker uid; the supervisor stops the live worker first, the rebuild spawns the next).
 9. **Dev shell chrome sheet**: `chromeSheet()` = `buildSheet({chromeDir, appDir: null})` when
    `ATELIER_CHROME_DIR` is set.
-10. **Teardown**: `host-ready` unlinked → `registrar.draining()` (fleet, ≤ 2 s) → both listeners closed
-    → `supervisor.teardown()` → watchdog stop → `events.drain(1000)` → `host: stopped` → exit 0; the
-    whole sequence is capped at 30 s.
+10. **Teardown** (§2.3): `host-ready` unlinked → `registrar.draining()` (fleet, ≤ 2 s) → both listeners
+    drained (`close(20 s)`: new connections refused, in-flight requests finish) → `watchdog.stop()`
+    (SIGCONT) → `supervisor.teardown()` → `events.drain(1000)` → `host: stopped` → exit 0; the whole
+    sequence is capped at 30 s.
 11. **`package.json` `test`** now includes `host/test/*.test.js` (§9.15).
 12. **Discovery of new folders**: `index.mjs` watches `$work/apps` itself (non-recursive `fs.watch`,
     debounced 300 ms → `supervisor.scan()`, scans serialized) and rescans every 30 s; the per-app
-    watchers cover saves inside a folder.
+    watchers cover saves inside a folder. A folder discovery skipped as `no-module-json` (a scaffold
+    in progress) gets one non-recursive watch of its own (`pendingWatches`, ≤ 32) so its `module.json`
+    landing triggers a rescan instead of the 30 s net; closed once it became an app or vanished.
 13. **Paths that leave the host process are real**: the supervisor hands `codeDir`, `dataDir`, `tmpDir`
     to workers (and `dataDir` to the watchdog's `du` as the worker uid) as `/work/.atelier/…`, never the
     host's `/proc/self/fd/N/…` form (`realPath()` over `readlinkFd(dirfd)`); the dirfd form stays for the
     host's own marker and rev-dir writes.
 14. **Modes under umask 077**: every file or dir the host creates with a mode sets it explicitly
     (chmod on the root-owned inode, before any chown) — `agent.log` 0640, the registrar's marker dir
-    0711 and markers 0644/0600, `host-ready` 0644, `$run` 0711 (the tmpfs mount arrives 1777).
+    0711 and markers 0600, `host-ready` 0644 (`wx` after an unlink), `$run` 0711 (the launcher closes
+    the 1777 tmpfs mount root first; `ensureDirs` is the second check and refuses a `$run`, `$run/w`
+    or `.atelier/tmp` owned by another uid — exit 2).
 15. **The Linux drill `host/drill/step2/`** runs the integrated host in FLEET mode against a fake
     spine on a peer pod (`fake-spine.mjs`: the §7 routes, `validateAppError` on the app-error lane,
     every call logged as JSON lines) with a signer (`signer.mjs`: bearer + protocol/identity assertion)
     dialing the pod IP from outside; one real 1.x module (blitzfeed) + a probe app; rows (a)–(g) in
     `remote.sh`; evidence in `design/atelier2/r2/spike-host-step2/` (RESULT.md: PASS a–g, 2026-08-28).
+16. **The step-2 review fixes** (jail / lifecycle / protocol lenses), all unit-tested:
+    - `claimRoundTrip` / `dataFileRoundTrip` act on an `O_NOFOLLOW` fd after an `fstat` guard (§6.2);
+      the adapter grew `openFile`, `fstat`, `fchown`, `fchmod` (the memory twin refuses a `link` entry
+      with `ELOOP`).
+    - OR14 config never enters the env the root wrapper chain receives: `spawnPlan` keeps row W only;
+      `configEnvOf(spec)` drops the fixed keys and `LD_*`/`DYLD_*`/`NODE_*`/`ATELIER_*`; the rest goes
+      to the worker's stdin as one JSON document (`{env:{K:V}}`, then EOF) and `runtime.mjs` assigns
+      it to `process.env` after the uid drop, before the bundle import.
+    - `worker/proxy.mjs` is the caller of `host/protocol/headers.mjs` (`inbound`, `outbound` with the
+      mount — the root-absolute `Location` rewrite happens here, L1.6; `countedBody` cuts a response
+      past the per-app cap). `stampUser`/`userHeaders` share one latin1-safe encoding.
+    - The worker's SIGTERM path waits for in-flight responses (≤ 1.5 s) before `exit(0)`; `stop()`
+      sends SIGCONT before SIGTERM; teardown resumes the watchdog's stopped workers first (§2.3).
+    - Boot reconcile gets the DISCOVERED folders (`discover().apps`; `reconcile(null)` when the apps
+      root is unreadable — `discover().unreadable`), and every row the registrar tombstoned leaves
+      the table (`gone(row, {unlink:false})`).
+    - The crash ladder is not reset by a resume; a resumed worker resets it after `stableMs` (60 s)
+      of uptime; a LIVE build resets it at once.
+    - A snapshot write failure (`nextRev`/`write`: ENOSPC, EIO, EACCES) is a `build` report with a
+      hint, last-good keeps serving, the `rev-N.tmp` is removed; `boot()` sweeps `rev-N.tmp-<pid>`
+      dirs a previous host life left (`store.sweepTmp`).
+    - A jail failure (`applyJail` not ok) is a `worker` report with a host-side hint, never a spawn.
+    - A two-phase install holds requests that would resume a stopped worker (`row.installing`;
+      `serve.mjs` awaits it) — the freeze's SIGKILL is not reported as a crash.
+    - Row G writes `.git/info/exclude` and commits are serialized per app (`row.git`).
+    - Both listeners `close(drainMs)` = `closeDraining` (idle sockets closed, in-flight finish, cut at
+      the deadline).
+    - The push lanes (`events`, `appError`) go through `registrar.lane` = `call()`: a
+      `401 host-epoch-moved` re-registers and retries once; `events.mjs` re-queues the instances of
+      frames the ring rejected as `stale-epoch`/`unregistered` and re-mints them under the new stream.
+17. **The host-fault state**: the dirfd check (every 5 s, and `treeOk()` before every build and spawn)
+    finding `.atelier` renamed or removed → `enterFault(why)`: 503 on both listeners, no scans, no
+    builds, no resumes, `host-ready` unlinked, one `worker` report per app (OR16), the log line
+    repeated every 5 s; never a fresh boot — the operator restores the tree.

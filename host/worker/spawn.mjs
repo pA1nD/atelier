@@ -46,10 +46,14 @@ export function publishedAddress(spec) {
   return { HOST: u.hostname, PORT: u.port || (u.protocol === 'https:' ? '443' : '80'), BASE_URL: spec.baseUrl }
 }
 
-/** The worker's env, row W exactly, built from an explicit key list — nothing is spread from process.env. */
+/** The worker's env, row W exactly, built from an explicit key list — nothing is spread from process.env.
+ *  The OR14 config keys are NOT in it: the env is handed to the root wrapper chain (sh → prlimit →
+ *  setpriv) before the uid drop, so a config key such as LD_PRELOAD or NODE_OPTIONS would execute as
+ *  userns-root; config travels over the worker's stdin instead (`configEnvOf` → `writeConfig`) and the
+ *  runtime assigns it to process.env after the drop, before the bundle import. */
 export function workerEnv(spec, hostEnv) {
   const { HOST, PORT, BASE_URL } = publishedAddress(spec)
-  const fixed = {
+  return {
     PATH: hostEnv.PATH,
     NODE_ENV: hostEnv.NODE_ENV ?? 'production',
     APP_ID: spec.instance,
@@ -58,10 +62,23 @@ export function workerEnv(spec, hostEnv) {
     TMPDIR: spec.tmpDir,
     ATELIER_WORKER: JSON.stringify(workerJson(spec)),
   }
-  const env = {}
-  for (const [k, v] of Object.entries(spec.configEnv ?? {})) if (!(k in fixed)) env[k] = String(v)
-  return Object.assign(env, fixed)
 }
+
+/** The row-W keys a config key may never override, and the prefixes no config key may carry. */
+export const FIXED_ENV_KEYS = Object.freeze(['PATH', 'NODE_ENV', 'APP_ID', 'HOME', 'HOST', 'PORT', 'BASE_URL', 'TMPDIR', 'ATELIER_WORKER'])
+export const CONFIG_DENY_RE = /^(LD_|DYLD_|NODE_|ATELIER_)/
+const CONFIG_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+/** configEnvOf(spec) → {env, dropped}: the OR14 keys the worker gets, minus the jail's own keys and the loader/runtime knobs. */
+export function configEnvOf(spec) {
+  const env = {}, dropped = []
+  for (const [k, v] of Object.entries(spec.configEnv ?? {})) {
+    if (!CONFIG_KEY_RE.test(k) || FIXED_ENV_KEYS.includes(k) || CONFIG_DENY_RE.test(k)) { dropped.push(k); continue }
+    env[k] = String(v)
+  }
+  return { env, dropped }
+}
+/** The bytes written to the worker's stdin (one JSON document, then EOF): `{env:{K:V}}`. */
+export const configPayload = (spec) => JSON.stringify({ env: configEnvOf(spec).env })
 
 /** What the runtime reads from ATELIER_WORKER: the spec minus config values and limits. */
 export function workerJson(spec) {
@@ -79,7 +96,7 @@ export function spawnPlan(spec, { hostEnv, runtime = RUNTIME_PATH } = {}) {
     rlimits: spec.rlimits,
     oomScoreAdj: 1000,
     umask: 0o002,
-    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe', 'pipe'],     // stdin = the config lane (closed after one write); fd 3 = control
     detached: true,
   }
 }
@@ -109,6 +126,8 @@ export function spawnWorker({ os, spec, onControl = () => {}, onExit = () => {},
     const plan = spawnPlan(spec, { hostEnv, runtime })
     let child
     try { child = os.spawn(plan) } catch (e) { return reject(failure('spawn-eagain', `spawn: ${e.code ?? e.message}`)) }
+    // the config lane: one JSON document on stdin, then EOF (the runtime reads it to EOF before the import)
+    try { child.stdin?.on?.('error', () => {}); child.stdin?.end(configPayload(spec)) } catch {}
     let settled = false, ready = false
     let exitInfo = null
     let onExited = []
@@ -119,6 +138,7 @@ export function spawnWorker({ os, spec, onControl = () => {}, onExit = () => {},
     const handle = {
       pid: child.pid, sock: spec.sock, child, ready: null, exited,
       kill: (signal = 'SIGTERM') => os.kill(child.pid, signal),
+      // SIGCONT (a no-op on a running process; a watchdog-stopped worker cannot run its teardown otherwise) →
       // SIGTERM → the runtime runs the module teardown and exits; at the deadline the process GROUP is SIGKILLed (§2.3 step 2).
       stop: (drainMs = DRAIN_MS) => new Promise((done) => {
         if (exitInfo) return done({ ...exitInfo, killed: false })
@@ -126,6 +146,7 @@ export function spawnWorker({ os, spec, onControl = () => {}, onExit = () => {},
         const finish = (killed) => { if (finished) return; finished = true; clearTimeout(t); done({ code: exitInfo?.code ?? null, signal: exitInfo?.signal ?? null, killed }) }
         const t = setTimeout(() => { try { os.kill(-child.pid, 'SIGKILL') } catch {} ; try { os.kill(child.pid, 'SIGKILL') } catch {} ; log(`worker ${spec.instance}: drain deadline ${drainMs} ms → SIGKILL pgroup`); finish(true) }, drainMs)
         onExited.push(() => finish(false))
+        try { os.kill(child.pid, 'SIGCONT') } catch {}
         try { os.kill(child.pid, 'SIGTERM') } catch (e) { finish(false) }
       }),
     }

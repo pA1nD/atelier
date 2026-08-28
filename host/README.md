@@ -30,18 +30,22 @@ The container's command is `bash /app/host/entrypoint.sh` with the §4.3 pod sha
 `runAsUser: 0`, caps `{SETUID, SETGID, CHOWN, KILL}`, no `fsGroup`, `/work` volume, tmpfs `/run/atelier`,
 `/control`). The launcher reads the pod env (`ATELIER_BOOTSTRAP` becomes `/run/atelier/bootstrap.token`,
 `CHANNEL_URL` becomes the host's `ATELIER_SPINE_URL`) and starts the host with row H's env and fd 3 =
-the `.atelier` dirfd. The host registers at `ATELIER_SPINE_URL` (DESIGN §7 routes), serves last-good
-snapshots first, writes `/run/atelier/host-ready` once both listeners are up AND the registrar has an
-epoch (the readiness probe), then scans the folder.
+the `.atelier` dirfd. The host registers at `ATELIER_SPINE_URL` (DESIGN §7 routes), loads the last-good
+snapshots, runs the startup permission audit (nothing listens while a credential or a snapshot is
+readable by a foreign uid), binds both listeners, writes `/run/atelier/host-ready` once the registrar
+has an epoch (the readiness probe), then scans the folder. A renamed or removed `/work/.atelier` is a
+host fault: 503 on both listeners, no scans or spawns, `host-ready` unlinked, until the operator
+restores the tree.
 
-Ports: `0.0.0.0:1845` the protocol port (bearer `<epoch>.<token>` + the identity assertion),
-`127.0.0.1:1844` + `/run/atelier/dev/shell.sock` the dev shell (dev token only, from
-`/run/atelier/session/dev.token` for the agent).
+Ports: `<pod IP>:1845` the protocol port (mTLS — mandatory in the fleet — plus bearer `<epoch>.<token>`
++ the identity assertion; never `0.0.0.0`, so a worker has no loopback path), `127.0.0.1:1844` +
+`/run/atelier/dev/shell.sock` the dev shell (dev token only, from `/run/atelier/session/dev.token`
+for the agent; the token is stripped from the URL before a request reaches a worker).
 
 Knobs (`ATELIER_*`, DESIGN §1.2): `ATELIER_WORK` `/work`, `ATELIER_RUN` `/run/atelier`, `ATELIER_CONTROL`
 `/control`, `ATELIER_CHROME_DIR` (the chrome folder; unset = app-less documents and pass-through app CSS),
 `ATELIER_HOST_PORT` 1845, `ATELIER_DEV_PORT` 1844, `ATELIER_SPINE_URL` (unset = local mode),
-`ATELIER_HOST_TLS` `cert,key,ca` (mTLS on 1845), `ATELIER_GIT_COMMIT=0` (no row-G commit per LIVE rev).
+`ATELIER_HOST_TLS` `cert,key,ca` (mTLS on 1845; required in fleet mode — a fleet host without it exits 2; the literal `plain` is the drill's opt-out, logged INSECURE), `ATELIER_GIT_COMMIT=0` (no row-G commit per LIVE rev).
 
 ## Run it: local dev (laptop, no root)
 

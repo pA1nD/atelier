@@ -50,6 +50,105 @@ test('idle-stop only when the READY resources are empty or the worker said suspe
   } finally { await w.done(sup) }
 })
 
+test('a two-phase install holds requests that would resume a stopped worker (the freeze SIGKILLs the worker uid); the rebuild follows', async () => {
+  const w = world()
+  const dir = w.app('inst', { 'module.json': APP_JSON('I'), 'backend.js': QUIET })
+  const sup = w.make({ timing: { idleMs: 150 }, install: async () => { await sleep(400); return { ok: true, ms: 400 } } })
+  try {
+    await sup.scan()
+    const row = await waitFor(() => { const r = sup.resolve('acme', 'inst'); return r?.state === 'live' ? r : null })
+    await waitFor(() => sup.resolve('acme', 'inst').state === 'stopped')
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"inst","dependencies":{}}')
+    await waitFor(() => !!sup.rows.get(row.instance).installing)
+    const t0 = Date.now()
+    const r = await api(sup, row, '/rev')
+    assert.equal(r.status, 200)
+    assert.ok(Date.now() - t0 >= 250, `held for the install (${Date.now() - t0} ms)`)
+    assert.ok(w.lines.some((l) => l === '[inst] install ok 400 ms'))
+    assert.equal(sup.rows.get(row.instance).installing, null)
+    assert.equal(w.reports.length, 0)
+  } finally { await w.done(sup) }
+})
+
+test('a snapshot write failure (the store unwritable) is a build report with a hint, last-good keeps serving, no tmp dir is left; boot sweeps a dead life\'s tmp', async () => {
+  const w = world()
+  const dir = w.app('snapw', { 'module.json': APP_JSON('W'), 'backend.js': QUIET })
+  const sup = w.make()
+  const lg = (inst) => path.join(w.work, '.atelier', 'last-good', inst)
+  let inst
+  try {
+    await sup.scan()
+    const row = await waitFor(() => { const r = sup.resolve('acme', 'snapw'); return r?.state === 'live' ? r : null })
+    inst = row.instance
+    fs.chmodSync(lg(inst), 0o500)
+    fs.writeFileSync(path.join(dir, 'backend.js'), BACKEND(2))
+    await waitFor(() => w.reports.length === 1)
+    assert.equal(w.reports[0].kind, 'build'); assert.equal(w.reports[0].rev, 2)
+    assert.match(w.reports[0].message, /^snapshot write failed: EACCES$/)
+    assert.match(w.reports[0].hint, /cannot write the snapshot \(EACCES\)/)
+    assert.equal(w.reports[0].file, 'backend.js')
+    assert.match(w.lines.find((l) => /FAILED/.test(l)), /^\[snapw\] rev 2 FAILED \(users still on rev 1\) snapshot write failed: EACCES$/)
+    assert.equal(sup.resolve('acme', 'snapw').rev, 1)
+    assert.equal(JSON.parse((await api(sup, row, '/rev')).body).ctxRev, 1)
+    fs.chmodSync(lg(inst), 0o750)
+    assert.deepEqual(fs.readdirSync(lg(inst)).filter((n) => n.includes('tmp')), [])
+    await sup.teardown()
+    // a dead host life's tmp dir under last-good is swept at boot
+    fs.mkdirSync(path.join(lg(inst), 'rev-7.tmp-424242')); fs.writeFileSync(path.join(lg(inst), 'rev-7.tmp-424242', 'x'), '1')
+    const sup2 = w.make()
+    await sup2.boot()
+    assert.ok(!fs.existsSync(path.join(lg(inst), 'rev-7.tmp-424242')))
+    assert.ok(w.lines.some((l) => l === 'boot: snapw swept rev-7.tmp-424242 (a previous host life died mid-write)'))
+    await sup2.teardown()
+  } finally { try { fs.chmodSync(lg(inst), 0o750) } catch {} await w.done(sup) }
+})
+
+test('a jail failure (mkdir/chown/chmod of the per-instance dirs) is a worker report with a host-side hint, never a spawn', async () => {
+  const w = world()
+  w.app('jailed', { 'module.json': APP_JSON('J'), 'backend.js': QUIET })
+  const jail = { jailPlan: () => [{ op: 'mkdir', path: '/x/data' }], applyJail: () => ({ ok: false, results: [{ step: { op: 'mkdir', path: '/x/data' }, ok: false, code: 'ENOSPC' }] }), claimRoundTrip: () => ({ ok: true, results: [] }) }
+  const sup = w.make({ jail })
+  try {
+    await sup.scan()
+    await waitFor(() => w.reports.length === 1)
+    assert.equal(w.reports[0].kind, 'worker'); assert.equal(w.reports[0].message, 'jail: mkdir /x/data: ENOSPC')
+    assert.match(w.reports[0].hint, /could not prepare the worker's directories/)
+    assert.equal(sup.resolve('acme', 'jailed').state, 'failed')
+    assert.equal(sup.workers().length, 0)
+  } finally { await w.done(sup) }
+})
+
+test('boot reconcile: the registrar gets the DISCOVERED folders (never the boot rows); a row it tombstones leaves resolve(); an unreadable apps root → reconcile(null)', async () => {
+  const w = world()
+  const dir = w.app('recon', { 'module.json': APP_JSON('R'), 'backend.js': QUIET })
+  let sup = w.make({ timing: { idleMs: 150 } })
+  let inst
+  try {
+    await sup.scan()
+    inst = (await waitFor(() => { const r = sup.resolve('acme', 'recon'); return r?.state === 'live' ? r : null })).instance
+    assert.equal(w.registrar.reconcileCalls.length, 1)
+    assert.deepEqual(w.registrar.reconcileCalls[0].map((r) => r.slug), ['recon'])
+    await sup.teardown()
+    // the folder vanished while the host was down: the boot row must NOT count as present
+    fs.rmSync(dir, { recursive: true, force: true })
+    w.registrar.reconcileImpl = (rows) => ({ unlinked: rows.some((r) => r.slug === 'recon') ? [] : [inst] })
+    sup = w.make({ timing: { idleMs: 150 } })
+    await sup.boot()
+    assert.equal(sup.resolve('acme', 'recon').instance, inst)
+    await sup.scan()
+    assert.deepEqual(w.registrar.reconcileCalls[1], [], 'the discovered folders, not sup.apps()')
+    assert.equal(sup.resolve('acme', 'recon'), null, 'the tombstoned boot row is served no more')
+    assert.deepEqual(w.registrar.unlinked, [], 'reconcile tombstoned it; the supervisor does not unlink twice')
+    assert.ok(w.lines.some((l) => /^\[recon\] folder removed — unlinked \(snapshot kept at rev 1\)$/.test(l)))
+    // the apps root unreadable → reconcile(null), nothing tombstoned
+    fs.rmSync(path.join(w.work, 'apps'), { recursive: true, force: true })
+    const d = await sup.scan()
+    assert.equal(d.unreadable, true)
+    assert.equal(w.registrar.reconcileCalls.at(-1), null)
+    fs.mkdirSync(path.join(w.work, 'apps'))
+  } finally { await w.done(sup) }
+})
+
 test('a broken folder while stopped: the save fails (reported), the resume serves the snapshot; boot() resumes from markers without the folder', async () => {
   const w = world()
   const dir = w.app('snap', { 'module.json': APP_JSON('Snap'), 'backend.js': QUIET, 'frontend.jsx': 'export default () => <i className="p-1"/>' })
@@ -102,6 +201,7 @@ test('kill() → SIGKILL + report(worker) + restart with backoff; an unexpected 
     const back = await waitFor(() => { const r = sup.resolve('acme', 'k'); return r.state === 'live' ? r : null })
     assert.notEqual(back.pid, pid1)
     assert.equal((await api(sup, back, '/rev')).status, 200)
+    assert.equal(sup.rows.get(row.instance).restarts, 1, 'a resume does not reset the ladder')
     // the worker dies on its own
     process.kill(back.pid, 'SIGKILL')
     await waitFor(() => w.reports.length === 2)
@@ -109,5 +209,17 @@ test('kill() → SIGKILL + report(worker) + restart with backoff; an unexpected 
     const again = await waitFor(() => { const r = sup.resolve('acme', 'k'); return r.state === 'live' && r.pid !== back.pid ? r : null })
     assert.equal((await api(sup, again, '/rev')).status, 200)
     assert.equal(sup.workers().length, 1)
+    assert.equal(sup.rows.get(row.instance).restarts, 2, 'the second death climbs the ladder (0.5 → 30 s), it does not restart at rung 0')
+    // stableMs of uptime resets it; a LIVE build resets it at once
+    await sup.teardown()
+    const sup2 = w.make({ timing: { backoffMs: [50, 100], stableMs: 120 } })
+    await sup2.boot(); await sup2.scan()
+    const r2 = sup2.resolve('acme', 'k')
+    assert.equal((await api(sup2, r2, '/rev')).status, 200)   // resumed from the snapshot (the fingerprint matched: no rebuild)
+    sup2.kill(r2.instance, 'test')
+    await waitFor(() => { const r = sup2.resolve('acme', 'k'); return r.state === 'live' })
+    assert.equal(sup2.rows.get(r2.instance).restarts, 1)
+    await waitFor(() => sup2.rows.get(r2.instance).restarts === 0, { ms: 3000 })
+    await sup2.teardown()
   } finally { await w.done(sup) }
 })
