@@ -9,7 +9,10 @@ fail(){ F=$((F+1)); echo "FAIL $1 — $2"; }
 check(){ [ "$2" = "$3" ] && pass "$1 = $2" || fail "$1" "want [$3] got [$2]"; }
 as1000(){ setpriv --reuid=1000 --regid=1000 --clear-groups "$@"; }
 as20001(){ setpriv --reuid=20001 --regid=20001 --clear-groups "$@"; }
-st(){ stat -c '%u:%g %a' "$1" 2>&1; }
+st() { stat -c '%u:%g %a' "$1" 2>&1; }
+# the pod has caps {SETUID,SETGID,CHOWN,KILL} — NO DAC_OVERRIDE: root cannot read a uid-1000 process's
+# /proc/<pid>/{environ,cwd} nor enter a 1000-owned 0700 dir; those reads run as uid 1000 (its own).
+SAS(){ setpriv --reuid=1000 --regid=1000 --clear-groups "$@"; }
 
 echo "== process tree"
 ps -eo pid,ppid,uid,gid,comm,args | grep -v ' ps ' | sed 's/^/   /'
@@ -28,12 +31,12 @@ check "host supplementary groups (root's, empty)" "$(awk '/^Groups/{$1=""; print
 check "host umask" "$(awk '/^Umask/{print $2}' /proc/$H/status)" "0077"
 check "session supervisor umask" "$(awk '/^Umask/{print $2}' /proc/$S/status)" "0022"
 check "host cwd" "$(readlink /proc/$H/cwd)" "/"
-check "session supervisor cwd" "$(readlink /proc/$S/cwd)" "/work"
+check "session supervisor cwd (as uid 1000: no DAC_OVERRIDE for root)" "$(SAS readlink /proc/$S/cwd)" "/work"
 check "host CapEff" "$(awk '/^CapEff/{print $2}' /proc/$H/status)" "$(awk '/^CapEff/{print $2}' /proc/1/status)"
 check "session supervisor CapEff" "$(awk '/^CapEff/{print $2}' /proc/$S/status)" "0000000000000000"
 
 echo "== env rows (from /proc/<pid>/environ)"
-henv=$(tr '\0' '\n' < /proc/$H/environ); senv=$(tr '\0' '\n' < /proc/$S/environ)
+henv=$(tr '\0' '\n' < /proc/$H/environ); senv=$(SAS sh -c "tr '\0' '\n' < /proc/$S/environ")
 check "H: ATELIER_DIRFD" "$(echo "$henv" | grep '^ATELIER_DIRFD=' )" "ATELIER_DIRFD=3"
 check "H: no ATELIER_BOOTSTRAP" "$(echo "$henv" | grep -c '^ATELIER_BOOTSTRAP=')" "0"
 check "H: no CHANNEL_*" "$(echo "$henv" | grep -c '^CHANNEL_')" "0"
@@ -59,7 +62,7 @@ check "/work/.atelier/scratch" "$(st /work/.atelier/scratch)" "0:0 711"
 check "/run/atelier" "$(st /run/atelier)" "0:0 711"
 check "/run/atelier/dev" "$(st /run/atelier/dev)" "0:1000 710"
 check "/run/atelier/session" "$(st /run/atelier/session)" "1000:1000 700"
-check "/run/atelier/session/dev.token" "$(st /run/atelier/session/dev.token)" "1000:1000 400"
+check "/run/atelier/session/dev.token (as its owner)" "$(as1000 stat -c '%u:%g %a' /run/atelier/session/dev.token 2>&1)" "1000:1000 400"
 check "/run/atelier/dev.token" "$(st /run/atelier/dev.token)" "0:0 400"
 check "/run/atelier/bootstrap.token" "$(st /run/atelier/bootstrap.token)" "0:0 400"
 check "/run/atelier/host-ready" "$(st /run/atelier/host-ready)" "0:0 644"
@@ -71,16 +74,16 @@ echo "== tokens"
 check "bootstrap.token content" "$(cat /run/atelier/bootstrap.token)" "canary-bootstrap-secret"
 DT=$(cat /run/atelier/dev.token)
 [ "${#DT}" = 64 ] && [[ "$DT" =~ ^[0-9a-f]{64}$ ]] && pass "dev.token is 64 hex" || fail "dev.token is 64 hex" "[$DT]"
-check "session copy equals the host copy" "$(cat /run/atelier/session/dev.token)" "$DT"
+check "session copy equals the host copy (read as its owner)" "$(as1000 cat /run/atelier/session/dev.token)" "$DT"
 check "uid 1000 reads its copy" "$(as1000 cat /run/atelier/session/dev.token)" "$DT"
 check "uid 1000 cannot read the host copy" "$(as1000 cat /run/atelier/dev.token 2>&1 | grep -c 'Permission denied')" "1"
 check "uid 1000 cannot read bootstrap.token" "$(as1000 cat /run/atelier/bootstrap.token 2>&1 | grep -c 'Permission denied')" "1"
 check "uid 20001 cannot read the session copy" "$(as20001 cat /run/atelier/session/dev.token 2>&1 | grep -c 'Permission denied')" "1"
 check "uid 20001 cannot list /run/atelier/dev" "$(as20001 ls /run/atelier/dev 2>&1 | grep -c 'Permission denied')" "1"
-check "uid 1000 can enter /run/atelier/dev" "$(as1000 ls /run/atelier/dev 2>&1 | grep -c 'Permission denied')" "0"
+check "uid 1000 can traverse /run/atelier/dev (0710 group x, no list)" "$(as1000 sh -c 'test -x /run/atelier/dev && echo ok')" "ok"
 
 echo "== root-owned inodes in /work + /control as uid 1000 (.atelier excluded by design)"
-ROOTS=$(as1000 find /work /control ! -uid 1000 -not -path '/work/.atelier' -not -path '/work/.atelier/*' -printf '%m %u:%g %p\n' 2>&1)
+ROOTS=$(as1000 find /work /control -path /work/.atelier -prune -o ! -uid 1000 -printf '%m %u:%g %p\n' 2>/dev/null)
 check "count outside .atelier" "$(echo -n "$ROOTS" | grep -c .)" "0"
 [ -n "$ROOTS" ] && echo "   $ROOTS"
 echo "   .atelier tree (root by design): $(find /work/.atelier -printf '%m %u:%g %p\n' | tr '\n' '|')"

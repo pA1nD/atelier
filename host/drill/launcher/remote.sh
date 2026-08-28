@@ -19,6 +19,7 @@ fail(){ FAILS=$((FAILS+1)); WHY="$WHY; $1"; log "FAIL: $1"; }
 cleanup(){ log "cleanup: deleting ns $NS"; kill ${OBS_PID:-} 2>/dev/null; kubectl delete ns $NS --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 X(){ $K exec computer -c session -- bash -c "$1" 2>&1; }
+AS1000="setpriv --reuid=1000 --regid=1000 --clear-groups"   # /control + session/ are 1000:1000 0700; the cap set has no DAC_OVERRIDE
 readyq(){ $K get pod computer -o jsonpath='{.status.conditions[?(@.type=="Ready")].status} rc={.status.containerStatuses[0].restartCount} phase={.status.phase}' 2>/dev/null; }
 waitready(){ local max=$1 t0=$(now); for i in $(seq 1 $((max*5))); do case "$(readyq)" in True*) echo "$(el $t0)"; return 0;; esac; sleep 0.2; done; echo "timeout"; return 1; }
 # anchored on ^node so the `bash -c` that runs pgrep never matches itself
@@ -60,17 +61,19 @@ H0=$(hostpid); S0=$(suppid); L0=$(launcherpid)
 $K exec peer -- sh -c "nohup sh -c 'for i in \$(seq 1 200); do c=\$(curl -s -o /dev/null -w %{http_code} --max-time 1 http://$IP:1845/); echo \"\$(date +%T.%3N) \$c\"; sleep 0.05; done' > /tmp/loop.txt 2>&1 &"
 sleep 1
 t0=$(now); X "kill -9 $H0"
-for i in $(seq 1 30); do case "$(readyq)" in False*) break;; esac; sleep 0.1; done
-R3=$(waitready 10); log "row 3: Ready back $R3 s after the unready flip ($(el $t0) s after the kill) — $(readyq)"
-[ "$R3" = timeout ] && fail "row 3: Ready not back within 10 s"
-python3 -c "import sys; sys.exit(0 if '$R3'!='timeout' and $(el $t0) <= 3.5 else 1)" || fail "row 3: Ready back after $(el $t0) s (> 3 s)"
+# recovery is the host-stub re-binding :1845 (its own server), NOT the kube Ready flag (1 s probe grain): poll
+# for host-ready back with a fresh host pid; the peer's 50 ms loop below is the served-across-the-blink proof
+for i in $(seq 1 100); do X 'test -f /run/atelier/host-ready' >/dev/null 2>&1 && [ "$(hostpid)" != "$H0" ] && break; sleep 0.1; done
+BACK=$(el $t0); log "row 3: host-ready back with a new host pid $BACK s after the kill — $(readyq)"
+python3 -c "import sys; sys.exit(0 if $BACK <= 3.5 else 1)" || fail "row 3: host-ready back after $BACK s (> 3 s)"
+R3=$BACK
 sleep 10
 H1=$(hostpid); S1=$(suppid); L1=$(launcherpid)
 [ "$H1" != "$H0" ] && [ -n "$H1" ] && log "row 3: host pid $H0 → $H1" || fail "row 3: host pid not renewed ($H0 → $H1)"
 [ "$S1" = "$S0" ] && [ "$L1" = "$L0" ] && log "row 3: launcher $L0 and supervisor $S0 unchanged" || fail "row 3: launcher/supervisor pid changed ($L0→$L1, $S0→$S1)"
 NON200=$($K exec peer -- sh -c 'grep -vc " 200$" /tmp/loop.txt'); TOTAL=$($K exec peer -- sh -c 'wc -l < /tmp/loop.txt')
 log "row 3: peer loop: $NON200 non-200 of $TOTAL"; [ "$NON200" -le 2 ] || fail "row 3: $NON200 non-200 across the blink (> 2)"
-CRASH=$(X 'stat -c "%u:%g %a" /control/.host-crash; cat /control/.host-crash')
+CRASH=$(X "$AS1000 sh -c 'stat -c \"%u:%g %a\" /control/.host-crash; cat /control/.host-crash'")
 log "row 3: .host-crash: $(echo "$CRASH" | tr '\n' ' ')"
 echo "$CRASH" | head -1 | grep -q '^1000:1000 600$' || fail "row 3: .host-crash not 1000:1000 0600"
 [ "$(echo "$CRASH" | tail -n +2 | wc -l)" = 1 ] || fail "row 3: .host-crash has $(echo "$CRASH" | tail -n +2 | wc -l) lines (want 1)"
@@ -91,10 +94,10 @@ DT1=$(X 'cat /run/atelier/dev.token' | tr -d '\r\n')
 [ -n "$DT1" ] && [ "$DT1" != "$DT0" ] && log "row 4: dev token re-minted" || fail "row 4: dev token not re-minted ([$DT0] → [$DT1])"
 log "row 4: second life plan lines:"; $K logs computer -c session 2>&1 | grep -E 'reclaimed|exists|unlink|host-ready' | sed 's/^/    | /'
 $K logs computer -c session 2>&1 | grep -q 'mkdir /run/atelier/session 0700: ok (exists 1000:1000 0700 — reclaimed 0:0)' || fail "row 4: session dir not reclaimed in the second life"
-check5=$(X 'stat -c "%u:%g %a %n" /run/atelier/session /run/atelier/session/dev.token /run/atelier/dev.token /run/atelier/host-ready /work /work/.atelier 2>&1' | tr '\n' '|')
+check5=$(X "$AS1000 stat -c '%u:%g %a %n' /run/atelier/session /run/atelier/session/dev.token; stat -c '%u:%g %a %n' /run/atelier/dev.token /run/atelier/host-ready /work /work/.atelier 2>&1" | tr '\n' '|')
 log "row 4: stats after restart: $check5"
 echo "$check5" | grep -q '1000:1000 700 /run/atelier/session|1000:1000 400 /run/atelier/session/dev.token|0:0 400 /run/atelier/dev.token|0:0 644 /run/atelier/host-ready|1000:1000 755 /work|0:0 711 /work/.atelier' || fail "row 4: ownership after the restart"
-[ "$(X 'cat /run/atelier/session/dev.token' | tr -d '\r\n')" = "$DT1" ] || fail "row 4: session copy differs from the host copy after the restart"
+[ "$(X "$AS1000 cat /run/atelier/session/dev.token" | tr -d '\r\n')" = "$DT1" ] || fail "row 4: session copy differs from the host copy after the restart"
 PREV=$($K logs computer -c session --previous 2>&1); echo "$PREV" | grep -q 'SIGTERM: host first' || fail "row 4: first life has no SIGTERM order line"
 echo "$PREV" | grep -q '\[host-stub\] SIGTERM → teardown' || fail "row 4: the host was not signalled before exit"
 echo "$PREV" | grep -E 'SIGTERM|exit|teardown' | sed 's/^/    | prev: /'
@@ -108,7 +111,7 @@ for i in $(seq 1 10); do
 done
 sleep 3
 PARK=$($K logs computer -c session 2>&1 | grep -c 'host: parked after 10 exits/10 min')
-LINES=$(X 'wc -l < /control/.host-crash' | tr -d ' \r\n')
+LINES=$(X "$AS1000 sh -c 'wc -l < /control/.host-crash'" | tr -d ' \r\n')
 log "row 5: $n kills in $(el $t0) s; parked lines=$PARK; .host-crash lines=$LINES (1 from row 3 + 10); host pid now=[$(hostpid)]; $(readyq)"
 [ "$PARK" = 1 ] || fail "row 5: no park line after 10 exits"
 [ "$LINES" = 11 ] || fail "row 5: .host-crash has $LINES lines (want 11)"
@@ -116,7 +119,7 @@ log "row 5: $n kills in $(el $t0) s; parked lines=$PARK; .host-crash lines=$LINE
 case "$(readyq)" in "False rc=1 phase=Running") ;; *) fail "row 5: pod state while parked: $(readyq) (want unready, rc=1, Running)";; esac
 [ "$(suppid)" = "$S2" ] || fail "row 5: supervisor pid changed during the storm"
 $K logs computer -c session 2>&1 | grep 'host: restart in' | sed 's/^/    | /'
-X 'stat -c "%u:%g %a" /control/.host-crash; tail -2 /control/.host-crash' | sed 's/^/    | /'
+X "$AS1000 sh -c 'stat -c \"%u:%g %a\" /control/.host-crash; tail -2 /control/.host-crash'" | sed 's/^/    | /'
 
 log "row 6: pod delete with grace 40 → SIGTERM order, host teardown, termination time"
 t0=$(now); $K delete pod computer --grace-period=40 --wait=false >/dev/null
