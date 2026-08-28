@@ -46,6 +46,10 @@ const validators = {
 
 export const isReservedCompany = (id) => RESERVED_COMPANY_IDS.includes(id) || String(id).startsWith(RESERVED_COMPANY_PREFIX)
 export const validCompany = (id) => typeof id === 'string' && SLUG_RE.test(id) && !isReservedCompany(id)
+// A computer's OWN company row is spine-minted: a personal space (p-<id>, OR4) is a company on the
+// same code path and may hold apps. The p- prefix is reserved against CLAIMING it as a company id
+// (validCompany), never against the row the spine minted (operator ruling 2026-08-28).
+export const validComputerCompany = (id) => typeof id === 'string' && SLUG_RE.test(id) && !RESERVED_COMPANY_IDS.includes(id)
 
 // allowMeta(meta) → {meta, requested, dropped, invalid}
 export function allowMeta(meta) {
@@ -71,7 +75,7 @@ export function authorizeWrite({ callerComputer, computerRow, existingRow = null
   if (!callerComputer) return refuse(401, 'no-token')
   if (!computerRow || computerRow.id !== callerComputer) return refuse(401, 'unknown-computer')
   const company = computerRow.company
-  if (!validCompany(company)) return refuse(400, 'reserved-company', { company })
+  if (!validComputerCompany(company)) return refuse(400, 'reserved-company', { company })
   for (const k of Object.keys(body)) if (!BODY_KEYS.includes(k)) return refuse(400, 'unknown-field', { field: k })
   if (body.company !== undefined && body.company !== company) return refuse(409, 'company-is-fixed', { company })
   if (typeof body.slug !== 'string' || !SLUG_RE.test(body.slug)) return refuse(400, 'bad-slug')

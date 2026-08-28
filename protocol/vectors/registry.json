@@ -63,10 +63,10 @@
     { "name": "reserved company id go refused (§2, the portal's /go route)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "go" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "go" } },
     { "name": "shell is NOT a reserved company id (it is a reserved events topic, not in §2's list)", "fn": "authorizeWrite", "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "shell" }, "existingRow": null, "body": { "slug": "todo" } }, "expect": { "ok": true, "row": { "company": "shell", "slug": "todo", "computer": "comp-1", "meta": {}, "requested_primary": null }, "dropped": [], "invalid": [] } },
     {
-      "name": "reserved p- prefix refused (personal spaces are minted by the spine)",
+      "name": "a spine-minted personal space (p-<id>, OR4) holds apps like any company; the prefix is reserved against CLAIMING it (validCompany), never against the computer row (ruling 2026-08-28)",
       "fn": "authorizeWrite",
       "input": { "callerComputer": "comp-1", "computerRow": { "id": "comp-1", "company": "p-ada" }, "existingRow": null, "body": { "slug": "todo" } },
-      "expect": { "ok": false, "code": 400, "error": "reserved-company", "company": "p-ada" }
+      "expect": { "ok": true, "row": { "company": "p-ada", "slug": "todo", "computer": "comp-1", "meta": {}, "requested_primary": null }, "dropped": [], "invalid": [] }
     },
     {
       "name": "slug Todo refused (SLUG_RE)",
