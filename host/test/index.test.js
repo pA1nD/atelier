@@ -16,6 +16,10 @@ test('config: defaults are DESIGN §1.2; fleet iff ATELIER_SPINE_URL; dirfd only
   const f = config({ ATELIER_SPINE_URL: 'http://spine:7331', ATELIER_DIRFD: '3', ATELIER_DEV_PORT: '2000', ATELIER_GIT_COMMIT: '0', ATELIER_CHROME_DIR: '' })
   assert.equal(f.fleet, true); assert.equal(f.dirfd, 3); assert.equal(f.origin, 'http://127.0.0.1:2000'); assert.equal(f.gitCommit, false); assert.equal(f.chromeDir, null)
   assert.equal(config({ ATELIER_DIRFD: 'x' }).dirfd, null)
+  // ATELIER_APPS_LINKS (shell/ local mode, DESIGN §8 H1): honoured locally, refused in the fleet
+  assert.equal(c.appsLinks, false)
+  assert.equal(config({ ATELIER_APPS_LINKS: '1' }).appsLinks, true)
+  assert.equal(config({ ATELIER_APPS_LINKS: '1', ATELIER_SPINE_URL: 'http://spine:7331' }).appsLinks, false)
 })
 
 test('hostDirs: fleet adds $run (chmod of the 1777 tmpfs), .atelier/tmp and $run/w to the launcher plan; local carries the launcher rows too', () => {

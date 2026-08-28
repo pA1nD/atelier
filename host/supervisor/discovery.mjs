@@ -69,13 +69,16 @@ export function checkModuleJson(dir, fs = nodeFs) {
  *   skipped:  [{name, dir, reason:'ignored-name'|'claim-refused'|'not-a-dir'|'no-module-json'}]
  *   problems: [{slug, dir, error: ModuleJsonProblem}]             module.json present but invalid → build report
  */
-export function discover(appsDir, fs = nodeFs) {
+export function discover(appsDir, fs = nodeFs, { links = false } = {}) {
   const out = { apps: [], refused: [], skipped: [], problems: [], unreadable: false }
   let ents
   try { ents = fs.readdirSync(appsDir, { withFileTypes: true }) } catch { out.unreadable = true; return out }
+  // `links` (ATELIER_APPS_LINKS=1, local mode only — DESIGN §8 H1 of shell/): a symlink to a directory
+  // counts as a folder; the fleet keeps `not-a-dir` for a link the agent planted under /work/apps
+  const isDir = (ent, dir) => ent.isDirectory() || (links && ent.isSymbolicLink?.() && (() => { try { return fs.statSync(dir).isDirectory() } catch { return false } })())
   for (const ent of ents) {
     const name = ent.name, dir = path.join(appsDir, name)
-    if (!ent.isDirectory()) { out.skipped.push({ name, dir, reason: 'not-a-dir' }); continue }
+    if (!isDir(ent, dir)) { out.skipped.push({ name, dir, reason: 'not-a-dir' }); continue }
     if (IGNORED_NAME_RE.test(name)) { out.skipped.push({ name, dir, reason: 'ignored-name' }); continue }
     if (fs.existsSync(path.join(dir, 'CLAIM-REFUSED.txt'))) { out.skipped.push({ name, dir, reason: 'claim-refused' }); continue }
     if (!fs.existsSync(path.join(dir, 'module.json'))) { out.skipped.push({ name, dir, reason: 'no-module-json' }); continue }

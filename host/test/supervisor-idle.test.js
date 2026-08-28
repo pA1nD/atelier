@@ -20,7 +20,8 @@ test('idle-stop only when the READY resources are empty or the worker said suspe
   w.app('quiet', { 'module.json': APP_JSON('Q'), 'backend.js': QUIET })
   w.app('busy', { 'module.json': APP_JSON('B'), 'backend.js': TIMER })
   w.app('susp', { 'module.json': APP_JSON('S'), 'backend.js': SUSPENDABLE })
-  const sup = w.make({ timing: { idleMs: 250 } })
+  const resumes = []
+  const sup = w.make({ timing: { idleMs: 250 }, onResume: (instance, rev) => resumes.push([instance, rev]) })
   try {
     await sup.scan()
     const [q, b, s] = await Promise.all(['quiet', 'busy', 'susp'].map((slug) => waitFor(() => { const r = sup.resolve('acme', slug); return r?.state === 'live' ? r : null })))
@@ -42,6 +43,7 @@ test('idle-stop only when the READY resources are empty or the worker said suspe
     assert.match(w.lines.find((l) => /RESUMED/.test(l)), /^\[quiet\] rev 1 RESUMED \d+ ms$/)
     assert.equal(sup.workers().filter((x) => x.instance === q.instance).length, 1)
     assert.equal(sup.resolve('acme', 'quiet').state, 'live')
+    assert.deepEqual(resumes, [[q.instance, 1]], 'onResume registers the running rev (the collector answers frontend reports against it)')
     // requests keep it alive; silence stops it again
     for (let i = 0; i < 4; i++) { await sleep(120); assert.equal((await api(sup, q, '/rev')).status, 200) }
     assert.equal(sup.resolve('acme', 'quiet').state, 'live')
