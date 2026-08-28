@@ -12,10 +12,11 @@
 // dropped (C4 surprise 7); a stream change → snapshot. Snapshots are `GET /_atelier/topics/<t>`.
 //
 // Liveness never comes from `readyState`, `online` or `navigator.onLine` — they lie on a corpse
-// (mobile-safari-1). While visible the bridge probes a silent socket every PING_MS with an
-// idempotent `resume` of a cursored topic (the client message set has no ping; any frame back
-// answers the probe); no answer within PING_MS = dead → kill() + reconnect at once. A `sub` that
-// is not acked within SUB_ACK_MS on an open socket is the same verdict. The foreground hook
+// (mobile-safari-1). While visible the bridge probes a silent socket every PING_MS with the
+// app-level loopback pair of shell/events.mjs: the tab sends `pong {at}`, the shell echoes
+// `ping {at}` (any frame back answers the probe); no answer within PING_MS = dead → kill() +
+// reconnect at once. A `sub` that is not acked within SUB_ACK_MS on an open socket is the same
+// verdict. The foreground hook
 // (visibilitychange / online / pageshow(persisted)) measures `hiddenFor` with Date.now()
 // (performance.now() may not advance in iPhone sleep): hidden > STALE_HIDE_MS or a bfcache
 // restore → reconnect at once, else probe with a FG_PONG_MS budget. A false kill costs one
@@ -139,7 +140,7 @@ export function createBridge({
   function onFrame(f) {
     if (!f || typeof f !== 'object') return
     lastFrameAt = now(); probeAt = null
-    if (f.type === 'ping') { send({ op: 'pong', at: f.at }); return }
+    if (f.type === 'ping') return                          // the echo of our `pong {at}` probe — answered above
     if (typeof f.topic !== 'string') return
     const s = topics.get(f.topic)
     if (!s) return
@@ -213,10 +214,8 @@ export function createBridge({
   // ---- liveness
   function probe() {
     if (!open()) return false
-    for (const [topic, s] of wanted()) {
-      if (s.stream) { probeAt = now(); send({ op: 'resume', topic, stream: s.stream, seq: s.seq }); return true }
-    }
-    return false
+    probeAt = now()
+    return send({ op: 'pong', at: probeAt })
   }
   function tick() {
     if (!open() || isHidden()) return

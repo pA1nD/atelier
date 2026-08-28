@@ -32,13 +32,13 @@ test('every message the tab sends is a valid protocol client message', async () 
   const H = harness({ snapshots: { t1: { stream: 'h:e1', seq: 5, rev: 1, error: null } } })
   H.bridge.start(); H.on('t1'); await H.openNow()
   H.sock().receive({ type: 'subscribed', topic: 't1', stream: 'h:e1', seq: 5 }); await H.clock.flush()
-  H.sock().receive({ type: 'ping', at: 123 })
+  await H.clock.advance(PING_MS)                                   // the liveness probe
   H.sock().receive({ type: 'gap', topic: 't1', stream: 'h:e1' }); await H.clock.flush()
   H.sock().serverClose(); await H.clock.advance(300); await H.openNow()
   const sent = H.allSent()
   assert.ok(sent.length >= 4)
   for (const m of sent) assert.equal(isClientMessage(m), true, JSON.stringify(m))
-  assert.deepEqual(sent.find((m) => m.op === 'pong'), { op: 'pong', at: 123 })
+  assert.deepEqual(sent.find((m) => m.op === 'pong'), { op: 'pong', at: H.clock.now() - 300 })
 })
 
 test('mount = sub → subscribed → one snapshot → cursor at the snapshot', async () => {
@@ -164,18 +164,19 @@ test('an empty ring: the snapshot has no stream, a gap resumes with `sub`, the e
   assert.equal(H.bridge.state().topics.t1.seq, 1)
 })
 
-test('a silent socket is probed with an idempotent resume after PING_MS; no answer within PING_MS → killed and reconnected', async () => {
+test('a silent socket is probed with `pong {at}` after PING_MS (the shell echoes `ping`); no answer within PING_MS → killed and reconnected', async () => {
   const H = harness({ snapshots: { t1: { stream: 'h:e1', seq: 5 } } })
   H.bridge.start(); H.on('t1'); await H.openNow()
   H.sock().receive({ type: 'subscribed', topic: 't1', stream: 'h:e1', seq: 5 }); await H.clock.flush()
   const first = H.sock()
   await H.clock.advance(PING_MS)                                   // silent for 1 s → probe
-  assert.deepEqual(first.ops('resume'), [{ op: 'resume', topic: 't1', stream: 'h:e1', seq: 5 }])
+  assert.deepEqual(first.ops('pong'), [{ op: 'pong', at: H.clock.now() }])
   assert.equal(H.bridge.state().probing, true)
-  first.receive({ type: 'resumed', topic: 't1', stream: 'h:e1', seq: 5 })
+  first.receive({ type: 'ping', at: H.clock.now() })              // the echo answers it — and is never answered back (no loop)
   assert.equal(H.bridge.state().probing, false)
+  assert.equal(first.ops('pong').length, 1)
   await H.clock.advance(PING_MS)                                   // silent again → another probe, unanswered
-  assert.equal(first.ops('resume').length, 2)
+  assert.equal(first.ops('pong').length, 2)
   await H.clock.advance(PING_MS + 1)
   assert.equal(first.closedByClient, true)
   assert.equal(FakeWebSocket.instances.length, 2)                 // reconnect at once, no backoff
@@ -190,10 +191,10 @@ test('any frame answers the probe; a hidden tab is never probed', async () => {
   H.sock().receive({ type: 'subscribed', topic: 't1', stream: 'h:e1', seq: 5 }); await H.clock.flush()
   H.h.hidden = true; H.bridge.onHidden()
   await H.clock.advance(10 * PING_MS)
-  assert.equal(H.sock().ops('resume').length, 0)
+  assert.equal(H.sock().ops('pong').length, 0)
   assert.equal(FakeWebSocket.instances.length, 1)
   H.h.hidden = false; H.bridge.onForeground('visibilitychange')   // 10 s hidden < 30 s → probe with the 500 ms budget
-  assert.equal(H.sock().ops('resume').length, 1)
+  assert.equal(H.sock().ops('pong').length, 1)
   H.sock().receive({ type: 'invalidate', topic: 't1', stream: 'h:e1', seq: 6 })   // an invalidate is an answer too
   await H.clock.advance(FG_PONG_MS + 1)
   assert.equal(FakeWebSocket.instances.length, 1)
@@ -221,7 +222,7 @@ test('foreground after a short hide: probe, 500 ms pong budget, killed when unan
   H.h.hidden = true; H.bridge.onHidden()
   await H.clock.advance(5000)
   H.h.hidden = false; H.bridge.onForeground('visibilitychange')
-  assert.equal(first.ops('resume').length, 1)
+  assert.equal(first.ops('pong').length, 1)
   await H.clock.advance(FG_PONG_MS - 1)
   assert.equal(FakeWebSocket.instances.length, 1)
   await H.clock.advance(2)
@@ -239,8 +240,17 @@ test('pageshow(persisted) → reconnect at once whatever the hidden time; `onlin
   assert.equal(FakeWebSocket.instances.length, 2)
   await H.openNow()
   H.bridge.onForeground('online')
-  assert.equal(H.sock().ops('resume').length, 2)                  // the announce + the probe
+  assert.equal(H.sock().ops('resume').length, 1)                  // the announce
+  assert.equal(H.sock().ops('pong').length, 1)                    // the probe
   assert.equal(FakeWebSocket.instances.length, 2)
+})
+
+test('a probe needs no cursored topic: a fresh subscription on a silent socket is probed too', async () => {
+  const H = harness()
+  H.bridge.start(); H.on('t1'); await H.openNow()
+  H.sock().receive({ type: 'subscribed', topic: 't1', stream: null, seq: 0 }); await H.clock.flush()
+  await H.clock.advance(PING_MS)
+  assert.equal(H.sock().ops('pong').length, 1)
 })
 
 test('foreground with no socket → connect; while connecting → wait for onclose/backoff', async () => {

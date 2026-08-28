@@ -4,7 +4,7 @@ The fork of the 1.x `client.jsx` + `index.html`, built by the shell and served a
 `/assets/client.js`. The 1.x files at the repo root are untouched (`atelier <id>` still runs them).
 
 ```
-node --test client/test/*.test.js        # 78 tests, no browser, no host process
+node --test client/test/*.test.js        # 79 tests, no browser, no host process
 ```
 
 ## Files
@@ -33,7 +33,7 @@ node --test client/test/*.test.js        # 78 tests, no browser, no host process
   `/_atelier/rail` and `/_atelier/topics/company:<c>` → `{stream, seq, modules:[rows], chrome:{qid, digest}}` (`chromeRev` also accepted).
 - `GET /_atelier/wake?company=<c>` → `{ok:true}` when the host answers; a `503 {waking:true}` (+ `x-atelier-waking: 1`) anywhere on `/_atelier/*` or a failed bundle import that the wake probe confirms → the waking fallback.
 - `GET /_atelier/whoami` (200 / 401) for the banner's offline-vs-unauthed probe; `POST /_atelier/report` for the reporter.
-- The socket `/_atelier/ws` per protocol/events. **Liveness probe:** the client message set has no `ping`, so a silent socket is probed with an idempotent `resume` of a cursored topic every `PING_MS` (1 s) while visible; any frame back is the answer; none within 1 s → kill + reconnect. A `sub` unacked for 2 s on an open socket is the same verdict. The server's `ping {at}` frames are answered with `pong {at}`.
+- The socket `/_atelier/ws` per protocol/events. **Liveness probe** (the loopback pair of `shell/events.mjs`): a silent socket is probed with `pong {at}` every `PING_MS` (1 s) while visible and the shell echoes `ping {at}`; any frame back is the answer (a `ping` is never answered — no loop); none within 1 s → kill + reconnect. A `sub` unacked for 2 s on an open socket is the same verdict.
 
 ## Behaviour (the 4b table, DESIGN §4)
 
