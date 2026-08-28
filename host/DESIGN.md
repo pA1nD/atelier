@@ -452,7 +452,10 @@ the app folder as the current user and skips freeze (logged).
   dotfiles, `_*`, `package.json`, `package-lock.json`, `CLAIM-REFUSED.txt`; quiescence = two
   fingerprints (path+size+mtime of the non-excluded set) 100 ms apart identical; overflow or
   `watcher error` → full rescan; heal rule: while an app is in load-error state, `node_modules`/lockfile
-  events pass; `package.json`/lockfile events go to `installDeps` (§4.1) and, on success, a rebuild.
+  events pass; `package.json`/lockfile events go to `installDeps` (§4.1) and, on success, a rebuild — but only
+  when the manifest CONTENT (package.json + package-lock.json) actually changed (`manifestHash`): the
+  two-phase install writes package-lock.json back into the app folder, and gating on the fs event alone
+  would loop the installer on the freeze's own byte-identical lockfile rewrite.
   Budget: ≤ 2 k inotify watches for 5 corpus apps (g8: 1 687).
 - Build = one revision: rev counter `revision.json.rev + 1` (bumped on LIVE and FAILED alike,
   persisted in the marker dir before the worker starts); frontend per-file transform (esbuild
@@ -978,3 +981,72 @@ Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`
     finding `.atelier` renamed or removed → `enterFault(why)`: 503 on both listeners, no scans, no
     builds, no resumes, `host-ready` unlinked, one `worker` report per app (OR16), the log line
     repeated every 5 s; never a fresh boot — the operator restores the tree.
+
+## I1. Drill rows — the launcher (`host/drill/launcher/`) and the integrated rows (`host/drill/rows/`) on fsn-01 (current state)
+
+Two backgrounded fsn-01 drills on the pinned agent image, throwaway namespaces, last line `VERDICT:`,
+evidence in `design/atelier2/r2/spike-host-step2-rows/`. Both bind the §4.3 pod (`hostUsers:false`,
+root, caps `{SETUID,SETGID,CHOWN,KILL}` — **no DAC_OVERRIDE**, no fsGroup, `restartPolicy: Always`).
+
+- **`drill/launcher/`** (DESIGN §8.2 rows 1–6, the launcher supervising the host PROCESS): PID 1 =
+  the real `entrypoint.sh` → `launcher.mjs`; the host is `host-stub.mjs` (fd-3 check, `host-ready`,
+  HTTP 200 on :1845) and the session supervisor the sleeper — neither has dependencies. The stub is
+  shipped AS `host/index.mjs` (the `code` mount is idmapped and 501-owned; container-root cannot
+  overwrite a file there in place). PASS: Ready ≤ 4 s after the container start; `inpod` 61/0 (the
+  tree at its `uid:gid mode` incl. `/tmp/.X11-unix 1777`, tokens with the right readers, env rows
+  H/S/X, umasks, the tmux/X11 rules, `node --test launcher*` inside the pod); `kill -9` the host →
+  a fresh host pid, launcher + supervisor pids unchanged, host-ready back < 0.5 s, **1/189 non-200**
+  in the peer's 50 ms loop (the stub is the server, only it restarts), one `.host-crash` line
+  `1000:1000 0600 {signal:SIGKILL, exits:1}`; `kill -TERM 1` → supervisor exit 1 mirrored as the
+  container exit, in-place restart, dev token re-minted, the `session` dir reclaimed; ten kills →
+  parked at 10/10 min, pod stays Running-unready, 11 crash lines, supervisor untouched; pod delete
+  grace 40 → gone in ~1 s.
+- **`drill/rows/`** (rows 5–8 on the INTEGRATED host, step-2's pod + fake spine): apps `probe`,
+  `hello`, `locker`, `deps` copied in as uid 1000 after Ready; queried through the dev shell on
+  loopback with the dev token.
+  - **row 3′ (host kill, integrated)**: the door IS the host, so `kill -9` is a full :1844 outage of
+    ~180 ms (a few 50 ms probes) — recorded, not gated at ≤ 2 (that is the launcher stub's row). The
+    launcher SIGKILLs the dead host's detached orphan workers (`orphanedWorkers()` over `/proc`,
+    uid 20000–65535) before restarting; the second life resumes them fresh — the fix for the g4
+    sqlite double-worker hazard. Crash→ready ~180 ms; all four pre-kill workers gone after.
+  - **row 6 (jail from a worker)**: credential / peer dataDir / peer socket / dev-shell socket /
+    both tokens / `.claude` / `/control` / `agent.log` / `last-good` / `data` all EACCES;
+    `127.0.0.1:1844` without a token and with a wrong token → 401; env keys = row W + the spine-held
+    `DRILL_CONFIG`; `last-good/<inst>` EACCES as uid 1000.
+  - **row 7 (watchdogs)**: CPU burn → the `cpu throttled 25+ cycles/min` report in agent.log, the
+    worker seen `State: T` ~420/1200 samples, the peer's `hello` p50 ~1 ms / **max < 5 ms**, worker
+    pid unchanged. A single 2 GB `Buffer` → in-worker `RangeError` (`ERR_MEMORY_ALLOCATION_FAILED`),
+    `memory.events oom_kill 0`, pid unchanged; the chunked 64 MB-piece variant walls the same way.
+    Fork 200 → ~57 spawned + ~143 `EAGAIN` at RLIMIT_NPROC 64; the storm can exhaust the uid's
+    thread budget and abort the worker (the jail containing it) — the supervisor resumes it either
+    way (recorded).
+  - **row 8 (install)**: the hostile `loot-pkg` postinstall's 4755 plant → `FREEZE-ABORT
+    setuid/setgid … refused` + `cleanup rc=0`, nothing lands in the app folder, the agent gets a
+    `[deps] rev N FAILED … setuid-refused` line. The gate removed → thaw (no-op) → cold `npm install`
+    rc=0 (~1.3 s warm, a native `better-sqlite3@12` prebuild + the postinstall dep + `core-js`) →
+    freeze ~23 ms (≤ 100 ms) → LIVE at a new rev; `/deps` from the worker = `{sqlite:42, loot:'1.0.0',
+    corejs:'ok'}`; the tree as uid 1000 is `1000:<uid>`, no g/o-write, no setuid, all group-readable;
+    0 `KILLED` lines. A THIRD save → thaw / no-op install / freeze#2 rc=0.
+  - **row 5 (the sqlite overlap gate, PLAN §10 item 1)**: `locker` holds an EXCLUSIVE `node:sqlite`
+    lock in its dataDir and writes every 50 ms; **10 of 10 saves went LIVE, 0 FAILED, each needing
+    exactly ONE mount retry after the old worker exited** (10 retries / 10 saves), rows and writes
+    preserved (count 54 → ~450). The single retry after the old worker exits is SUFFICIENT — the
+    mount-then-swap-then-retry rule (§6.1) is confirmed; kill-old-then-mount is not needed.
+
+Two defects the rows drill found and fixed (both unit-tested):
+1. **A dead host orphaned its workers.** The host spawns workers detached (`setsid`, §2.2); on a
+   `kill -9` of the host they were reparented to PID 1 and kept their sockets, sqlite locks and CPU
+   beside the next life's workers. `launcher.mjs` now `orphanedWorkers()` + SIGKILL before every
+   restart (§2.1 step 4). Also: the FIRST host exit in a window now restarts at once (0 ms) — one
+   crash is not a loop, and the blink after a kill is the host's boot alone.
+2. **A re-install after a freeze failed.** `freeze.py` hands `scratch/build` to the agent (1000) for
+   the rename and leaves it there; the next install's `applyJail(installPlan)` wanted it `<uid>:<uid>`
+   and refused the agent-owned dir with `EOWNER` BEFORE thaw could reclaim it. `installDeps` now drops
+   build's three plan steps when build already exists — thaw moves the frozen tree back and re-owns
+   build to the worker (`host/worker/install.mjs`).
+3. **The two-phase install looped.** The freeze copies package-lock.json back into the watched app
+   folder; the watcher fired `onInstall` on that fs event, which ran another install, whose freeze
+   rewrote the (byte-identical) lockfile — an endless thaw/freeze loop every ~2 s. It was masked by
+   defect 2 (the re-install failed at applyJail) until that was fixed. The watcher now gates
+   `onInstall` on the manifest CONTENT (`manifestHash` over package.json + package-lock.json), so an
+   identical lockfile rewrite — or a bare touch — does not re-trigger the installer (`supervisor/watcher.mjs`).

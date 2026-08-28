@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createWatcher, fingerprint, excluded } from '../supervisor/watcher.mjs'
+import { createWatcher, fingerprint, excluded, manifestHash } from '../supervisor/watcher.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const mk = () => {
@@ -146,4 +146,29 @@ test('the folder itself removed → onGone, no change', async () => {
   assert.equal(changes.length, 0)
   assert.equal(w.watchCount(), 0)
   w.stop()
+})
+
+test('onInstall gates on manifest CONTENT: the two-phase install\'s identical lockfile rewrite (and a bare touch) do not re-trigger it — the loop breaker', async () => {
+  const dir = mk()
+  const installs = []
+  const w = createWatcher({ dir, quiesceMs: Q, onInstall: () => installs.push(1), onChange: () => {} })
+  w.start()
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"dependencies":{"a":"1"}}')
+  await until(() => installs.length === 1)
+  // the freeze writes package-lock.json (new content) → one install
+  fs.writeFileSync(path.join(dir, 'package-lock.json'), '{"lockfileVersion":3}')
+  await until(() => installs.length === 2)
+  // the next install's freeze rewrites the SAME lockfile byte-for-byte → NO new install
+  fs.writeFileSync(path.join(dir, 'package-lock.json'), '{"lockfileVersion":3}')
+  await settle()
+  assert.equal(installs.length, 2, 'a byte-identical lockfile rewrite does not re-trigger the installer')
+  // a bare touch (mtime only) → NO install
+  fs.utimesSync(path.join(dir, 'package.json'), new Date(), new Date())
+  await settle()
+  assert.equal(installs.length, 2, 'a mtime-only touch does not re-trigger the installer')
+  // a real content change → one install
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"dependencies":{"a":"2"}}')
+  await until(() => installs.length === 3)
+  w.stop()
+  fs.rmSync(dir, { recursive: true, force: true })
 })

@@ -55,6 +55,19 @@ export function fingerprint(dir, fs = nodeFs) {
   return { hash: createHash('sha1').update(rows.join('\n')).digest('hex'), files: rows.length, dirs }
 }
 
+/** manifestHash(dir, fs) — a hash over the CONTENT of the install manifests (package.json +
+ *  package-lock.json), '' for an absent file. onInstall fires only when this changes, so the
+ *  two-phase install's own byte-identical lockfile rewrite does not re-trigger the installer. */
+export function manifestHash(dir, fs = nodeFs) {
+  const h = createHash('sha1')
+  for (const name of INSTALL_FILES) {
+    let data = ''
+    try { data = fs.readFileSync(path.join(dir, name), 'utf8') } catch {}
+    h.update(name).update('\0').update(data).update('\0')
+  }
+  return h.digest('hex')
+}
+
 /**
  * createWatcher({dir, fs, quiesceMs, onChange, onInstall, onGone, isBroken, log})
  *   .start() → the initial fingerprint   .stop()   .watchCount()   .touch() (schedule a rescan)
@@ -110,7 +123,12 @@ export function createWatcher({ dir, fs = nodeFs, quiesceMs = 100, onChange = ()
       if (a.hash === b.hash && !dirty) { a = b; break }
       a = b
     }
-    const install = installDirty; installDirty = false
+    // onInstall fires only when the manifest CONTENT changed — the two-phase install writes
+    // package-lock.json back into the app folder, and an fs event alone (that write, or a bare touch)
+    // would re-trigger the installer in an endless thaw/freeze loop (the freeze's own lock rewrite is
+    // byte-identical). Gating on content makes a re-install idempotent.
+    let install = false
+    if (installDirty) { installDirty = false; const m = manifestHash(dir, fs); if (m !== w.manifest) { w.manifest = m; install = true } }
     if (a.hash === null) { reconcile([]); onGone(); return }
     reconcile(a.dirs)
     if (install) onInstall()
@@ -118,7 +136,7 @@ export function createWatcher({ dir, fs = nodeFs, quiesceMs = 100, onChange = ()
     if (a.hash !== w.settled || healing) { w.settled = a.hash; onChange(a.hash) }
   }
 
-  w.start = () => { const fp = fingerprint(dir, fs); w.settled = fp.hash; reconcile(fp.dirs); return fp }
+  w.start = () => { const fp = fingerprint(dir, fs); w.settled = fp.hash; w.manifest = manifestHash(dir, fs); reconcile(fp.dirs); return fp }
   w.stop = () => { stopped = true; for (const fw of watches.values()) { try { fw.close() } catch {} } watches.clear() }
   w.watchCount = () => watches.size
   w.touch = () => { dirty = true; schedule() }
