@@ -51,9 +51,9 @@ log "waiting for the stage init container"
 for i in $(seq 1 300); do [ "$($K get pod computer -o jsonpath='{.status.initContainerStatuses[?(@.name=="stage")].state.running.startedAt}' 2>/dev/null)" != "" ] && break; sleep 1; done
 $K cp $CODE/code.tgz computer:/tmp/code.tgz -c stage || { echo "VERDICT: BLOCKED — kubectl cp into stage failed"; exit 1; }
 t0=$(now)
-$K exec computer -c stage -- sh -c 'tar xzf /tmp/code.tgz -C /code 2>&1 | grep -v "Ignoring unknown extended header"; cd /code && timeout 300 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3 && ls /code/node_modules/@esbuild /code/node_modules/@tailwindcss && touch /code/.staged' | sed 's/^/    | /'
-X_STAGED=$($K exec computer -c stage -- sh -c 'test -f /code/.staged && echo yes' 2>/dev/null)
-[ "$X_STAGED" = yes ] || { echo "VERDICT: BLOCKED — stage (untar + npm ci) failed after $(el $t0) s"; exit 1; }
+$K exec computer -c stage -- sh -c 'tar xzf /tmp/code.tgz -C /code 2>&1 | grep -v "Ignoring unknown extended header"; cd /code && timeout 300 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3 && ls /code/node_modules/@esbuild /code/node_modules/@tailwindcss && touch /code/.staged && echo STAGED-OK' | tee $OUT/stage.log | sed 's/^/    | /'
+# the stage container exits the moment .staged lands — the verdict is the echo, not a second exec
+grep -q STAGED-OK $OUT/stage.log || { echo "VERDICT: BLOCKED — stage (untar + npm ci) failed after $(el $t0) s"; exit 1; }
 log "staged in $(el $t0) s (npm ci for the linux esbuild/tailwind binaries); waiting for Ready (fleet mode: after registration)"
 T_STAGED=$(now)
 RDY=$(waitready 120)
