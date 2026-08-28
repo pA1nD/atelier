@@ -16,25 +16,19 @@ with the rev unchanged and the API still on the old rev, the fix clears it, fram
 
 ## The browser rows through `npx atelier` (horse-browser, Chrome, 2026-08-29)
 
-Setup: `/tmp/atelier-drill/` with `weather/` and `toybox/` copied from `003-atelier-modules` (no
-`module.json` — the generator wrote them) and `catalyst-chrome` symlinked; `ATELIER_ROOT=/tmp/atelier-drill
-PORT=18440 NODE_ENV=production node cli.js` as one bounded background task (`timeout 480`). Note:
-`resolveRoot` picks the PARENT of `$PWD` when `ATELIER_ROOT` is unset (1.x rule) — the first run rooted at
-`/tmp` and wrote a `module.json` into a stranger's `/tmp/esb-probe`; and the generator writes THROUGH a
-symlinked module folder (the chrome's `module.json` landed in `~/pro/001-atelier/catalyst-chrome`, removed
-by hand). Both are lane B's discovery surfaces — recorded here, not fixed here.
+The full run of DESIGN §7.3 rows a–g with the evidence and the six fixes it produced is
+`design/atelier2/r2/spike-local-step4/RESULT.md` (screenshots beside it and in `out/`). In one line each:
 
 | row | result |
 |---|---|
-| a. `/global/weather`, `/global/toybox` render inside catalyst-chrome | PASS — live Open-Meteo data on screen; 16 resources, 0 failed loads (only `/favicon.ico` 404); bootstrap `chromeApi: 2`, `chromes: ['global/catalyst-chrome']`; ONE shell `<link>` = the app sheet `styles.css?rev=1` (the second stylesheet on the page is the chrome's own rsms.me Inter, injected by chrome JS); preloads after the import map; 492 246 B transferred (≤ 500 KB budget); `out/a-weather.png` |
-| b. API through the shell from the page | PASS — `/api/global/toybox/skills` 200 with a forged `x-atelier-user: admin` (stripped; `/_atelier/whoami` = `local`); weather's own `/current?lat…`/`/forecast?lat…` calls 200 (a bare `/current` is the app's own 400) |
-| c. a save while the page is open | PASS — `toybox/backend.js` edited twice → the socket's `invalidate` → the client fetched `/_atelier/topics/<instance>`, re-imported `frontend.js?rev=3` with NO navigation (a page-lifetime marker survived, navigation count 1), the sheet moved to `styles.css?rev=3`, `fetch(/api/global/toybox/skills)` returned the new field; `out/c-toybox-after-save.png`. The gap/300-events row is the unit test's (`shell/test/events.test.js`) and the smoke's contiguity row |
-| d. hard reload (`Page.reload ignoreCache`) | PASS — renders, 0 failed loads, every `/modules/*` URL carries `?rev=N`, no `?v=` and no `?token=` on any host URL (the only `?v=4.1` is rsms.me's font) |
-| e. SPA navigation weather → toybox → weather by rail click | PASS — no navigation (marker kept), `#atelier-chrome-styles` moved to `/modules/global/toybox/styles.css?rev=1` and back, exactly one link at rest; cost not measured here (§10 item 13) |
-| f. the waking page | covered by `smoke.sh` (SIGSTOP/SIGCONT rows); the CLI restart after `kill -9` is lane B's `cli-local-spawn.test.js` |
-| g. `atelier <id>` unchanged | lane B's (`cli-local.test.js`: the dispatch line fires only for a bare `atelier`) |
+| a. `/global/weather`, `/global/toybox` in catalyst-chrome | PASS — live data, 0 console errors, 0 failed loads but `/favicon.ico`, `chromeApi: 2`, one shell `<link>` (`?rev=`), preloads after the import map, 396 KB |
+| b. API through the shell | PASS — forged `x-atelier-user`/`authorization` stripped, `whoami` = `local`, the chrome's own `/api/global/catalyst-chrome/docs` 200 |
+| c. save → invalidate → re-import without navigation; offline + 300 broadcasts over the ring → exactly one `gap`, one snapshot, `resumed` at 301; `kill -STOP` the shell → the 1 s probe kills the socket, `-CONT` → resumed; broken save → overlay `backend.js:43:1 … — fix …`, the fix clears it | PASS |
+| d. hard reload | PASS — `?rev=` everywhere, no `?v=`/`?token=` |
+| e. SPA weather ↔ toybox | PASS — one sheet at rest, no CSS leak, swap 4–33 ms |
+| f. waking page | PASS — host `-STOP` → 503 in 1.0 s + `WakingFallback`; `-CONT` → self-reload; `kill -9` → CLI restart in 0.5 s, API back in 2.1 s, the tab re-snapshots on the new epoch |
+| g. 1.x unchanged | PASS — `atelier weather` standalone with 0 `shell/` imports; `atelier list` |
 
-Seen in the host log during the run, not the shell's: the chrome staged as an app builds `FAILED (never
-live)` — `alert.jsx:4:22 Could not resolve "./text"` (extensionless imports in the host's per-file
-transform); the chrome's ASSETS come from `ATELIER_CHROME_DIR` (the dev shell's bundle) and rendered fine,
-its `/api/global/catalyst-chrome/*` backend does not answer until that resolves.
+Setup note kept from the first run: `resolveRoot` picks the PARENT of `$PWD` when `ATELIER_ROOT` is unset (1.x
+rule) — run a dev checkout with `ATELIER_ROOT=<instance>`; and the `module.json` generator writes THROUGH a
+symlinked module folder (copy the chrome, or accept the file in its real folder).

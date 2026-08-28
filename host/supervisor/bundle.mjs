@@ -10,8 +10,10 @@
 //                   `React.Fragment`, the global React — never `import React`), es2020, esm;
 //                   `.jsx` → `.js` siblings; relative import specifiers carry `?rev=N` so a new
 //                   revision re-fetches the whole first-party graph (1.x `?v=`, DESIGN §4.3
-//                   `?rev=N`); a relative import that resolves to nothing is a build failure
-//                   (the half-written multi-file save).
+//                   `?rev=N`); an extensionless `./x` / a `./x.jsx` / a folder import is rewritten
+//                   to the served `.js` path (servedSpecifier, as the 1.x bundler resolved them);
+//                   a relative import that resolves to nothing is a build failure (the
+//                   half-written multi-file save).
 //   classify        the failure classes → {file, line, col, message, hint}; `formatHint` prints
 //                   `file:line:col message — hint` (DESIGN §6.3, seed agent-contract-1).
 import nodeFs from 'node:fs'
@@ -220,6 +222,19 @@ const IMPORT_RES = [
   /(\bimport\s*\(\s*)(["'])(\.{1,2}\/[^"'?]*)(\2)/g,
   /(\bimport\s+)(["'])(\.{1,2}\/[^"'?]*)(\2)/g,
 ]
+// servedSpecifier(fromDir, spec, fs) → the specifier the browser fetches, or null when nothing on disk
+// answers it. As the 1.x bundler resolved them: an exact file as written (`.jsx` → its `.js` sibling
+// in the served tree), an extensionless `./x` → `x.jsx` | `x.js`, a folder → its `index.jsx` | `index.js`.
+export function servedSpecifier(fromDir, spec, fs = nodeFs) {
+  const target = path.resolve(fromDir, spec)
+  const isFile = (p) => { try { return fs.statSync(p).isFile() } catch { return false } }
+  if (/\.jsx$/.test(spec)) return isFile(target) ? spec.replace(/\.jsx$/, '.js') : null
+  if (/\.js$/.test(spec)) return isFile(target) || isFile(target.slice(0, -3) + '.jsx') ? spec : null
+  if (isFile(target)) return spec
+  if (isFile(`${target}.jsx`) || isFile(`${target}.js`)) return `${spec}.js`
+  if (isFile(path.join(target, 'index.jsx')) || isFile(path.join(target, 'index.js'))) return `${spec.replace(/\/$/, '')}/index.js`
+  return null
+}
 // versionRelativeImports(code, rev) — 1.x server.js `versionRelativeImports`, `?rev=` instead of `?v=`.
 export function versionRelativeImports(code, rev) {
   let out = String(code)
@@ -248,16 +263,18 @@ export async function transformFrontend({ appDir, rev, fs = nodeFs }) {
   for (const [out, s] of byOut) {
     let src
     try { src = fs.readFileSync(s.abs, 'utf8') } catch (e) { problems.push({ file: s.rel, line: 1, col: 1, message: `unreadable: ${e.code}`, hint: 'the file vanished or is unreadable — re-save it' }); continue }
+    const rewrites = new Map()   // spec → the served specifier (`./x` → `./x.js`, `./x.jsx` → `./x.js`, `./dir` → `./dir/index.js`)
     for (const spec of relativeSpecifiers(src)) {
-      const target = path.resolve(path.dirname(s.abs), spec)
-      const ok = fs.existsSync(target) || (target.endsWith('.js') && fs.existsSync(target.slice(0, -3) + '.jsx'))
-      if (!ok) { problems.push({ file: s.rel, ...locateImport(src, spec), message: `Could not resolve "${spec}"`, hint: jsxHint(`Could not resolve "${spec}"`, s.rel) }) }
+      const served = servedSpecifier(path.dirname(s.abs), spec, fs)
+      if (!served) { problems.push({ file: s.rel, ...locateImport(src, spec), message: `Could not resolve "${spec}"`, hint: jsxHint(`Could not resolve "${spec}"`, s.rel) }); continue }
+      if (served !== spec) rewrites.set(spec, served)
     }
     let code
     try {
       const r = await esbuild.transform(src, { loader: 'jsx', format: 'esm', jsx: 'transform', jsxFactory: 'React.createElement', jsxFragment: 'React.Fragment', target: 'es2020', sourcefile: s.rel, minify: false, logLevel: 'silent' })
       code = r.code
     } catch (e) { problems.push(...fromEsbuild('jsx', s.rel, e)); continue }
+    if (rewrites.size) for (const re of IMPORT_RES) code = code.replace(re, (m, a, q, p) => rewrites.has(p) ? `${a}${q}${rewrites.get(p)}${q}` : m)
     files.set(out, versionRelativeImports(code, rev))
   }
   if (problems.length) throw { problems }

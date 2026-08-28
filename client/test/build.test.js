@@ -72,7 +72,7 @@ test('the bundle evaluates under a stub browser: the socket opens, the hooks are
   try {
     await import(file)
     assert.equal(FakeWebSocket.instances.length, 1)
-    assert.equal(FakeWebSocket.last().url, 'ws://localhost:18440/_atelier/ws')
+    assert.equal(FakeWebSocket.last().url, 'ws://localhost:18440/_atelier/ws?company=global')
     assert.ok(listeners.document.visibilitychange && listeners.window.online && listeners.window.pageshow, 'foreground hooks wired')
     assert.ok(listeners.window.error && listeners.window.unhandledrejection, 'reporter wired')
     assert.ok(globalThis.__rendered, 'root rendered')

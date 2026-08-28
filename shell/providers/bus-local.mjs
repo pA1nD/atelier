@@ -130,8 +130,11 @@ export function createBusLocal({ registry, hostLink, log = () => {}, now = Date.
       const chrome = registry.chrome(company)
       return { ...base, modules: rows.map(moduleRow), chrome: { qid: chrome.qid, digest: chrome.digest }, chromeRev: chrome.digest }
     }
-    const row = await registry.byInstance(topic)
+    let row = await registry.byInstance(topic)
     if (!row) return null
+    // the snapshot answers an invalidate the host just sent: read the host's row NOW (the registry's
+    // 5 s view may still carry the previous rev — a fixed save would otherwise keep the old error)
+    try { await registry.refresh?.(row.company); row = (await registry.byInstance(topic)) ?? row } catch {}
     let error = null
     const hostRow = await registry.host(row.company)
     if (hostRow?.port) {

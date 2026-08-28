@@ -70,14 +70,17 @@ const instanceFor = (company, app) => (company === COMPANY ? rowByQid(`${company
 const DEV_TOKEN = (() => { try { return new URLSearchParams(window.location.search).get('token'); } catch { return null; } })();
 const withDevToken = (url) => (DEV_TOKEN ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(DEV_TOKEN)}` : url);
 
-const WS_URL = withDevToken(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/_atelier/ws`);
+// Locally the shell learns the document's company from `?company=` (the fleet derives it from the Host
+// and ignores the query) — the socket's `company:<c>` ACL and /_atelier/rail need it.
+const withCompany = (url) => (COMPANY ? `${url}${url.includes('?') ? '&' : '?'}company=${encodeURIComponent(COMPANY)}` : url);
+const WS_URL = withDevToken(withCompany(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/_atelier/ws`));
 const bridge = createBridge({
   url: WS_URL, WebSocket: window.WebSocket, fetch: (u, o) => window.fetch(u, o), now: () => Date.now(),
   setTimeout: (f, ms) => window.setTimeout(f, ms), clearTimeout: (t) => window.clearTimeout(t),
   setInterval: (f, ms) => window.setInterval(f, ms), clearInterval: (t) => window.clearInterval(t),
   isHidden: () => document.visibilityState === 'hidden',
   onState: (state) => { try { window.dispatchEvent(new CustomEvent('atelier:connection', { detail: { state } })); } catch {} },
-  snapshotUrl: (topic) => withDevToken(`/_atelier/topics/${encodeURIComponent(topic)}`),
+  snapshotUrl: (topic) => withDevToken(withCompany(`/_atelier/topics/${encodeURIComponent(topic)}`)),
   whoamiUrl: withDevToken('/_atelier/whoami'),
 });
 // The foreground hook (§4.4 tab liveness): hidden time is measured inside the bridge with Date.now().
@@ -392,7 +395,7 @@ function App() {
     if (!snap || typeof snap !== 'object') return;
     setBackendErrors((prev) => {
       const next = prev.filter((e) => e.qid !== qid);
-      if (snap.error && snap.error.message) next.push({ qid, message: snap.error.message });
+      if (snap.error && snap.error.message) next.push({ qid, message: snap.error.hint || snap.error.message });   // the hint is `file:line:col message — fix`
       return next;
     });
     if (snap.rev == null) return;
@@ -415,7 +418,7 @@ function App() {
       const topic = m.instance;
       subsRef.current.set(qid, subscribe(topic, (ev) => {
         if (ev.type === 'snapshot') { applyTopic(qid, ev.snapshot); return; }
-        if (ev.type === 'invalidate') { fetchJson(`/_atelier/topics/${encodeURIComponent(topic)}`).then((s) => applyTopic(qid, s)).catch((e) => { if (e.waking) setWaking(true); }); return; }
+        if (ev.type === 'invalidate') { fetchJson(withCompany(`/_atelier/topics/${encodeURIComponent(topic)}`)).then((s) => applyTopic(qid, s)).catch((e) => { if (e.waking) setWaking(true); }); return; }
         if (ev.type === 'waking') setWaking(true);
       }));
     }
@@ -437,7 +440,7 @@ function App() {
     if (!COMPANY) return;
     return subscribe(`company:${COMPANY}`, (ev) => {
       if (ev.type === 'snapshot') { applyRail(ev.snapshot); return; }
-      if (ev.type === 'invalidate') { fetchJson('/_atelier/rail').then(applyRail).catch((e) => { if (e.waking) setWaking(true); }); return; }
+      if (ev.type === 'invalidate') { fetchJson(withCompany('/_atelier/rail')).then(applyRail).catch((e) => { if (e.waking) setWaking(true); }); return; }
       if (ev.type === 'waking') setWaking(true);
     });
   }, []);

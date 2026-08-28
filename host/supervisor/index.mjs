@@ -32,7 +32,7 @@ export const DEFAULT_TIMING = Object.freeze({
 
 /** @typedef {{instance, slug, company, uid, rev:number|null, state:'live'|'stopped'|'loading'|'failed'|'unclaimed', pid?:number, sock?:string, dataDir, dir}} AppRow */
 
-export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report = () => {}, registrar, onSwap = () => {}, spawn, proxy, fs = nodeFs, timing = {}, jail = null, install = null, onBroadcast = () => {}, hostVersion = '2.0.0', treeOk = () => true }) {
+export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report = () => {}, registrar, onSwap = () => {}, onResume = () => {}, spawn, proxy, fs = nodeFs, timing = {}, jail = null, install = null, onBroadcast = () => {}, hostVersion = '2.0.0', treeOk = () => true }) {
   const T = { ...DEFAULT_TIMING, ...timing }
   const emit = typeof log === 'function' ? log : (line) => log.write(line)
   const store = createStore({ os, dirfd, fs, log: emit, hostVersion })
@@ -276,6 +276,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         // the crash ladder resets only once the resumed worker has stayed up for stableMs — a worker that
         // dies right after READY climbs it (0.5 → 30 s), never relaunches every 500 ms
         later(T.stableMs, () => { if (row.live === next.live) row.restarts = 0 })
+        onResume(row.instance, cur.rev)   // the running rev is a registration fact for the collector too (a resumed snapshot never swaps)
         emit(`[${row.slug}] rev ${cur.rev} RESUMED ${Math.round(os.now() - t0)} ms`)
         armIdle(row)
         return row.live

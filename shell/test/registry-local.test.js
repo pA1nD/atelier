@@ -81,3 +81,14 @@ test('watch fires on refresh when the host rows changed (a new claim, a new rev)
   r.registry.noteProbe('global', { ok: true, epoch: 'e9' })
   assert.equal((await r.registry.host('global')).epoch, 'e9')
 })
+
+test('the host unreachable: refresh() and the poll serve the LAST rows (byInstance still resolves — the socket ACL keeps its topics), fresh rows on return', async (t) => {
+  const r = await rig(t)
+  assert.equal((await r.registry.byInstance(TODO)).slug, 'todo')
+  await r.host.stop(); r.stopped = true
+  r.tick(200)
+  assert.equal(await r.registry.refresh('global'), false)          // the mount table did not move
+  assert.equal((await r.registry.byInstance(TODO)).slug, 'todo')
+  assert.ok(r.registry.unreachableAt('global') > 0)
+  assert.ok(r.logs.some((l) => /unreachable .* serving 3 stale rows/.test(l)), r.logs.join('\n'))
+})

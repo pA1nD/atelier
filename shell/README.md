@@ -116,7 +116,7 @@ shell/
   waking.mjs         the 503 waking page, /_atelier/wake, hostState() (heartbeat/draining in the fleet, a 1 s probe in both modes)
   config.mjs         cfg from atelier.config.json + env (local) / env (fleet); the ignored-settings lines
   providers/         identity- gate- registry- bus- hostlink- ×{local,fleet}.mjs (+ hostlink-base.mjs)
-  test/              node --test shell/test/*.test.js   (54 tests, ~3 s, no host process; fixtures.mjs = the fakes)
+  test/              node --test shell/test/*.test.js   (56 tests, ~3 s, no host process; fixtures.mjs = the fakes)
   drill/smoke.mjs    the shell with local providers in front of the REAL host on this Mac (one background task, VERDICT)
 ```
 
@@ -137,7 +137,7 @@ bash shell/drill/smoke.sh > /tmp/shell-smoke.log        # + the real host: docum
   `byInstance(instance)` ⊕ (the socket and `/_atelier/topics` name topics by instance, not by company), `present(personId, instance)`,
   `host(c)` → `HostRow {hostId, epoch, token, ip, port, tls, heartbeatAt, drainingAt}`, `chrome(c)` → `{qid, dir, digest}`, `watch(c, fn)`,
   `noteProbe(c, probe)` ⊕ (the document probe feeds `heartbeatAt`/`epoch` locally), `refresh(c?)` ⊕ (lane B's fs.watch and the bus's
-  unknown-qid frame call it), `unreachableAt(c)` ⊕ (the last failed `/_atelier/apps` fetch — the last known rows are served stale meanwhile),
+  unknown-qid frame call it), `unreachableAt(c)` ⊕ (the last failed `/_atelier/apps` fetch — the last rows the host answered are served stale meanwhile, across `refresh()` and the poll too),
   `start()/stop()` (the 5 s unref'd safety poll, local). An `AppRow` carries `primary` (applied locally from
   module.json, the registry's applied value in the fleet) and `isChrome` for the chrome staged as an app (hidden from the rail).
 - `gate`: `https(req)`, `hsts(req)` ⊕ (the HSTS value; `null` locally), `hostAllowed(req)`, `ticket(req,res)`, `unauthDocument(req, {company, path})`, `origin(req, credential)`.

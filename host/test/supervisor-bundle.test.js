@@ -107,6 +107,22 @@ test('frontend failure classes: JSX syntax, and the half-written multi-file save
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('frontend relative imports resolve as the 1.x bundler did: extensionless, .jsx, a folder index — rewritten to the served .js path', async () => {
+  const dir = mkApp({
+    'frontend.jsx': `import { a } from './a'\nimport { b } from './b.jsx'\nimport { c } from './ui'\nimport { d } from './d.js'\nexport default () => a + b + c + d\n`,
+    'a.jsx': 'export const a = 1', 'b.jsx': 'export const b = 2', 'ui/index.jsx': 'export const c = 3', 'd.js': 'export const d = 4',
+  })
+  const { files } = await transformFrontend({ appDir: dir, rev: 5 })
+  const fe = files.get('frontend.js')
+  assert.ok(fe.includes(`from "./a.js?rev=5"`), fe)
+  assert.ok(fe.includes(`from "./b.js?rev=5"`), fe)
+  assert.ok(fe.includes(`from "./ui/index.js?rev=5"`), fe)
+  assert.ok(fe.includes(`from "./d.js?rev=5"`), fe)
+  fs.writeFileSync(path.join(dir, 'frontend.jsx'), `import { e } from './e'\nexport default () => e\n`)
+  await assert.rejects(transformFrontend({ appDir: dir, rev: 6 }), (e) => /Could not resolve "\.\/e"/.test(e.problems[0].message))
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('worker failure classes: MOUNT-ERROR, ERR_MODULE_NOT_FOUND (located textually), RUNTIME-DEAD, LOAD-ERROR via the source map', async () => {
   const dir = mkApp({ 'backend.js': `import { createRequire } from 'node:module'\nimport 'leftpad'\nexport default {\n  mountRoutes(router) {\n    throw new Error('db not reachable')\n  }\n}\n` })
   const mount = classifyWorkerFailure({ code: 'MOUNT-ERROR', message: 'db not reachable', line: 5, col: 11 }, { appDir: dir })

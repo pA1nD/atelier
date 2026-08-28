@@ -227,6 +227,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
       dev?.invalidate(instance)
       registrar.modulesChanged(instance, rev).catch((e) => hostLog(`modules-changed ${instance}: ${e.message}`))
     },
+    onResume: (instance, rev) => collector.setRunning(instance, rev),   // frontend reports against a resumed rev are not `no-running-rev`
     onBroadcast: (row, event) => dev?.broadcast(row.instance, event),
   })
   supervisorRef.current = supervisor
