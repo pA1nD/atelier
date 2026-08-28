@@ -126,8 +126,15 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     const m = /^\/([^/]+)\/([^/]+)/.exec(pathname)
     return m && decodeURIComponent(m[1]) === company() ? decodeURIComponent(m[2]) : null
   }
-  function document(pathname, user) {
+  // document(pathname, user, token): the 1.x document; with `token` (the `?token=` the browser
+  // presented) every URL the host writes into it — the script srcs, the sheet link, the import
+  // map — carries `?token=` too. A module fetch sends the IMPORTING MODULE's URL as referer
+  // (only a fetch() sends the document's), so a token-less `/assets/client.js` would 401 on its
+  // own `./chrome-resolve.js` import; the client carries the token onto the URLs it builds itself
+  // (bundle imports, the WS handshake, which sends no referer at all).
+  function document(pathname, user, token = null) {
     template ??= fs.readFileSync(path.join(repoRoot, 'index.html'), 'utf8')
+    const q = token ? `?token=${encodeURIComponent(token)}` : ''
     const c = company()
     const rows = supervisor.apps().filter((r) => r.company === c)
     const modules = rows.map((r) => ({ id: r.slug, meta: registrar.apps?.().get(r.instance)?.meta ?? {} }))
@@ -138,13 +145,14 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
       chromeQid, defaultChromeQid: chromeQid, chromes: chromeQid ? [chromeQid] : [],
       backendErrors: [],
     }
-    const importMap = chromeQid && (chromeHas('kit.js') || chromeHas('kit.jsx')) ? { imports: { '@atelier/kit': `/modules/${chromeQid}/kit.js` } } : null
+    const importMap = chromeQid && (chromeHas('kit.js') || chromeHas('kit.jsx')) ? { imports: { '@atelier/kit': `/modules/${chromeQid}/kit.js${q}` } } : null
     const slug = requestedSlug(pathname)
     const app = slug ? rows.find((r) => r.slug === slug) : null
     let link = ''
-    if (app) link = `<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/${c}/${app.slug}/styles.css">`
-    else if (chromeQid && chromeHas('styles.css')) link = `<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/${chromeQid}/styles.css">`
+    if (app) link = `<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/${c}/${app.slug}/styles.css${q}">`
+    else if (chromeQid && chromeHas('styles.css')) link = `<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/${chromeQid}/styles.css${q}">`
     return template
+      .replace(/(<script[^>]*\ssrc=")(\/assets\/[^"?]+)(")/g, `$1$2${q}$3`)
       .replace('/*__ATELIER_BOOTSTRAP__*/', `window.__ATELIER__ = ${JSON.stringify(bootstrap)};`)
       .replace('<!--__ATELIER_IMPORTMAP__-->', importMap ? `<script type="importmap">${JSON.stringify(importMap)}</script>` : '')
       .replace('<!--__ATELIER_CHROME_STYLES__-->', link)
@@ -220,7 +228,7 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     }
     if (RESERVED_PREFIXES.some((x) => p.startsWith(x))) return json(res, 404, {})
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, {})
-    return send(req, res, 200, document(p, user), HTML, { 'cache-control': 'no-store' })
+    return send(req, res, 200, document(p, user, url.searchParams.get('token')), HTML, { 'cache-control': 'no-store' })
   }
 
   // ---- WS multiplex (1.x wire: JSON frames {topic, ...event}; every client gets every frame,
@@ -261,8 +269,8 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     close,
     // worker {t:'broadcast'} → the app's topic (company/slug); the shell owns `topic`, last wins
     broadcast(instance, event) { const qid = qidOf(instance); if (qid) fanout({ ...event, topic: qid }) },
-    // a swap → the 1.x reload frame (the client re-imports the bundle and re-points the sheet)
-    invalidate(instance, { cssOnly = false } = {}) { const r = findInstance(supervisor, instance); if (r) fanout({ type: 'reload', moduleId: r.slug, cssOnly, topic: 'shell' }) },
+    // a swap → the 1.x reload frame + the LIVE rev (`moduleId` is the qid the client matches against its module list — a slug alone would full-reload; the client re-imports `frontend.js?rev=<rev>` and re-points the sheet)
+    invalidate(instance, { cssOnly = false } = {}) { const r = findInstance(supervisor, instance); if (r) fanout({ type: 'reload', moduleId: `${r.company}/${r.slug}`, rev: r.rev, cssOnly, topic: 'shell' }) },
     backendError(instance, message) { const qid = qidOf(instance); if (qid) fanout({ type: 'backend-error', qid, message, topic: 'shell' }) },
     clients, document, chromeQid,
   }

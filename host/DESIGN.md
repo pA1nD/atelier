@@ -874,8 +874,16 @@ Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`
    overrides (`devPort: null` = socket only), `repoRoot`. It exposes `.broadcast(instance, ev)`,
    `.invalidate(instance)`, `.backendError(instance, msg)` for the integrator (worker
    `{t:'broadcast'}`, `onSwap`, load failures). The dev token is also accepted from the `?token=`
-   of a same-origin `referer` (browser sub-requests of a `/?token=…` document); the WS handshake
-   needs the header. The bootstrap adds `workspace` and `workspaces` beside 1.x's fields (§6.5).
+   of a same-origin `referer`. A browser sends the DOCUMENT's URL as referer only for `fetch()`
+   and `<link>`/`<script>` sub-requests; a module import sends the IMPORTING MODULE's URL and a
+   WebSocket handshake sends none — so the document carries `?token=` on every URL the host
+   writes (script srcs, the sheet link, the import map), and `client.jsx` carries it onto the
+   URLs it builds (`frontend.js` imports, the `/_atelier/ws` handshake; `withDevToken`, a no-op
+   without a token in the document URL). The reload frame is `{type:'reload', moduleId:<company>/<slug>,
+   rev, cssOnly}` — the client matches `moduleId` against its module qids and re-imports
+   `frontend.js?rev=<rev>`; a failed save (any report with `file` + `hint`) is also the
+   `{type:'backend-error', qid, message}` frame, cleared (`message:null`) by the next swap
+   [S:host-devshell]. The bootstrap adds `workspace` and `workspaces` beside 1.x's fields (§6.5).
 8. Local mode's shell key: `localTransport(...).keys` (Ed25519, minted per process) — its public
    half comes back as `shell_public_key_hex`; the local shell process (step 4) signs with it.
 

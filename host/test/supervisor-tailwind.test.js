@@ -72,3 +72,20 @@ test('no chrome dir → the app styles.css passes through unchanged; a broken ch
   })
   f.done()
 })
+
+test("a chrome folder without its own node_modules compiles: `@import 'tailwindcss'` resolves from the host", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sup-tw-nomod-'))
+  const chrome = path.join(root, 'chrome')
+  fs.mkdirSync(chrome)
+  fs.writeFileSync(path.join(chrome, 'styles.css'), CHROME_CSS)
+  fs.writeFileSync(path.join(chrome, 'frontend.jsx'), `export default () => <div className="flex text-brand">c</div>\n`)
+  const app = path.join(root, 'app'); fs.mkdirSync(app)
+  fs.writeFileSync(path.join(app, 'frontend.jsx'), `export default () => <p className="italic">a</p>`)
+  try {
+    const s = await buildSheet({ chromeDir: chrome, appDir: app })
+    assert.ok(s.chrome)
+    assert.match(s.css, /\.flex\b/)
+    assert.match(s.css, /\.italic\b/)
+    assert.match(s.css, /--color-brand/)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

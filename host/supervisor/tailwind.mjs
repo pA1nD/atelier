@@ -2,8 +2,9 @@
 // seeds spike-b5/tw.mjs + r2/spike-migration-local-3/tw.mjs "merged" mode).
 //
 // The sheet = the chrome's `styles.css` compiled with `compile()` from @tailwindcss/node
-// (`base` = the chrome dir, so `@import 'tailwindcss'` and the chrome's own imports resolve
-// there) and `Scanner({sources:[]}).scanFiles(contents)` over an EXPLICIT list: the chrome
+// (`base` = the chrome dir, so the chrome's own imports resolve there; `@import 'tailwindcss'`
+// resolves from the chrome dir when it ships the package, else from the HOST's node_modules —
+// one Tailwind per host, a chrome folder carries no build dependency) and `Scanner({sources:[]}).scanFiles(contents)` over an EXPLICIT list: the chrome
 // folder's and the app folder's `.jsx/.js/.tsx/.ts/.html` files, walked recursively with the 1.x
 // exclusions (bundle.mjs walkFiles), every line > 8 KB split at 200 chars before scanning (the
 // oxide scanner is ~2 ms/KB on one long line). No resident compiler — a shared one leaks
@@ -12,6 +13,8 @@
 // A compile failure (a broken chrome sheet or app sheet) throws {problems} classified `css`.
 import nodeFs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { compile } from '@tailwindcss/node'
 import { Scanner } from '@tailwindcss/oxide'
 import { walkFiles } from './bundle.mjs'
@@ -60,6 +63,20 @@ function cssProblem(file, e) {
  *   chromeDir unset → the app's styles.css bytes as they are ('' when absent), no compile
  * throws {problems:[{file,line,col,message,hint}]} on a compile failure.
  */
+const HOST_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+// tailwindResolver(): the css resolver for compile() — `tailwindcss` / `tailwindcss/<file>.css`
+// from the chrome dir first (its own copy wins), else the host's; every other id → default resolution.
+export function tailwindResolver({ hostRoot = HOST_ROOT } = {}) {
+  const pkgDir = (from) => path.dirname(createRequire(path.join(from, 'x.js')).resolve('tailwindcss/package.json'))
+  return async (id, base) => {
+    if (id !== 'tailwindcss' && !id.startsWith('tailwindcss/')) return undefined
+    let dir
+    try { dir = pkgDir(base) } catch { try { dir = pkgDir(hostRoot) } catch { return undefined } }
+    return path.join(dir, id === 'tailwindcss' ? 'index.css' : id.slice('tailwindcss/'.length))
+  }
+}
+
 export async function buildSheet({ chromeDir, appDir, fs = nodeFs }) {
   const t0 = performance.now()
   if (!chromeDir) {
@@ -71,7 +88,7 @@ export async function buildSheet({ chromeDir, appDir, fs = nodeFs }) {
   let src
   try { src = fs.readFileSync(entry, 'utf8') } catch { return { css: '', ms: performance.now() - t0, candidates: 0, chrome: false } }
   let compiler
-  try { compiler = await compile(src, { base: chromeDir, from: entry, onDependency: () => {} }) } catch (e) { throw { problems: [cssProblem('chrome/styles.css', e)] } }
+  try { compiler = await compile(src, { base: chromeDir, from: entry, onDependency: () => {}, customCssResolver: tailwindResolver() }) } catch (e) { throw { problems: [cssProblem('chrome/styles.css', e)] } }
   const contents = scanSources([chromeDir, appDir], fs)
   const candidates = new Scanner({ sources: [] }).scanFiles(contents.map(({ content, extension }) => ({ content, extension })))
   let css

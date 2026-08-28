@@ -208,12 +208,20 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
 
   // ---- supervisor ⇄ workers
   const supervisor = createSupervisor({
-    os, dirfd, cfg, log: supLog, report: collector.report, registrar, treeOk: () => fault === null && treeOk(),
+    os, dirfd, cfg, log: supLog, registrar, treeOk: () => fault === null && treeOk(),
+    // every report → the collector; a failed save (the `build`/`css`/`load` classes, DESIGN §6.3) also
+    // reaches the dev shell's page as the 1.x `backend-error` frame — the agent's browser shows
+    // `file:line:col message — fix` while users stay on the previous rev; the next swap clears it
+    report: (kind, instance, rev, d) => {
+      collector.report(kind, instance, rev, d)
+      if (d?.file && d?.hint) dev?.backendError(instance, `rev ${rev}: ${d.hint}`)
+    },
     spawn: spawnWorker, proxy: proxyRequest,
     jail: privileged ? { jailPlan, applyJail, claimRoundTrip } : null,
     install: privileged ? (a) => installDeps({ ...a, beforeFreeze: () => supervisor.stop(a.spec.instance) }) : null,
     onSwap: (instance, rev) => {
       collector.setRunning(instance, rev)
+      dev?.backendError(instance, null)
       events.invalidate(instance)
       dev?.invalidate(instance)
       registrar.modulesChanged(instance, rev).catch((e) => hostLog(`modules-changed ${instance}: ${e.message}`))

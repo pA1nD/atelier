@@ -81,9 +81,13 @@ test('the document: 1.x bootstrap shape, import map to the chrome kit, exactly O
     assert.ok(html.includes('<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/global/chrome-fixture/styles.css">'))
     assert.ok(html.includes('<script src="/assets/react.js"></script>') && html.includes('<script type="module" src="/assets/client.js"></script>'))
     assert.ok(!html.includes('__ATELIER_BOOTSTRAP__') && !html.includes('__ATELIER_IMPORTMAP__') && !html.includes('__ATELIER_CHROME_STYLES__'))
+    // `?token=` presented → every URL the host writes carries it (a module import's referer is the
+    // importing module, a WS handshake has none): script srcs, the sheet link, the import map
     html = (await request(t, { path: '/acme/todo/items/1?token=dev-secret' })).body.toString()
     assert.equal((html.match(/<link /g) ?? []).length, 1)
-    assert.ok(html.includes('href="/modules/acme/todo/styles.css"'))
+    assert.ok(html.includes('href="/modules/acme/todo/styles.css?token=dev-secret"'))
+    assert.ok(html.includes('<script src="/assets/react.js?token=dev-secret"></script>') && html.includes('<script type="module" src="/assets/client.js?token=dev-secret"></script>'))
+    assert.ok(html.includes('{"imports":{"@atelier/kit":"/modules/global/chrome-fixture/kit.js?token=dev-secret"}}'))
     html = (await request(t, { path: '/acme/nope', headers: tok })).body.toString()
     assert.ok(html.includes('href="/modules/global/chrome-fixture/styles.css"'))
     // act-as changes the document's user
@@ -192,7 +196,7 @@ test('WS: /_atelier/ws needs the token; broadcast frames carry topic company/slu
     await new Promise((res) => setTimeout(res, 50))
     assert.deepEqual(frames, [
       { type: 'run-started', id: 1, topic: 'acme/todo' },
-      { type: 'reload', moduleId: 'todo', cssOnly: false, topic: 'shell' },
+      { type: 'reload', moduleId: 'acme/todo', rev: 3, cssOnly: false, topic: 'shell' },
       { type: 'backend-error', qid: 'acme/wiki', message: 'mount threw', topic: 'shell' },
     ])
     ws.close()

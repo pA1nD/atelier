@@ -43,7 +43,7 @@ Ports: `<pod IP>:1845` the protocol port (mTLS — mandatory in the fleet — pl
 for the agent; the token is stripped from the URL before a request reaches a worker).
 
 Knobs (`ATELIER_*`, DESIGN §1.2): `ATELIER_WORK` `/work`, `ATELIER_RUN` `/run/atelier`, `ATELIER_CONTROL`
-`/control`, `ATELIER_CHROME_DIR` (the chrome folder; unset = app-less documents and pass-through app CSS),
+`/control`, `ATELIER_CHROME_DIR` (the chrome folder — it needs no node_modules of its own, `@import 'tailwindcss'` falls back to the host's; unset = app-less documents and pass-through app CSS),
 `ATELIER_HOST_PORT` 1845, `ATELIER_DEV_PORT` 1844, `ATELIER_SPINE_URL` (unset = local mode),
 `ATELIER_HOST_TLS` `cert,key,ca` (mTLS on 1845; required in fleet mode — a fleet host without it exits 2; the literal `plain` is the drill's opt-out, logged INSECURE), `ATELIER_GIT_COMMIT=0` (no row-G commit per LIVE rev).
 
@@ -68,7 +68,8 @@ curl "http://127.0.0.1:1844/_atelier/apps?token=$T"                 # [{instance
 curl "http://127.0.0.1:1844/api/local/notes/state?token=$T"         # proxied to the worker (mount stripped)
 curl "http://127.0.0.1:1844/modules/local/notes/frontend.js?token=$T"
 curl "http://127.0.0.1:1844/_atelier/events?app=<instance>&token=$T"  # the collector's recent app errors
-open "http://127.0.0.1:1844/local/notes?token=$T"                   # the 1.x document (needs index.html, client.jsx, shims/ beside host/)
+open "http://127.0.0.1:1844/local/notes?token=$T"                   # the 1.x document (needs index.html, client.jsx, shims/ beside host/);
+                                                                    # every URL it loads carries the token (a module import's referer is the importing module)
 tail -f /tmp/w/.atelier/agent.log                                   # LIVE / FAILED / STOPPED / RESUMED / KILLED
 ```
 
@@ -80,7 +81,7 @@ rev N) <file:line:col> <message> — <fix>` line; good save → bundle + css + w
 ## Tests
 
 ```
-node --test host/test/*.test.js protocol/test/*.test.js     # 388 tests, ~7 s, no root
+node --test host/test/*.test.js protocol/test/*.test.js     # 401 tests, ~7 s, no root
 ```
 
 Every lane's file runs the privileged behaviour through `memory()` and real processes through

@@ -38,7 +38,14 @@ const { useState, useEffect, useRef } = React;
 (function wireWsBridge() {
   if (typeof window === 'undefined') return;
   if (window.__atelier?.subscribe) return;
+  // The host's dev shell (local mode) takes the launcher-minted token on EVERY request; the
+  // document URL carries it, and so must every URL this client builds: a module import sends
+  // the importing module's URL as referer (never the document's) and a WebSocket handshake
+  // sends none. Without a token in the document URL (the 1.x shell) this is a no-op.
+  const DEV_TOKEN = (() => { try { return new URLSearchParams(window.location.search).get('token'); } catch { return null; } })();
+  const withDevToken = (url) => (DEV_TOKEN ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(DEV_TOKEN)}` : url);
   window.__atelier = window.__atelier || {};
+  window.__atelier.withDevToken = withDevToken;
 
   const subscribers = new Map();
   let ws = null;
@@ -98,7 +105,7 @@ const { useState, useEffect, useRef } = React;
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     try {
-      ws = new WebSocket(`${proto}//${window.location.host}/_atelier/ws`);
+      ws = new WebSocket(withDevToken(`${proto}//${window.location.host}/_atelier/ws`));
     } catch {
       armOfflineTimer();
       scheduleReconnect();
@@ -300,13 +307,15 @@ window.__atelier.useRoute = () => {
  * TopBarCenter → topbar slot claimer; chrome → chrome slot claimer; meta →
  * icon/name/group).
  * ========================================================================= */
-async function loadModuleBundle(qid, bust) {
-  // `bust` (a monotonic token) is appended only when re-importing a changed
-  // bundle for hot reload: ES module specifiers are URL-keyed, so a fresh
-  // query string is what makes the browser fetch + evaluate the new code
-  // instead of handing back the cached module. The first (cold) load passes
-  // no token — distinct from every later `?v=N`.
-  const url = `/modules/${qid}/frontend.js${bust ? `?v=${bust}` : ''}`;
+async function loadModuleBundle(qid, bust, rev) {
+  // Re-importing a changed bundle for hot reload needs a fresh URL: ES module
+  // specifiers are URL-keyed, so a new query string is what makes the browser
+  // fetch + evaluate the new code instead of handing back the cached module.
+  // The host names the revision in its reload frame → `?rev=N` (the host serves
+  // exactly that revision); a 1.x reload frame has none → the monotonic `?v=N`.
+  // The first (cold) load passes neither.
+  const withDevToken = window.__atelier?.withDevToken || ((u) => u);
+  const url = withDevToken(`/modules/${qid}/frontend.js${rev != null ? `?rev=${rev}` : bust ? `?v=${bust}` : ''}`);
   try {
     const mod = await import(url);
     const Module = typeof mod.default === 'function' ? mod.default : null;
@@ -711,7 +720,7 @@ function App() {
       // code if two edits land close together.
       const token = (bustRef.current.get(id) || 0) + 1;
       bustRef.current.set(id, token);
-      loadModuleBundle(id, token).then((res) => {
+      loadModuleBundle(id, token, frame.rev).then((res) => {
         if (bustRef.current.get(id) !== token) return;   // superseded by a newer edit
         setLoaded((l) => ({ ...l, [id]: res }));
       });
