@@ -816,3 +816,43 @@ additions and readings below are current state.
 - `frontendReport` bounds a flooding tab at 60 accepted reports per instance per minute.
 - Adapter note for the architect: `memory().spawnSync` calls `state.answers.spawnSync` twice per
   call (`rec()` + the explicit call); the errors tests keep their answers idempotent.
+
+## L1. protocol-server lane — current state and deviations (append-only)
+
+Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`, tests
+`host/test/protocol-{auth,headers,events,registrar,server,devshell,samebytes}.test.js` +
+`protocol-fixtures.mjs`, `host/protocol/README.md`. Interfaces as §4.3/§4.4 with these additions:
+
+1. **Bearer wire shape:** `Authorization: Bearer <epoch>.<token>` — the pair `register()` returned;
+   reasons `no-bearer | bad-bearer | unregistered | epoch-moved | bad-token`. The shell gets the pair
+   from the spine (spine/shell lanes).
+2. **`createAuth({registrar, os, cfg, devToken?, now?, log?})`** — `cfg.run` locates `dev.token`
+   (read once); `devToken` overrides for tests. `now` is unix seconds. `.bearer(req)` is exported
+   beside `.verifyRequest` / `.devRequest` (the bearer-only routes use it).
+3. **`createEvents({transport, hostId, epoch})`** — `hostId` and `epoch` may be FUNCTIONS; the
+   integrator passes `() => registrar.hostId` and `() => registrar.epoch` (neither exists at
+   construction, §1.1 order). `.drain(capMs)` is the §2.3 step-3 flush; `.stop()` clears timers.
+4. **`createRegistrar`** takes `fsx` (plain file reads/writes with a mode; default node:fs),
+   `liveWorkers()` (the supervisor's live instances, the heartbeat's `visible_apps` input),
+   `backoffMs`, `now`. `apps` rows carry `meta` (the dev shell's rail). `claim` reads the
+   `<inst>/uid` marker before allocating (a uid on disk is never re-allocated). `.beat()` is
+   one heartbeat (tests); `.stop()` ends the interval. `reconcile(null)` = `/work/apps` unreadable.
+5. **`createServer`** takes `frontendReport` (errors/report.mjs's function; default = protocol
+   `fromFrontendReport` + `collector.report`), `listen: {path} | {port, host}` (tests use a
+   Unix socket), `log`. `supervisor.asset(row, rel, {rev})` — a THIRD argument carries `?rev=N`
+   (the supervisor lane may ignore it and serve the current rev). `req.url` is passed untouched;
+   serve.mjs/proxy.mjs strip `/api/<company>/<slug>`. `/_atelier/report` requires bearer AND an
+   assertion with `app = body.instance`.
+6. **`outbound()` rewrites a root-absolute `location` onto the mount on the HOST** (the brief's
+   "Location rewritten only when root-absolute"); the shell must not rewrite again —
+   protocol/headers.js's comment ("the shell rewrites it onto the mount") describes the same
+   rewrite, done once, here.
+7. **`createDevShell`** takes `auth` (the same object as the server), `chromeSheet()` (the
+   supervisor lane's compiled chrome sheet; pass-through until wired), `sockPath`/`devPort`
+   overrides (`devPort: null` = socket only), `repoRoot`. It exposes `.broadcast(instance, ev)`,
+   `.invalidate(instance)`, `.backendError(instance, msg)` for the integrator (worker
+   `{t:'broadcast'}`, `onSwap`, load failures). The dev token is also accepted from the `?token=`
+   of a same-origin `referer` (browser sub-requests of a `/?token=…` document); the WS handshake
+   needs the header. The bootstrap adds `workspace` and `workspaces` beside 1.x's fields (§6.5).
+8. Local mode's shell key: `localTransport(...).keys` (Ed25519, minted per process) — its public
+   half comes back as `shell_public_key_hex`; the local shell process (step 4) signs with it.
