@@ -139,12 +139,12 @@
       ]
     },
     {
-      "name": "fleet mode: no implicit adoption — an append before registerEpoch is unregistered; a fresh ring cannot vouch for any cursor (spine restart), and an epoch-only match with no events is contiguous",
+      "name": "fleet mode: no implicit adoption — an append before registerEpoch is unregistered and leaves no ring (epochOf null); a fresh ring cannot vouch for any cursor (spine restart), and an epoch-only match with no events is contiguous",
       "steps": [
         { "op": "append", "ev": { "stream": "host1:e1", "topic": "inst-A", "seq": 1, "type": "invalidate" }, "expect": { "ok": false, "reason": "unregistered" } },
         { "op": "ingest", "hostId": "host1", "generate": { "stream": "host1:e1", "topic": "inst-A", "from": 1, "to": 2 }, "expect": { "ok": true, "accepted": 0, "rejected": [{ "index": 0, "reason": "unregistered" }, { "index": 1, "reason": "unregistered" }] } },
         { "op": "head", "topic": "inst-A", "expect": null },
-        { "op": "epochOf", "topic": "inst-A", "expect": { "epoch": null, "epochSeq": 0 } },
+        { "op": "epochOf", "topic": "inst-A", "expect": null },
         { "op": "since", "topic": "inst-A", "cursor": { "stream": "host9:x", "seq": 5 }, "expect": { "gap": false, "streamChange": true, "count": 0 } },
         { "op": "since", "topic": "never-seen", "cursor": { "stream": "host9:x", "seq": 5 }, "expect": { "gap": false, "streamChange": true, "count": 0 } },
         { "op": "since", "topic": "inst-A", "cursor": null, "expect": { "gap": false, "streamChange": true, "count": 0 } },

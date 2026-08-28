@@ -12,7 +12,8 @@
 //      Hence NO implicit adoption in fleet mode (review 2026-08-26): a ring that adopted the
 //      first stream it saw would let a zombie host from the previous epoch become the accepted
 //      epoch after a spine restart (rings are in-memory; hosts re-register only at boot). An
-//      append on a topic with no registered epoch is refused `unregistered`; the registrar
+//      append on a topic with no registered epoch is refused `unregistered` (and creates no
+//      ring — the map holds registered topics only, never what a host chose to push); the registrar
 //      re-registers every live host's epoch from the computers table on spine boot BEFORE
 //      ingest opens (README, spine follow-up). Local mode, with no registrar in the loop, opts
 //      in with `new EventRing({adoptFirst: true})`.
@@ -86,10 +87,14 @@ export class EventRing {
   append(ev) {
     if (!validEvent(ev)) return { ok: false, reason: 'envelope' }
     const { epoch } = splitStream(ev.stream)
-    const r = this.#topic(ev.topic)
-    if (r.epoch === null) {
+    // Only registerEpoch (or local mode's adoption) creates a topic's ring: an unregistered
+    // topic is refused WITHOUT leaving a ring behind, so an authenticated host pushing fresh
+    // topic strings cannot grow the map — the rings are exactly the registered topics.
+    let r = this.rings.get(ev.topic)
+    if (!r || r.epoch === null) {
       if (!this.adoptFirst) return { ok: false, reason: 'unregistered' }
       this.registerEpoch(ev.topic, epoch)
+      r = this.rings.get(ev.topic)
     } else if (epoch !== r.epoch) return { ok: false, reason: 'stale-epoch' }
     if (r.stream === null) r.stream = ev.stream
     const last = r.events[r.events.length - 1]

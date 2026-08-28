@@ -47,3 +47,15 @@ test('constructors produce frames the validators accept', () => {
   for (const m of [messages.sub({ topics: ['t'] }), messages.resume({ topic: 't', stream: 'h:1', seq: 1 }), messages.pong({ at: 5 })]) assert.ok(isClientMessage(m), m.op)
   assert.deepEqual(frames.invalidate({ ...ev, extra: 'dropped' }), ev)
 })
+
+test('fleet mode: unregistered appends leave no ring behind — the map is exactly the registered topics', () => {
+  const ring = new EventRing()
+  const ev = (topic, seq) => ({ stream: 'host1:e1', topic, seq, type: 'invalidate' })
+  const batch = Array.from({ length: MAX_BATCH }, (_, i) => ev(`t-${i}`, 1))
+  assert.equal(ring.ingest('host1', batch).accepted, 0)
+  assert.deepEqual([...ring.rings.keys()], [])
+  assert.equal(ring.epochOf('t-0'), null)
+  ring.registerEpoch('inst-A', 'e1')
+  assert.deepEqual(ring.ingest('host1', [ev('inst-A', 1), ev('t-0', 1)]), { ok: true, accepted: 1, rejected: [{ index: 1, reason: 'unregistered' }] })
+  assert.deepEqual([...ring.rings.keys()], ['inst-A'])
+})

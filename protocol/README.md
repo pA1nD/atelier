@@ -41,8 +41,9 @@ edit `identity.json` or `app-errors.json` by hand.
 - **Epochs in `events.js`** are opaque strings (the registrar hands out a random epoch per
   host start, §4.4); ordering is the integer `epochSeq` the ring assigns per topic at
   `registerEpoch()`. C4's `:epoch<n>` regex is gone. **No implicit adoption in fleet mode:** an
-  append on a topic with no registered epoch is `unregistered`; `new EventRing({adoptFirst:
-  true})` is local mode's opt-in (no registrar in the loop). `since()` compares the cursor's
+  append on a topic with no registered epoch is `unregistered` and creates no ring (the map
+  holds registered topics only — a host cannot grow it by pushing fresh topic strings); `new
+  EventRing({adoptFirst: true})` is local mode's opt-in (no registrar in the loop). `since()` compares the cursor's
   epoch, not the stream string: an old-epoch cursor is `streamChange` even before the new
   epoch's first event, and a fresh ring (no epoch registered — the spine just restarted)
   answers `streamChange` to every cursor. A forged foreign stream at ingest is `foreign-host`,
