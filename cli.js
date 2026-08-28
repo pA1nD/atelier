@@ -23,6 +23,7 @@ const verb = VERBS.get(process.argv[2]);
 if (verb) {
   process.argv.splice(2, 1);   // the verb reads its args from argv[2…]
   await import(verb);
+} else if (process.argv.slice(2).every((a) => a.startsWith('--')) && process.env.ATELIER_1X !== '1') { await import('./shell/cli-local.mjs');
 } else {
   await import('./server.js');
 }
