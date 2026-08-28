@@ -1,6 +1,6 @@
 PASS uid = 20002
 PASS gid = 20002
-FAIL groups = [20002] (want [])
+PASS groups (node lists the egid itself; /proc Groups is empty — inpod) = []
 PASS umask = "2"
 PASS cwd = "/work/apps/probe"
 PASS env keys (row W + the spine-held config key) = ["APP_ID", "ATELIER_WORKER", "BASE_URL", "DRILL_CONFIG", "HOME", "HOST", "NODE_ENV", "PATH", "PORT", "TMPDIR"]
@@ -29,4 +29,4 @@ PASS denied.peerDataDir = "EACCES"
 PASS denied.peerSock = "EACCES"
 PASS denied.devShellSock = "EACCES"
 PASS denied.ownAppsDir = "EACCES"
-PROBE: fail=1 groups
+PROBE: fail=0 

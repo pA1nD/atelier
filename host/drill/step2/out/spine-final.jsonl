@@ -1,18 +1,20 @@
-{"at":1787919051150,"method":"POST","path":"/v1/host/register","auth":"bootstrap","body":{"pod_ip":"10.42.0.132","host_started_at":1787919051140},"status":200}
-{"at":1787919052744,"method":"PUT","path":"/v1/apps/i-d90cd1c9fb6b1818","auth":"token","body":{"slug":"blitzfeed","meta":{"name":"BlitzFeed"}},"status":201}
-{"at":1787919052784,"method":"PUT","path":"/v1/apps/i-24e749bfba3347cc","auth":"token","body":{"slug":"probe","meta":{"name":"Probe"}},"status":201}
-{"at":1787919052843,"method":"GET","path":"/v1/apps/i-d90cd1c9fb6b1818/config","auth":"token","body":{},"status":200}
-{"at":1787919052877,"method":"GET","path":"/v1/apps/i-24e749bfba3347cc/config","auth":"token","body":{},"status":200}
-{"at":1787919052935,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-d90cd1c9fb6b1818","slug":"blitzfeed","uid":20001,"rev":1}]},"status":200}
-{"at":1787919052949,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-24e749bfba3347cc","slug":"probe","uid":20002,"rev":1}]},"status":200}
-{"at":1787919052951,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:12233c9adae72a84","topic":"i-d90cd1c9fb6b1818","seq":1,"type":"invalidate"},{"stream":"computer-drill:12233c9adae72a84","topic":"i-24e749bfba3347cc","seq":1,"type":"invalidate"}],"status":200}
-{"at":1787919056250,"method":"POST","path":"/v1/host/event","auth":"token","body":{"kind":"app-error","error":{"instance":"i-d90cd1c9fb6b1818","rev":2,"kind":"build","fingerprint":"build|backend.js:2|Unexpected end of file","count":1,"firstAt":1787919056249,"lastAt":1787919056249,"message":"Unexpected end of file","file":"backend.js","line":2,"col":1,"hint":"backend.js:2:1 Unexpected end of file — close the open brace / parenthesis before the end of the file"}},"valid":true,"status":200}
-{"at":1787919059283,"method":"GET","path":"/v1/apps/i-d90cd1c9fb6b1818/config","auth":"token","body":{},"status":200}
-{"at":1787919059350,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-d90cd1c9fb6b1818","slug":"blitzfeed","uid":20001,"rev":3}]},"status":200}
-{"at":1787919059359,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:12233c9adae72a84","topic":"i-d90cd1c9fb6b1818","seq":2,"type":"invalidate"}],"status":200}
-{"at":1787919061166,"method":"POST","path":"/v1/host/heartbeat","auth":"token","body":{"visible_apps":2,"last_served_at":1787919061134,"pod_ip":"10.42.0.132"},"status":200}
-{"at":1787919065605,"method":"POST","path":"/v1/host/draining","auth":"token","body":{},"status":200}
-{"at":1787919066222,"method":"POST","path":"/v1/host/register","auth":"bootstrap","body":{"pod_ip":"10.42.0.132","host_started_at":1787919066210},"status":200}
-{"at":1787919066228,"method":"PUT","path":"/v1/apps/i-d90cd1c9fb6b1818","auth":"token","body":{"slug":"blitzfeed","meta":{"name":"BlitzFeed"}},"status":200}
-{"at":1787919066243,"method":"PUT","path":"/v1/apps/i-24e749bfba3347cc","auth":"token","body":{"slug":"probe","meta":{"name":"Probe"}},"status":200}
-{"at":1787919068833,"method":"GET","path":"/v1/apps/i-d90cd1c9fb6b1818/config","auth":"token","body":{},"status":200}
+{"at":1787919123617,"method":"POST","path":"/v1/host/register","auth":"bootstrap","body":{"pod_ip":"10.42.0.134","host_started_at":1787919123604},"status":200}
+{"at":1787919125423,"method":"PUT","path":"/v1/apps/i-a9f177c1128b5344","auth":"token","body":{"slug":"blitzfeed","meta":{"name":"BlitzFeed"}},"status":201}
+{"at":1787919125471,"method":"PUT","path":"/v1/apps/i-6b9a782ddcd135fc","auth":"token","body":{"slug":"probe","meta":{"name":"Probe"}},"status":201}
+{"at":1787919125511,"method":"GET","path":"/v1/apps/i-a9f177c1128b5344/config","auth":"token","body":{},"status":200}
+{"at":1787919125533,"method":"GET","path":"/v1/apps/i-6b9a782ddcd135fc/config","auth":"token","body":{},"status":200}
+{"at":1787919125589,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-a9f177c1128b5344","slug":"blitzfeed","uid":20001,"rev":1}]},"status":200}
+{"at":1787919125603,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-6b9a782ddcd135fc","slug":"probe","uid":20002,"rev":1}]},"status":200}
+{"at":1787919125604,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:a9664659de83694f","topic":"i-a9f177c1128b5344","seq":1,"type":"invalidate"},{"stream":"computer-drill:a9664659de83694f","topic":"i-6b9a782ddcd135fc","seq":1,"type":"invalidate"}],"status":200}
+{"at":1787919128970,"method":"POST","path":"/v1/host/event","auth":"token","body":{"kind":"app-error","error":{"instance":"i-a9f177c1128b5344","rev":2,"kind":"build","fingerprint":"build|backend.js:2|Unexpected end of file","count":1,"firstAt":1787919128965,"lastAt":1787919128965,"message":"Unexpected end of file","file":"backend.js","line":2,"col":1,"hint":"backend.js:2:1 Unexpected end of file — close the open brace / parenthesis before the end of the file"}},"valid":true,"status":200}
+{"at":1787919131951,"method":"GET","path":"/v1/apps/i-a9f177c1128b5344/config","auth":"token","body":{},"status":200}
+{"at":1787919132068,"method":"POST","path":"/v1/host/modules-changed","auth":"token","body":{"apps":[{"instance":"i-a9f177c1128b5344","slug":"blitzfeed","uid":20001,"rev":3}]},"status":200}
+{"at":1787919132076,"method":"POST","path":"/v1/host/events","auth":"token","body":[{"stream":"computer-drill:a9664659de83694f","topic":"i-a9f177c1128b5344","seq":2,"type":"invalidate"}],"status":200}
+{"at":1787919133623,"method":"POST","path":"/v1/host/heartbeat","auth":"token","body":{"visible_apps":2,"last_served_at":1787919133551,"pod_ip":"10.42.0.134"},"status":200}
+{"at":1787919134999,"method":"POST","path":"/v1/host/event","auth":"token","body":{"kind":"app-error","error":{"instance":"i-a9f177c1128b5344","rev":3,"kind":"worker","fingerprint":"worker|-:-|worker died: signal SIGKILL","count":1,"firstAt":1787919134999,"lastAt":1787919134999,"message":"worker died: signal SIGKILL"}},"valid":true,"status":200}
+{"at":1787919135061,"method":"GET","path":"/v1/apps/i-a9f177c1128b5344/config","auth":"token","body":{},"status":200}
+{"at":1787919139009,"method":"POST","path":"/v1/host/draining","auth":"token","body":{},"status":200}
+{"at":1787919139734,"method":"POST","path":"/v1/host/register","auth":"bootstrap","body":{"pod_ip":"10.42.0.134","host_started_at":1787919139721},"status":200}
+{"at":1787919139743,"method":"PUT","path":"/v1/apps/i-a9f177c1128b5344","auth":"token","body":{"slug":"blitzfeed","meta":{"name":"BlitzFeed"}},"status":200}
+{"at":1787919139752,"method":"PUT","path":"/v1/apps/i-6b9a782ddcd135fc","auth":"token","body":{"slug":"probe","meta":{"name":"Probe"}},"status":200}
+{"at":1787919141389,"method":"GET","path":"/v1/apps/i-a9f177c1128b5344/config","auth":"token","body":{},"status":200}

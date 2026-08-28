@@ -884,8 +884,18 @@ Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`
     → `supervisor.teardown()` → watchdog stop → `events.drain(1000)` → `host: stopped` → exit 0; the
     whole sequence is capped at 30 s.
 11. **`package.json` `test`** now includes `host/test/*.test.js` (§9.15).
-12. **The Linux drill `host/drill/step2/`** runs the integrated host in FLEET mode against a fake
+12. **Discovery of new folders**: `index.mjs` watches `$work/apps` itself (non-recursive `fs.watch`,
+    debounced 300 ms → `supervisor.scan()`, scans serialized) and rescans every 30 s; the per-app
+    watchers cover saves inside a folder.
+13. **Paths that leave the host process are real**: the supervisor hands `codeDir`, `dataDir`, `tmpDir`
+    to workers (and `dataDir` to the watchdog's `du` as the worker uid) as `/work/.atelier/…`, never the
+    host's `/proc/self/fd/N/…` form (`realPath()` over `readlinkFd(dirfd)`); the dirfd form stays for the
+    host's own marker and rev-dir writes.
+14. **Modes under umask 077**: every file or dir the host creates with a mode sets it explicitly
+    (chmod on the root-owned inode, before any chown) — `agent.log` 0640, the registrar's marker dir
+    0711 and markers 0644/0600, `host-ready` 0644, `$run` 0711 (the tmpfs mount arrives 1777).
+15. **The Linux drill `host/drill/step2/`** runs the integrated host in FLEET mode against a fake
     spine on a peer pod (`fake-spine.mjs`: the §7 routes, `validateAppError` on the app-error lane,
     every call logged as JSON lines) with a signer (`signer.mjs`: bearer + protocol/identity assertion)
     dialing the pod IP from outside; one real 1.x module (blitzfeed) + a probe app; rows (a)–(g) in
-    `remote.sh`; evidence in `design/atelier2/r2/spike-host-step2/`.
+    `remote.sh`; evidence in `design/atelier2/r2/spike-host-step2/` (RESULT.md: PASS a–g, 2026-08-28).

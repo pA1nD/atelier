@@ -1,3 +1,3 @@
 app-error POSTs: 1
-{"kind": "app-error", "error": {"instance": "i-d90cd1c9fb6b1818", "rev": 2, "kind": "build", "fingerprint": "build|backend.js:2|Unexpected end of file", "count": 1, "firstAt": 1787919056249, "lastAt": 1787919056249, "message": "Unexpected end of file", "file": "backend.js", "line": 2, "col": 1, "hint": "backend.js:2:1 Unexpected end of file \u2014 close the open brace / parenthesis before the end of the file"}} | valid | auth token | status 200
-APPERROR: ok — 1 build record(s) for i-d90cd1c9fb6b1818 rev 2, shape {kind:'app-error', error:{…}} validateAppError=True
+{"kind": "app-error", "error": {"instance": "i-a9f177c1128b5344", "rev": 2, "kind": "build", "fingerprint": "build|backend.js:2|Unexpected end of file", "count": 1, "firstAt": 1787919128965, "lastAt": 1787919128965, "message": "Unexpected end of file", "file": "backend.js", "line": 2, "col": 1, "hint": "backend.js:2:1 Unexpected end of file \u2014 close the open brace / parenthesis before the end of the file"}} | valid | auth token | status 200
+APPERROR: ok — 1 build record(s) for i-a9f177c1128b5344 rev 2, shape {kind:'app-error', error:{…}} validateAppError=True

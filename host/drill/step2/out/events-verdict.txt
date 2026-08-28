@@ -1,7 +1,7 @@
 events POSTs: 2, frames: 3
-{"stream": "computer-drill:12233c9adae72a84", "topic": "i-d90cd1c9fb6b1818", "seq": 1, "type": "invalidate"}
-{"stream": "computer-drill:12233c9adae72a84", "topic": "i-24e749bfba3347cc", "seq": 1, "type": "invalidate"}
-{"stream": "computer-drill:12233c9adae72a84", "topic": "i-d90cd1c9fb6b1818", "seq": 2, "type": "invalidate"}
-modules-changed: [{"apps": [{"instance": "i-d90cd1c9fb6b1818", "slug": "blitzfeed", "uid": 20001, "rev": 1}]}, {"apps": [{"instance": "i-24e749bfba3347cc", "slug": "probe", "uid": 20002, "rev": 1}]}, {"apps": [{"instance": "i-d90cd1c9fb6b1818", "slug": "blitzfeed", "uid": 20001, "rev": 3}]}]
-register: 1 (auth ['bootstrap']), heartbeats: 1, last heartbeat body: {"visible_apps": 2, "last_served_at": 1787919061134, "pod_ip": "10.42.0.132"}
-EVENTS: ok — stream computer-drill:12233c9adae72a84, seq per topic {"i-d90cd1c9fb6b1818": [1, 2], "i-24e749bfba3347cc": [1]}
+{"stream": "computer-drill:a9664659de83694f", "topic": "i-a9f177c1128b5344", "seq": 1, "type": "invalidate"}
+{"stream": "computer-drill:a9664659de83694f", "topic": "i-6b9a782ddcd135fc", "seq": 1, "type": "invalidate"}
+{"stream": "computer-drill:a9664659de83694f", "topic": "i-a9f177c1128b5344", "seq": 2, "type": "invalidate"}
+modules-changed: [{"apps": [{"instance": "i-a9f177c1128b5344", "slug": "blitzfeed", "uid": 20001, "rev": 1}]}, {"apps": [{"instance": "i-6b9a782ddcd135fc", "slug": "probe", "uid": 20002, "rev": 1}]}, {"apps": [{"instance": "i-a9f177c1128b5344", "slug": "blitzfeed", "uid": 20001, "rev": 3}]}]
+register: 1 (auth ['bootstrap']), heartbeats: 1, last heartbeat body: {"visible_apps": 2, "last_served_at": 1787919133551, "pod_ip": "10.42.0.134"}
+EVENTS: ok — stream computer-drill:a9664659de83694f, seq per topic {"i-a9f177c1128b5344": [1, 2], "i-6b9a782ddcd135fc": [1]}

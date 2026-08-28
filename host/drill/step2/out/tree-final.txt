@@ -1,50 +1,50 @@
-find: ‘/work/.atelier/tmp/i-d90cd1c9fb6b1818’: Permission denied
-find: ‘/work/.atelier/tmp/i-24e749bfba3347cc’: Permission denied
-find: ‘/work/.atelier/data/i-d90cd1c9fb6b1818’: Permission denied
-find: ‘/work/.atelier/data/i-24e749bfba3347cc’: Permission denied
+find: ‘/work/.atelier/tmp/i-a9f177c1128b5344’: Permission denied
+find: ‘/work/.atelier/tmp/i-6b9a782ddcd135fc’: Permission denied
+find: ‘/work/.atelier/data/i-a9f177c1128b5344’: Permission denied
+find: ‘/work/.atelier/data/i-6b9a782ddcd135fc’: Permission denied
 find: ‘/run/atelier/session’: Permission denied
-2770 20001:19999 /work/.atelier/data/i-d90cd1c9fb6b1818
-2770 20002:19999 /work/.atelier/data/i-24e749bfba3347cc
+2770 20001:19999 /work/.atelier/data/i-a9f177c1128b5344
+2770 20002:19999 /work/.atelier/data/i-6b9a782ddcd135fc
 400 root:root /run/atelier/bootstrap.token
 400 root:root /run/atelier/dev.token
-600 root:root /work/.atelier/i-24e749bfba3347cc/registered.json
-600 root:root /work/.atelier/i-d90cd1c9fb6b1818/registered.json
-640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-3/backend.js
-640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-3/backend.js.map
-640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-3/frontend/frontend.js
-640 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-3/styles.css
-640 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1/backend.js
-640 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1/backend.js.map
-640 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1/styles.css
+600 root:root /work/.atelier/i-6b9a782ddcd135fc/registered.json
+600 root:root /work/.atelier/i-a9f177c1128b5344/registered.json
+640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-3/backend.js
+640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-3/backend.js.map
+640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-3/frontend/frontend.js
+640 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-3/styles.css
+640 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1/backend.js
+640 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1/backend.js.map
+640 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1/styles.css
 640 root:node /work/.atelier/agent.log
 644 root:root /run/atelier/host-ready
-644 root:root /work/.atelier/i-24e749bfba3347cc/revision.json
-644 root:root /work/.atelier/i-24e749bfba3347cc/slug
-644 root:root /work/.atelier/i-24e749bfba3347cc/uid
-644 root:root /work/.atelier/i-d90cd1c9fb6b1818/revision.json
-644 root:root /work/.atelier/i-d90cd1c9fb6b1818/slug
-644 root:root /work/.atelier/i-d90cd1c9fb6b1818/uid
+644 root:root /work/.atelier/i-6b9a782ddcd135fc/revision.json
+644 root:root /work/.atelier/i-6b9a782ddcd135fc/slug
+644 root:root /work/.atelier/i-6b9a782ddcd135fc/uid
+644 root:root /work/.atelier/i-a9f177c1128b5344/revision.json
+644 root:root /work/.atelier/i-a9f177c1128b5344/slug
+644 root:root /work/.atelier/i-a9f177c1128b5344/uid
 660 root:node /run/atelier/dev/shell.sock
-700 20001:20001 /work/.atelier/tmp/i-d90cd1c9fb6b1818
-700 20002:20002 /work/.atelier/tmp/i-24e749bfba3347cc
+700 20001:20001 /work/.atelier/tmp/i-a9f177c1128b5344
+700 20002:20002 /work/.atelier/tmp/i-6b9a782ddcd135fc
 700 node:node /run/atelier/session
-700 root:root /run/atelier/w/i-d90cd1c9fb6b1818/w-3.sock
+700 root:root /run/atelier/w/i-a9f177c1128b5344/w-3.sock
 710 root:node /run/atelier/dev
 711 root:root /run/atelier
 711 root:root /run/atelier/w
 711 root:root /work/.atelier/data
-711 root:root /work/.atelier/i-24e749bfba3347cc
-711 root:root /work/.atelier/i-d90cd1c9fb6b1818
+711 root:root /work/.atelier/i-6b9a782ddcd135fc
+711 root:root /work/.atelier/i-a9f177c1128b5344
 711 root:root /work/.atelier/last-good
 711 root:root /work/.atelier/scratch
 711 root:root /work/.atelier/tmp
-730 root:20001 /run/atelier/w/i-d90cd1c9fb6b1818
-730 root:20002 /run/atelier/w/i-24e749bfba3347cc
-750 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818
-750 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-3
-750 root:20001 /work/.atelier/last-good/i-d90cd1c9fb6b1818/rev-3/frontend
-750 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc
-750 root:20002 /work/.atelier/last-good/i-24e749bfba3347cc/rev-1
+730 root:20001 /run/atelier/w/i-a9f177c1128b5344
+730 root:20002 /run/atelier/w/i-6b9a782ddcd135fc
+750 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344
+750 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-3
+750 root:20001 /work/.atelier/last-good/i-a9f177c1128b5344/rev-3/frontend
+750 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc
+750 root:20002 /work/.atelier/last-good/i-6b9a782ddcd135fc/rev-1
 755 root:root /work/.atelier
-777 root:root /work/.atelier/i-24e749bfba3347cc/current
-777 root:root /work/.atelier/i-d90cd1c9fb6b1818/current
+777 root:root /work/.atelier/i-6b9a782ddcd135fc/current
+777 root:root /work/.atelier/i-a9f177c1128b5344/current
