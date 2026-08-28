@@ -49,8 +49,8 @@ the whole corpus in ~5 s).
 |---|---|---|---|
 | `process.env` Proxy (`get`/`has`) | the key | no | N2, N2op, N3 |
 | `net.Server.prototype.listen` | `host:port` / `unix:<path>` | never bound; `'listening'` on the next tick | D2 |
-| `child_process.*` | the binary (first word), the function | never run; ENOENT-shaped error / 127 | D12 |
-| `fs` writes (sync, callback, promises, `createWriteStream`, `node:sqlite` `DatabaseSync`) | op + path, `inApp` | EACCES outside `dataDir`/`TMPDIR`/`HOME`/`<probe dir>`/socket dir/`/dev/null` | N1, D13 |
+| `child_process.*` | the binary (first word), the function, the `script` a node/sh/python spawn runs (shortened) | never run; ENOENT-shaped error / 127 | D12 |
+| `fs` writes (sync, callback, promises, `createWriteStream`, `node:sqlite` `DatabaseSync`) — every written path: `rename` source + destination, `copyFile`/`cp`/`link`/`symlink` destination | op + path, `inApp` | EACCES outside `dataDir`/`TMPDIR`/`HOME`/`<probe dir>`/socket dir/`/dev/null` | N1, D13 |
 | `fs` reads and writes under `<app>/data` | op + path, `write` | (writes: as above) | N1 |
 | `fetch`, `http/https.request/get`, `net.Socket.prototype.connect` | `via` + target, `loopback` | ENETUNREACH — no network in the probe | N4, N5, I2 |
 | `process.on/once/…('SIG…')` | the signal | no | N8 |
@@ -76,7 +76,7 @@ catalogue's `NODE_NOISE` filter (lane A/C).
 { module, dir, state, mounted, died: null | {where, code, error:{message, file, line, col, hint?}},
   importMs, mountMs, resources, teardown, stop: {code, signal, killed} | null, exitedEarly, rss,
   jail: 'hook-emulated', hooks: {counts:{envRead, listen, spawn, writeOutside, selfData, egress, ctxModule, signal, exit}, skipped:{runtime, node}, summary?: 'missing'},
-  envReads: [{key, n, frame}], envSpread: n (enumerations of process.env — a child env being built; not config reads), listens: [{target, frame}], spawns: [{bin, fn, frame}],
+  envReads: [{key, n, frame}], envSpread: n (enumerations of process.env — a child env being built; not config reads), listens: [{target, frame}], spawns: [{bin, fn, script?, frame}],
   writesOutside: [{op, path, inApp, frame}], selfData: [{op, path, write, frame}], egress: [{via, target, loopback, frame}],
   ctxModule: [{id, cross, frame}], signalHandlers: [{signal, frame}], processExit: [{code, frame}],
   control: {error, http5xx, broadcast, suspendable}, asyncErrors: [{message, file, line, col}], stderrTail: [...], ms, budgetMs }

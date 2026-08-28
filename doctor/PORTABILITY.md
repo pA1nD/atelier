@@ -1,15 +1,15 @@
 # Portability table — `atelier doctor` over the 1.x corpus
 
-Run 2026-08-29 on the laptop: `node doctor/cli.mjs /Users/pa1nd/pro/003-atelier-modules --out …/spike-doctor-step3/out --env-keys ~/pro/atelier/.env --jobs 6` (branch `doctor`). 58 modules, 53 with a backend; every backend mounted inside the real host worker (`host/worker/runtime.mjs` behind `doctor/probe/entry.mjs`), no root, no network, corpus checksum unchanged before/after. Machine-readable: `portability.csv` (58 rows × 51 columns, the seed's 37-column header first), `doctor/<module>/report.json` per module.
+Run 2026-08-29 on the laptop: `node doctor/cli.mjs /Users/pa1nd/pro/003-atelier-modules --out …/spike-doctor-step3/out --env-keys ~/pro/atelier/.env --jobs 6` (branch `doctor`, after the round-2 review fixes). 58 modules, 53 with a backend; every backend mounted inside the real host worker (`host/worker/runtime.mjs` behind `doctor/probe/entry.mjs`), no root, no network, corpus tree hash unchanged before/after. Machine-readable: `portability.csv` (58 rows × 52 columns, the seed's 37-column header first, then `N1mix,N9,N10,N11,R1,R2,R3,D14,long_lines,resident,teardown,killed,config_keys,operator_keys,verdict`), `doctor/<module>/report.json` per module. module.json: 57 generated (midnight-chrome is a chrome — D14, none); "module.json 58/58" in the VERDICT counts literal metas.
 
-**VERDICT: DOCTOR 5/58 clean, 9 degrade, 44 break in the fleet (17/18 daily); module.json 58/58; rewrites 33 edits in 8 modules; probe 48/53 mounted, 5 broken at mount [sites(load-error), auth(mount-throw), meet-vault(load-error), projects(mount-throw), screenmap(mount-throw)]; tailwind max n/a**
+**VERDICT: DOCTOR 4/58 clean, 9 degrade, 45 break in the fleet (17/18 daily); module.json 58/58; rewrites 32 edits in 7 modules; probe 48/53 mounted, 5 broken at mount [sites(load-error), auth(mount-throw), meet-vault(load-error), projects(mount-throw), screenmap(mount-throw)]; tailwind max n/a**
 
 ## Rows
 
 | row | family | break | modules /58 | daily /18 |
 |---|---|---|---|---|
 | D1 | §4.8 | auth module (local-only) | 1 | 0 |
-| D2 | §4.8 | sidecar listen() (fleet-unreachable) | 8 | 4 |
+| D2 | §4.8 | sidecar listen() (fleet-unreachable) | 10 | 5 |
 | D2w | §4.8 | WebSocket sidecar (2.1) | 4 | 2 |
 | D3 | §4.8 | cross-worker ctx.module | 0 | 0 |
 | D4 | §4.8 | req.user.workspaces | 2 | 1 |
@@ -18,7 +18,7 @@ Run 2026-08-29 on the laptop: `node doctor/cli.mjs /Users/pa1nd/pro/003-atelier-
 | D7 | §4.8 | ctx.broadcast | 45 | 17 |
 | D8 | §4.8 | collections verbs from a pod | 4 | 3 |
 | D9 | §4.8 | Authorization-based app scheme | 6 | 5 |
-| D10 | §4.8 | root-absolute Location in backend | 1 | 0 |
+| D10 | §4.8 | root-absolute Location in backend | 2 | 0 |
 | D11 | §4.8 | req.on('close') footgun | 3 | 2 |
 | D12 | §4.8 | spawns laptop binaries | 29 | 11 |
 | D13 | §4.8 | laptop paths (/Users, ~/…, HOME/PWD) | 28 | 10 |
@@ -47,12 +47,13 @@ Run 2026-08-29 on the laptop: `node doctor/cli.mjs /Users/pa1nd/pro/003-atelier-
 | R1 | runtime | probe state ≠ mounted | 5 | 1 |
 | R2 | runtime | stays resident (timers, children, sockets after mount) | 30 | 11 |
 | R3 | runtime | no teardown / killed at the drain deadline | 11 | 3 |
+| D14 | §4.8 | multi-chrome (local-only) | 1 | 0 |
 
 ## Modules
 
 | module | daily | 2.0 worker | breaks (row: count) | verdict |
 |---|---|---|---|---|
-| dashboard | Y | mounted | D5:1 D7:3 D8:1 D9:1 D12:1 D13:1 N2:5 N2op:2 N4:2 N6:1 N8:5 | BREAKS |
+| dashboard | Y | mounted | D2:1 D5:1 D7:3 D8:1 D9:1 D12:1 D13:1 N2:5 N2op:2 N4:2 N6:1 N8:5 | BREAKS |
 | jobs | Y | mounted | D5:1 D7:1 N3:1 N4:3 N5:1 | BREAKS |
 | agent | Y | mounted | D2:2 D2w:1 D5:1 D7:12 D9:7 D11:4 D12:3 D13:22 N1:41 N2:54 N3:1 N4:2 N5:11 N7:14 N8:17 | BREAKS |
 | audio-player | Y | mounted | D5:1 D6:1 D7:10 D13:4 | BREAKS |
@@ -93,9 +94,9 @@ Run 2026-08-29 on the laptop: `node doctor/cli.mjs /Users/pa1nd/pro/003-atelier-
 | investors |  | no-backend | D5:1 | CLEAN |
 | kit |  | no-backend | D5:1 | CLEAN |
 | latency-map |  | mounted | D5:1 D7:12 D12:1 D13:4 N7:1 | BREAKS |
-| llm |  | mounted | D5:1 D7:1 D11:1 D12:2 N1:2 N2:5 N5:3 N8:5 N1mix:1 | BREAKS |
+| llm |  | mounted | D2:1 D5:1 D7:1 D11:1 D12:2 N1:2 N2:5 N5:3 N8:5 N1mix:1 | BREAKS |
 | meet-vault |  | load-error — EACCES: permission denied (doctor: the worker owns nothing outside ctx.dataDir), mkdir '/U | D5:1 D7:21 D12:5 D13:1 N1:2 N2:3 N5:2 N6:1 N7:6 N1mix:1 | BREAKS |
-| midnight-chrome |  | no-backend |  | CLEAN |
+| midnight-chrome |  | no-backend | D14:1 | BREAKS |
 | mlx-tts |  | mounted | D2:1 D5:1 D6:1 D7:9 D12:1 D13:2 N2:5 N5:1 | BREAKS |
 | module-dev |  | mounted | D5:1 D6:2 D7:1 D8:3 D13:2 N2:1 N6:9 | BREAKS |
 | profile |  | mounted | D5:1 D7:1 | DEGRADES |
@@ -103,7 +104,7 @@ Run 2026-08-29 on the laptop: `node doctor/cli.mjs /Users/pa1nd/pro/003-atelier-
 | revive |  | mounted | D5:1 D7:1 | DEGRADES |
 | screenmap |  | mount-throw — EACCES: permission denied (doctor: the worker owns nothing outside ctx.dataDir), mkdir '/U | D5:1 D7:1 D12:1 N1:2 N5:1 | BREAKS |
 | sessions |  | mounted | D5:1 D7:6 D13:1 | BREAKS |
-| sous |  | mounted | D2:1 D2w:1 D5:1 D6:2 D7:29 D12:1 D13:5 N1:2 N2:16 N5:4 N7:13 N8:5 N1mix:1 | BREAKS |
+| sous |  | mounted | D2:1 D2w:1 D5:1 D6:2 D7:29 D10:1 D12:1 D13:5 N1:2 N2:16 N5:4 N7:13 N8:5 N1mix:1 | BREAKS |
 | speech |  | mounted | D5:1 D7:2 D12:1 N1:1 N1mix:1 | BREAKS |
 | statusbar |  | mounted | D5:1 D7:3 D13:2 N7:2 | BREAKS |
 | toybox |  | mounted | D5:1 | DEGRADES |

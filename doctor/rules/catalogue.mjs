@@ -23,8 +23,8 @@ export const SQL_VERBS = /^(PRAGMA|ALTER|COMMIT|BEGIN|DROP|ROLLBACK|DELETE|ANALY
 // env classes (env.mjs). NODE_NOISE = the seed report.mjs list (RESULT surprise 7) + CI.
 export const NODE_NOISE = new Set(['WATCH_REPORT_DEPENDENCIES', 'NODE_V8_COVERAGE', '__CF_USER_TEXT_ENCODING', 'WS_NO_BUFFER_UTIL', 'FORCE_COLOR', 'DEBUG', 'NODE_ENV', 'PATH', 'NODE_OPTIONS', 'LANG', 'LC_ALL', 'NODE_DEBUG', 'NO_COLOR', 'TERM', 'COLORTERM', 'CI'])
 export const SHELL_PUBLISHED = new Set(['HOST', 'PORT', 'BASE_URL'])          // N3 (DESIGN §9.12, row W)
-export const ROW_W_ENV = new Set(['APP_ID', 'ATELIER_WORKER', 'TMPDIR'])       // the rest of the worker env the host sets; TMPDIR is also laptop (D13 counts it)
-export const LAPTOP_D13 = new Set(['HOME', 'PWD', 'USER', 'TMPDIR', 'SHELL', 'XPC_SERVICE_NAME', 'LOGNAME'])   // the seed's D13 env set
+export const ROW_W_ENV = new Set(['APP_ID', 'ATELIER_WORKER', 'TMPDIR'])       // the rest of the worker env the host sets (row W); reading TMPDIR is the recommended 2.0 behaviour
+export const LAPTOP_D13 = new Set(['HOME', 'PWD', 'USER', 'SHELL', 'XPC_SERVICE_NAME', 'LOGNAME'])   // the seed's D13 env set minus TMPDIR (the host publishes it, row W)
 export const LAPTOP = new Set([...LAPTOP_D13])
 export const SHELL_KEYS = SHELL_PUBLISHED, LAPTOP_KEYS = LAPTOP_D13        // the names lane C (report/lanes.mjs) imports
 export const CONFIG_SUFFIX_RE = /(_KEY|_TOKEN|_SECRET|PASSWORD|PASSPHRASE|_API|_URL|_PORT|_HOST|_DIR|_PATH|_MODEL|_BIN)$|^ATELIER_/
@@ -51,6 +51,7 @@ export const RX = {
   abs_path: /['"`]\/(Users|Volumes|opt\/homebrew|usr\/local|Applications)\//g,
   homedir: /os\.homedir\(\)|homedir\(\)|['"`]~\/\.config/g,
   root_abs_location: /Location['"]?\s*:\s*['"`]\/(?!api\/)/g,
+  root_abs_html: /\b(href|src|action)=\\?["']\/(?!api\/|\/)/g,
   topbar_eager: /TopBarCenter|\beager\s*:\s*true/g,
   kit: /@atelier\/kit/g,
   use_route: /useRoute\(/g,
@@ -75,6 +76,7 @@ export const SQLITE_GUARD = /busy_timeout|\btimeout\b/i
 export const DROPPED_META_KEYS = {
   chrome: { rule: 'D5', reason: 'not a break: the bootstrap advertises `chromes` (§4.1); the pin is dropped from module.json' },
   eager: { rule: 'I3', reason: 'eager/TopBarCenter are dropped in the fleet document' },
+  isChrome: { rule: 'D14', reason: 'a chrome is not an app in the fleet: the shell delivers the one chrome (§4.1, §10 item 6); multi-chrome is local-only — no module.json is generated' },
   visibility: { rule: 'N11', reason: 'no visibility switch: an app is its chat\'s (OR8); a company-wide app is a dyno (§12); the registrar drops the key' },
   '*': { rule: 'N10', reason: 'module.json is {name, icon, group, primary, color} only (OR10); every other key is dropped by the registrar' },
 }
@@ -86,21 +88,47 @@ const P = (p) => p || {}
 const envKeys = (s, p) => new Set([...Object.keys(s.env || {}), ...arr(P(p).envReads)])
 const LOOPBACK_EGRESS = /^(?:https?:\/\/|ws:\/\/)?(?:127\.0\.0\.1|localhost|\[::1\])(?::|\/)/
 const INTERNET_EGRESS = /https?:\/\/(?!127\.0\.0\.1|localhost|\[::1\])/
+const LAPTOP_SOCKET = /^unix:(?:~\/|\/Users\/|\/home\/)/          // a Unix-socket connect into the laptop's home (D13); a peer app IS a Unix socket in 2.0, so `unix:` alone is never N5
 const MOUNTED_STATES = new Set(['mounted', 'no-backend', 'skipped'])
 
 const SIDECAR = 'expects an operator reverse proxy that the fleet does not have — here is the first-class equivalent: '
 
-// D2's equivalent is chosen by what the module does (DESIGN §9.8)
-function sidecarAnswer({ text, lineText }) {
-  const eq = new RegExp(RX.ws.source).test(text)
-    ? 'WebSocket is the 2.1 upgrade lane; in 2.0.0 use SSE or `ctx.broadcast` (the proxy answers 426 to Upgrade)'
-    : /text\/event-stream|long-?poll/i.test(text)
-      ? 'SSE/long-poll → plain streamed HTTP under `/api/<company>/<slug>` through the 2.0 router'
-      : /public|share|tunnel|hostname/i.test(lineText) ? 'a public hostname → dynos (§12)'
-        : 'the 2.0 router (`:param`, `/*`, bare `/`, every method) under `/api/<company>/<slug>`'
+// D2's equivalent is chosen per listened SERVER (DESIGN §9.8): the HTTP equivalent by what the file serves
+// (SSE → streamed HTTP, a public hostname → dynos, else the router); the WebSocket line is primary only when
+// this server exists for WS alone (handed to `new WebSocketServer({server})` and created without a request
+// handler, or with a 426 stub), and an "also" clause when the server carries an upgrade beside its HTTP.
+const WS_LINE = 'WebSocket is the 2.1 upgrade lane; in 2.0.0 use SSE or `ctx.broadcast` (the proxy answers 426 to Upgrade)'
+const esc = (id) => id.replace(/[$.]/g, '\\$&')
+function listenedServer(text, index) {
+  return /([A-Za-z_$][\w$]*)\s*$/.exec(text.slice(Math.max(0, index - 80), index))?.[1] ?? null
+}
+function wsRole(text, id) {
+  if (!id) return { bound: false, only: false }
+  let ctor = false, m
+  const opts = /new\s+WebSocketServer\s*\(\s*\{([^}]*)\}/g
+  while ((m = opts.exec(text))) {
+    if (new RegExp(`\\bserver\\s*:\\s*${esc(id)}\\b`).test(m[1]) || (id === 'server' && /(^|[,{\s])server\s*(,|$)/.test(m[1].trim()))) { ctor = true; break }
+  }
+  const upgrade = new RegExp(`\\b${esc(id)}\\s*\\.\\s*on\\s*\\(\\s*['"]upgrade['"]`).test(text)
+  if (!ctor && !upgrade) return { bound: false, only: false }
+  const created = new RegExp(`\\b${esc(id)}\\s*=\\s*(?:[\\w$.]+\\.)?createServer\\s*\\(`).exec(text)
+  const window = created ? text.slice(created.index + created[0].length, created.index + created[0].length + 300) : ''
+  const only = ctor && (!created || /^\s*\)/.test(window) || /\b426\b/.test(window))
+  return { bound: true, only }
+}
+function sidecarAnswer({ text, lineText, index }) {
+  const id = listenedServer(text, index)
+  const ws = wsRole(text, id)
+  const http = /text\/event-stream|long-?poll/i.test(text)
+    ? 'SSE/long-poll → plain streamed HTTP under `/api/<company>/<slug>` through the 2.0 router'
+    : /public|share|tunnel|hostname/i.test(lineText) ? 'a public hostname → dynos (§12)'
+      : 'the 2.0 router (`:param`, `/*`, bare `/`, every method) under `/api/<company>/<slug>`'
+  const eq = ws.only ? WS_LINE : http + (ws.bound ? `; also: the WebSocket upgrade on \`${id}\` — ${WS_LINE}` : '')
   const port = /(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}|\b\d{4,5}\b/.exec(lineText)?.[0]
   return SIDECAR + eq + '; the bound port is also a self-collision at every save (§4.3 last-good)' + (port ? ` — fixed address \`${port}\`` : '')
 }
+const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.test\.(m?js|cjs)$|\.spec\.(m?js|cjs)$/
+const d2Findings = (s) => (s.findings || []).filter((f) => f.rule === 'D2').length
 
 /** @type {import('./catalogue.mjs').Rule[]} */
 export const RULES = [
@@ -113,10 +141,10 @@ export const RULES = [
   },
   {
     id: 'D2', family: '§4.8', plan: 'OR6, §4.7', title: 'sidecar listen() (fleet-unreachable)', severity: 'breaks-in-fleet',
-    detect: { static: [{ files: 'backend', re: RX.listen, classify: (c) => ({ answer: sidecarAnswer(c) }) }], runtime: ['listen'] },
-    count: (s, p) => arr(P(p).listens).length || (gb(s, 'listen') ? 1 : 0),
+    detect: { static: [{ files: 'all', re: RX.listen, classify: (c) => (TEST_FILE.test(c.file) ? { skip: true } : { answer: sidecarAnswer(c) }) }], runtime: ['listen'] },
+    count: (s, p) => arr(P(p).listens).length || (d2Findings(s) ? 1 : 0),
     answer: SIDECAR + 'URL shapes → the 2.0 router (`:param`, `/*`, bare `/`, every method); SSE/long-poll → plain streamed HTTP under `/api/<company>/<slug>`; a public hostname → dynos (§12); the bound port is also a self-collision at every save (§4.3 last-good)',
-    rewrite: null, evidence: '8/53 listen at mount (agent ×2, artifacts, spaces, intercom, blitzfeed, …); the port strings match the seed\'s',
+    rewrite: null, evidence: '10/58 static over every walked source file (a sidecar\'s listen() lives in a top-level helper: dashboard/mcp-server.js :4748, llm/serve.js :4147; test files are skipped); 8/53 listen at mount (agent ×2, artifacts, spaces, intercom, blitzfeed, …)',
   },
   {
     id: 'D2w', family: '§4.8', plan: 'OR6 (3), §4.7', title: 'WebSocket sidecar (2.1)', severity: 'breaks-in-fleet',
@@ -186,10 +214,15 @@ export const RULES = [
   },
   {
     id: 'D10', family: '§4.8', plan: '§4.8 "Also" [S:B6]', title: 'root-absolute Location in backend', severity: 'note',
-    detect: { static: [{ files: 'backend', re: RX.root_abs_location }] },
-    count: (s) => gb(s, 'root_abs_location'),
-    answer: 'the proxy rewrites a root-absolute `Location` (response allowlist §4.4); root-absolute links in HTML bodies are not rewritten',
-    rewrite: null, evidence: '1/58',
+    detect: {
+      static: [
+        { files: 'backend', re: RX.root_abs_location },
+        { files: 'backend', re: RX.root_abs_html, answer: 'root-absolute links in HTML bodies are not rewritten by the proxy — make them relative or build them from `ctx.baseUrl`' },
+      ],
+    },
+    count: (s) => gb(s, 'root_abs_location') + gb(s, 'root_abs_html'),
+    answer: 'the proxy rewrites a root-absolute `Location` (response allowlist §4.4); root-absolute links in HTML bodies (`href="/…"`, `src="/…"`, `action="/…"`) are not rewritten — make them relative or build them from `ctx.baseUrl`',
+    rewrite: null, evidence: '2/58 (auth: Location; sous: an HTML `src="/…"` in a backend-side file)',
   },
   {
     id: 'D11', family: '§4.8', plan: '§4.8 "Also" [S:B6]', title: "req.on('close') footgun", severity: 'degrades',
@@ -226,9 +259,16 @@ export const RULES = [
       ],
       runtime: ['writeOutside'],
     },
-    count: (s, p) => g(s, 'abs_path') + Object.keys(s.env || {}).filter((k) => LAPTOP_D13.has(k)).length + arr(P(p).writesOutside).filter((w) => /~\//.test(w) && !/<app>/.test(w)).length,
+    count: (s, p) => g(s, 'abs_path') + Object.keys(s.env || {}).filter((k) => LAPTOP_D13.has(k)).length + arr(P(p).writesOutside).filter((w) => /~\//.test(w) && !/<app>/.test(w)).length + arr(P(p).egress).filter((e) => LAPTOP_SOCKET.test(e)).length,
     answer: 'the only writable places are `ctx.dataDir` and `TMPDIR`; `HOME` is the worker\'s 0700 scratch home (row W)',
-    rewrite: null, evidence: '28/58 static; 2/53 die on `~/pro/…` at mount (mlx-tts, sous)',
+    rewrite: null, evidence: '28/58 static; 2/53 die on `~/pro/…` at mount (mlx-tts, sous); a `unix:~/…` connect (horse-browser\'s broker socket) is a laptop path, not N5',
+  },
+  {
+    id: 'D14', family: '§4.8', plan: '§4.8 "Also", §10 item 6', title: 'multi-chrome (local-only)', severity: 'breaks-in-fleet',
+    detect: { meta: 'isChrome' },
+    count: (s) => (s.meta?.isChrome ? 1 : 0),
+    answer: 'a chrome is not an app in the fleet: the shell delivers the one chrome (§4.1, §10 item 6); multi-chrome is local-only — keep it for `npx atelier`; no module.json is generated',
+    rewrite: null, evidence: '1/58 (midnight-chrome)',
   },
   {
     id: 'N1', family: 'NEW', plan: '§4.8 N1', title: 'self-pathed data dir / writes into the app folder', severity: 'breaks-in-fleet',
@@ -242,7 +282,7 @@ export const RULES = [
     },
     count: (s, p) => g(s, 'self_data') + new Set([...arr(P(p).selfData), ...arr(P(p).writesOutside).filter((w) => /<app>/.test(w))]).size,
     answer: '`ctx.dataDir` is the only data path (`/work/.atelier/data/<instance>`, outside the folder, survives a rename)',
-    rewrite: { kind: 'mechanical', transform: 'N1', applies: 'backend', notes: 'inside the mountRoutes span only: path.join/resolve(<X>, \'data\'[, rest]) and `${<X>}/data[/tail]` → <ctx>.dataDir / path.join(<ctx>.dataDir, rest) / `${<ctx>.dataDir}/tail`; <X> ∈ __dirname HERE ROOT DIR MODULE_DIR dirname(…) fileURLToPath(…)' },
+    rewrite: { kind: 'mechanical', transform: 'N1', applies: 'backend', notes: 'inside the mountRoutes span only: path.join/resolve(<X>, \'data\'[, rest]) and `${<X>}/data[/tail]` → <ctx>.dataDir / path.join(<ctx>.dataDir, rest) / `${<ctx>.dataDir}/tail`; <X> = __dirname, a dirname(fileURLToPath(import.meta.url)) call, or an identifier the file defines at module scope as the module dir; a `..` tail is skipped and named; a module whose other files keep a self-pathed data/ is marked partial (--write needs --write-partial)' },
     evidence: '19/58 static (9 daily); 10 touched it at mount, 7 died; 13 mix both paths (N1mix)',
   },
   {
@@ -329,9 +369,9 @@ export const RULES = [
     id: 'N10', family: 'NEW', plan: 'OR10', title: 'export const meta → module.json', severity: 'note',
     detect: { meta: 'literal' },
     count: (s) => (s.meta?.computed ? 1 : 0),
-    answer: '`module.json` `{name, icon, group, primary, color}` is the only meta; `chrome`, `isChrome`, `hidden`, `eager` are dropped and each named; a computed meta cannot be read statically — write module.json by hand',
-    rewrite: { kind: 'mechanical', transform: 'module.json', applies: 'frontend', notes: 'rules/meta.mjs: the literal meta → module.json' },
-    evidence: '58/58 declared, 58/58 literal, 0 computed',
+    answer: '`module.json` `{name, icon, group, primary, color}` is the only meta; `chrome`, `hidden`, `eager` are dropped and each named (`isChrome` is D14); a computed meta is never evaluated — write module.json by hand',
+    rewrite: { kind: 'mechanical', transform: 'module.json', applies: 'frontend', notes: 'rules/meta.mjs: the pure-literal meta → module.json; any identifier, call or operator in the literal makes it computed' },
+    evidence: '58/58 declared, 58/58 literal, 0 computed; 57 module.json (midnight-chrome is D14)',
   },
   {
     id: 'N11', family: 'NEW', plan: 'DESIGN §9.7', title: 'module.json with keys outside the five', severity: 'note',
@@ -423,5 +463,5 @@ export const RULES = [
 
 export const RULE_BY_ID = Object.fromEntries(RULES.map((r) => [r.id, r]))
 export const SEED_IDS = ['D1', 'D2', 'D2w', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13', 'N1', 'N2', 'N2op', 'N3', 'N4', 'N5', 'N6', 'N7', 'N8', 'I1', 'I2', 'I3', 'I4', 'I5', 'M1', 'M2', 'M3', 'M4']
-export const NEW_IDS = ['N1mix', 'N9', 'N10', 'N11', 'R1', 'R2', 'R3']
+export const NEW_IDS = ['N1mix', 'N9', 'N10', 'N11', 'R1', 'R2', 'R3', 'D14']
 export const SEVERITY_RANK = { 'breaks-in-fleet': 0, degrades: 1, note: 2 }

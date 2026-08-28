@@ -1,10 +1,10 @@
-// doctor/test/meta.test.js — literal meta → module.json byte-exact; computed → {error} + degrades;
+// doctor/test/meta.test.js — literal meta → module.json byte-exact; computed → {error} + degrades (never evaluated);
 // dropped keys with their rule; an existing module.json with `visibility` → N11 (DESIGN §8).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { extractMetaStatically, metaOf, moduleJsonOf, serializeModuleJson, checkExistingModuleJson, readMeta } from '../rules/meta.mjs'
+import { extractMetaStatically, metaOf, moduleJsonOf, serializeModuleJson, checkExistingModuleJson, readMeta, pureLiteral } from '../rules/meta.mjs'
 import { META_KEYS } from '../rules/catalogue.mjs'
 
 const SEED = '/Users/pa1nd/pro/001-atelier/design/atelier2/r2/spike-migration-local-1/out/module.json'
@@ -21,16 +21,30 @@ test('metaOf: declared / literal / computed with the symbol in the error', () =>
   assert.deepEqual([lit.declared, lit.literal, lit.computed, lit.line], [true, true, false, 2])
   const comp = metaOf("const N = 'A'\nexport const meta = { name: N }\n")
   assert.deepEqual([comp.declared, comp.literal, comp.computed], [true, false, true])
-  assert.match(comp.error, /N is not defined/)
+  assert.equal(comp.error, 'computed meta: N')
   const none = metaOf("export default () => null\n")
   assert.deepEqual([none.declared, none.literal, none.computed], [false, false, false])
+})
+
+test('a computed meta is never evaluated: no operator env, no clock, no side effect reaches the doctor process', () => {
+  const comp = (src) => { const m = metaOf(src); assert.equal(m.literal, false); assert.equal(m.computed, true); assert.deepEqual(m.meta, {}); return m.error }
+  assert.equal(comp('export const meta = { name: process.env.USER, icon: "x" }'), 'computed meta: process')
+  assert.equal(comp('export const meta = { name: "a" + "b", group: new Date().getFullYear() }'), 'computed meta: +')
+  assert.equal(comp('export const meta = { primary: globalThis.__doctorProbe = 1 }'), 'computed meta: globalThis')
+  assert.equal(globalThis.__doctorProbe, undefined)
+  assert.equal(comp('export const meta = { name: `${N}` }'), 'computed meta: ${')
+  assert.equal(comp('export const meta = { name: f() }'), 'computed meta: f')
+  assert.equal(comp('export const meta = { ...base, name: "x" }'), 'computed meta: .')
+  // pure literals pass: strings (every quote), numbers, booleans, null, nested objects/arrays, comments, trailing commas
+  assert.equal(pureLiteral(`{ name: 'A', "k-2": "b", t: \`c\`, n: -1.5e3, h: 0xff, p: true, q: null, u: undefined, nested: { a: [1, 'x', { b: false }] }, /* c */ // d\n }`), null)
+  assert.deepEqual(metaOf("export const meta = { name: 'A', /* group: X */ primary: true, }\n").meta, { name: 'A', primary: true })
 })
 
 test('moduleJsonOf: the five keys in order, every other key dropped with its rule', () => {
   const { json, dropped } = moduleJsonOf({ chrome: 'catalyst-chrome', color: '#123456', hidden: true, name: 'Jobs', eager: true, visibility: 'chat', isChrome: false, icon: 'timer', primary: true, group: 'dev' })
   assert.deepEqual(Object.keys(json), META_KEYS)
   assert.deepEqual(json, { name: 'Jobs', icon: 'timer', group: 'dev', primary: true, color: '#123456' })
-  assert.deepEqual(dropped.map((d) => [d.key, d.rule]), [['chrome', 'D5'], ['hidden', 'N10'], ['eager', 'I3'], ['visibility', 'N11'], ['isChrome', 'N10']])
+  assert.deepEqual(dropped.map((d) => [d.key, d.rule]), [['chrome', 'D5'], ['hidden', 'N10'], ['eager', 'I3'], ['visibility', 'N11'], ['isChrome', 'D14']])
   assert.ok(dropped.every((d) => typeof d.reason === 'string' && d.reason.length > 10))
   assert.deepEqual(moduleJsonOf({ name: 'x' }), { json: { name: 'x' }, dropped: [] })
 })
@@ -78,4 +92,7 @@ test('readMeta({dir}): lane C\'s entry — frontend.jsx + the existing module.js
   assert.deepEqual(r.existing.dropped, ['visibility'])
   const none = await readMeta({ dir: '/nope', fs: fakeFs({}) })
   assert.equal(none.declared, false); assert.equal(none.moduleJson, null); assert.equal(none.existing.present, false)
+  // a chrome (D14) is literal but gets no module.json
+  const chrome = await readMeta({ dir: '/ch', fs: fakeFs({ '/ch/frontend.jsx': "export const meta = { isChrome: true, hidden: true, name: 'Midnight', icon: 'moon' }\n" }) })
+  assert.equal(chrome.literal, true); assert.equal(chrome.moduleJson, null); assert.deepEqual(chrome.dropped, [])
 })

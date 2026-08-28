@@ -21,8 +21,8 @@ const io = () => { const out = [], err = []; return { out, err, sinks: { stdout:
 const treeHash = (dir) => execFileSync('find', [dir, '-type', 'f', '-exec', 'stat', '-f', '%N %m %z', '{}', ';'], { encoding: 'utf8' }).split('\n').sort().join('\n')
 
 test('parseArgs: defaults, every flag, usage errors', () => {
-  assert.deepEqual(parseArgs([]), { dir: null, out: './doctor-out', write: false, yesCorpus: false, json: false, noProbe: false, chrome: null, envKeys: null, jobs: 8 })
-  assert.deepEqual(parseArgs(['/c', '--out', '/o', '--write', '--yes-corpus', '--json', '--no-probe', '--chrome', '/ch', '--env-keys', '/e', '--jobs', '2']), { dir: '/c', out: '/o', write: true, yesCorpus: true, json: true, noProbe: true, chrome: '/ch', envKeys: '/e', jobs: 2 })
+  assert.deepEqual(parseArgs([]), { dir: null, out: './doctor-out', write: false, writePartial: false, yesCorpus: false, json: false, noProbe: false, chrome: null, envKeys: null, jobs: 8 })
+  assert.deepEqual(parseArgs(['/c', '--out', '/o', '--write', '--write-partial', '--yes-corpus', '--json', '--no-probe', '--chrome', '/ch', '--env-keys', '/e', '--jobs', '2']), { dir: '/c', out: '/o', write: true, writePartial: true, yesCorpus: true, json: true, noProbe: true, chrome: '/ch', envKeys: '/e', jobs: 2 })
   assert.throws(() => parseArgs(['--bogus']), UsageError)
   assert.throws(() => parseArgs(['--out']), UsageError)
   assert.throws(() => parseArgs(['a', 'b']), UsageError)

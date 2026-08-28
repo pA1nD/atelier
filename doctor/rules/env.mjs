@@ -10,9 +10,9 @@
 //   shell-published HOST PORT BASE_URL (N3: published from ctx.baseUrl into the worker env, row W) and the
 //                   other row-W keys the host sets (APP_ID, ATELIER_WORKER, NODE_ENV is node) — never N2
 //   node            Node's own reads + terminal noise (NODE_NOISE, RESULT surprise 7) — never a finding
-//   laptop          the laptop's session env: HOME PWD USER TMPDIR SHELL LOGNAME XPC_SERVICE_NAME (D13 — the
-//                   seed's set; PATH LANG LC_ALL XDG_* are laptop too but the seed excluded them from D13, so
-//                   they stay out of the D13 count: LAPTOP_D13 vs LAPTOP)
+//   laptop          the laptop's session env: HOME PWD USER SHELL LOGNAME XPC_SERVICE_NAME (D13 — the seed's set
+//                   minus TMPDIR, which is row W; PATH LANG LC_ALL XDG_* are laptop too but the seed excluded
+//                   them from D13, so they stay out of the D13 count: LAPTOP_D13 vs LAPTOP)
 //   config          looks like app config by suffix (_KEY _TOKEN _SECRET … _PORT _HOST _DIR _PATH _MODEL _BIN)
 //   other           any other key — app config from the portal's point of view (N2, in the manifest as config)
 import { ENVREAD, NODE_NOISE, SHELL_PUBLISHED, ROW_W_ENV, LAPTOP, LAPTOP_D13, CONFIG_SUFFIX_RE } from './catalogue.mjs'

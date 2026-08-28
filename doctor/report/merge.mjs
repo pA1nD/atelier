@@ -8,7 +8,7 @@
 // `OBSERVATIONS`. A catalogue rule may override it with `match.runtime(obs, ctx) → boolean`.
 // "mounted" is never evidence of anything (RESULT surprise 6): only `state ∉ OK_STATES` (R1) reads the state.
 import { RULE_COLUMN_IDS } from './columns.mjs'
-import { SEED_RULE_BY_ID, NODE_NOISE, SHELL_KEYS, LAPTOP_KEYS, IMAGE_BINS } from './seed-rules.mjs'
+import { SEED_RULE_BY_ID, NODE_NOISE, SHELL_KEYS, LAPTOP_KEYS, ROW_W_ENV, IMAGE_BINS } from './seed-rules.mjs'
 import { moduleVerdict, isBrokenState } from './verdict.mjs'
 
 const text = (o) => (typeof o === 'string' ? o : o == null ? '' : String(o?.target ?? o?.key ?? o?.bin ?? o?.path ?? o?.signal ?? o?.addr ?? o?.address ?? (typeof o === 'object' && 'code' in o ? o.code ?? '' : JSON.stringify(o))))
@@ -44,28 +44,36 @@ export function seedShape(runtime) {
     ctxModule: Array.isArray(runtime.ctxModule) ? runtime.ctxModule.map((o) => (typeof o === 'string' ? o : o?.id ?? text(o))) : [],
   }
 }
-const isLoopback = (s) => /(^|\/\/|@)(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(s) || /^unix:/.test(s)
+const isLoopback = (s) => /(^|\/\/|@)(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(s)      // a peer app IS a Unix socket in 2.0: `unix:` is never N5
 const isInternet = (s) => /^https?:\/\//.test(s) && !isLoopback(s)
 const isHomePath = (s) => /(^|['"\s])~\//.test(s) || /\/Users\/|\/home\/|<home>|<scratch>/.test(s)
 const isAppPath = (s) => /<app>/.test(s)
+const binOf = (s) => s.split(/\s/)[0].split('/').pop()
+const LAPTOP_SOCKET = /^unix:(?:~\/|\/Users\/|\/home\/)/      // a Unix-socket connect into the laptop's home (D13)
 
 /**
  * kind → the rules an observation of that kind can belong to. `excerpt` renders the finding text,
- * `severity` (optional) overrides the rule's default per observation, `when` (optional) filters.
+ * `severity` (optional) overrides the rule's default per observation, `answer` (optional) the rule's answer,
+ * `when` (optional) filters.
  * The probe records `runtime.<kind>` as an array of strings or `{…}` objects (DESIGN §4).
  */
 export const OBSERVATIONS = Object.freeze({
   listens: [{ rule: 'D2', excerpt: (s) => `listen ${s}` }],
-  spawns: [{ rule: 'D12', excerpt: (s) => `spawn ${s}`, severity: (s, c) => (c.imageBins.has(s.split(/\s/)[0].split('/').pop()) ? 'note' : undefined) }],
+  spawns: [{
+    rule: 'D12', excerpt: (s) => `spawn ${s}`,
+    severity: (s, c) => (c.imageBins.has(binOf(s)) ? 'note' : undefined),
+    answer: (s, c) => (c.imageBins.has(binOf(s)) ? `\`${binOf(s)}\` is in the image (IMAGE_BINS)${/ <app>\//.test(s) ? '; the spawned script is a walked file — its own habits (a listen() is D2) are judged by the static rules' : ''}` : undefined),
+  }],
   envReads: [
     { rule: 'N3', when: (k, c) => c.shellKeys.has(k), excerpt: (k) => `process.env.${k}` },
     { rule: 'D13', when: (k, c) => c.laptopKeys.has(k), excerpt: (k) => `process.env.${k}`, severity: () => 'degrades' },
-    { rule: 'N2', when: (k, c) => !c.nodeNoise.has(k) && !c.shellKeys.has(k) && !c.laptopKeys.has(k), excerpt: (k) => `process.env.${k}` },
+    { rule: 'N2', when: (k, c) => !c.nodeNoise.has(k) && !c.shellKeys.has(k) && !c.rowW.has(k) && !c.laptopKeys.has(k), excerpt: (k) => `process.env.${k}` },
     { rule: 'N2op', when: (k, c) => c.envKeys.has(k), excerpt: (k) => `process.env.${k} (operator .env key)` },
   ],
   egress: [
     { rule: 'N4', when: (s) => /\/api\/global\//.test(s), excerpt: (s) => `egress ${s}` },
     { rule: 'N5', when: (s) => isLoopback(s), excerpt: (s) => `egress ${s}` },
+    { rule: 'D13', when: (s) => LAPTOP_SOCKET.test(s), excerpt: (s) => `egress ${s} (a laptop socket)`, severity: () => 'breaks-in-fleet' },
     { rule: 'I2', when: (s) => isInternet(s), excerpt: (s) => `egress ${s}` },
   ],
   writesOutside: [
@@ -91,21 +99,21 @@ export function runtimeFindings(runtimeIn, rules = [], { envKeys = new Set(), co
   if (!runtime) return []
   const c = {
     envKeys, imageBins: constants.IMAGE_BINS ?? IMAGE_BINS, nodeNoise: constants.NODE_NOISE ?? NODE_NOISE,
-    shellKeys: constants.SHELL_KEYS ?? SHELL_KEYS, laptopKeys: constants.LAPTOP_KEYS ?? LAPTOP_KEYS,
+    shellKeys: constants.SHELL_KEYS ?? SHELL_KEYS, laptopKeys: constants.LAPTOP_KEYS ?? LAPTOP_KEYS, rowW: constants.ROW_W_ENV ?? ROW_W_ENV,
   }
   const out = []
-  const push = (rule, excerpt, severity) => out.push({ rule: rule.id, severity: severity ?? baseSeverity(rule), file: RUNTIME_FILE, line: 0, excerpt, answer: rule.answer ?? '' })
+  const push = (rule, excerpt, severity, answer) => out.push({ rule: rule.id, severity: severity ?? baseSeverity(rule), file: RUNTIME_FILE, line: 0, excerpt, answer: answer ?? rule.answer ?? '' })
   for (const [kind, targets] of Object.entries(OBSERVATIONS)) {
-    let obs = runtime[kind]
+    let obs = kind === 'spawns' && Array.isArray(runtimeIn.spawns) ? runtimeIn.spawns : runtime[kind]     // lane B's spawn records carry the script
     if (obs == null) continue
     if (!Array.isArray(obs)) obs = obs === false ? [] : [obs]
     for (const o of obs) {
-      const s = text(o)
+      const s = kind === 'spawns' && o?.script ? `${text(o)} ${o.script}` : text(o)      // the spawned script beside the binary
       for (const t of targets) {
         const rule = ruleOf(rules, t.rule)
         const match = rule.match?.runtime ? rule.match.runtime(o, { kind, ...c }) : t.when ? t.when(s, c) : true
         if (!match) continue
-        push(rule, t.excerpt(s), t.severity?.(s, c))
+        push(rule, t.excerpt(s), t.severity?.(s, c), t.answer?.(s, c))
       }
     }
   }
@@ -128,7 +136,7 @@ export const residentCount = (resources) => (resources && typeof resources === '
 export function staticFindings(st, rules = []) {
   return (st?.findings ?? []).map((f) => {
     const rule = ruleOf(rules, f.rule)
-    return { rule: f.rule, severity: f.severity ?? baseSeverity(rule), file: f.file ?? '', line: f.line ?? 0, excerpt: f.excerpt ?? '', answer: f.answer ?? rule.answer ?? '', ...(f.rewrite ? { rewrite: f.rewrite } : {}) }
+    return { rule: f.rule, severity: f.severity ?? baseSeverity(rule), file: f.file ?? '', line: f.line ?? 0, excerpt: f.excerpt ?? '', answer: f.answer ?? rule.answer ?? '', ...(f.rewrite ? { rewrite: f.rewrite } : {}), ...(f.skipped ? { skipped: f.skipped } : {}) }
   })
 }
 
@@ -160,14 +168,14 @@ export function configKeysOf({ static: st, runtime, classifyEnv, envKeys = new S
   const classes = { operator: new Set(), config: new Set(), shell: new Set(), laptop: new Set() }
   const put = (k, cls) => {
     if (cls === 'operator' || cls === 'operator-env') classes.operator.add(k)
-    else if (cls === 'shell' || cls === 'shell-published') classes.shell.add(k)
+    else if (cls === 'shell' || (cls === 'shell-published' && (constants.SHELL_KEYS ?? SHELL_KEYS).has(k))) classes.shell.add(k)     // APP_ID/ATELIER_WORKER/TMPDIR are row W, not the portal's
     else if (cls === 'laptop') classes.laptop.add(k)
     else if (cls === 'config' || cls === 'other') classes.config.add(k)
   }
   for (const [k, cls] of Object.entries(st?.env ?? {})) put(k, cls)
   for (const k of seedShape(runtime)?.envReads ?? []) {
     if (nodeNoise.has(k)) continue
-    put(k, classifyEnv ? classifyEnv(k, envKeys) : envKeys.has(k) ? 'operator' : SHELL_KEYS.has(k) ? 'shell' : LAPTOP_KEYS.has(k) ? 'laptop' : 'config')
+    put(k, classifyEnv ? classifyEnv(k, envKeys) : envKeys.has(k) ? 'operator' : SHELL_KEYS.has(k) ? 'shell' : ROW_W_ENV.has(k) ? 'shell-published' : LAPTOP_KEYS.has(k) ? 'laptop' : 'config')
   }
   for (const k of classes.config) if (envKeys.has(k)) { classes.config.delete(k); classes.operator.add(k) }
   return Object.fromEntries(Object.entries(classes).map(([c, s]) => [c, [...s].sort()]))
@@ -175,13 +183,14 @@ export function configKeysOf({ static: st, runtime, classifyEnv, envKeys = new S
 
 /**
  * One module → report.json (DESIGN §5).
- * @param {{ id:string, dir:string, daily:boolean, static?:object, meta?:object, rewrites?:Array<{file:string, edits:Array<{line:number, from:string, to:string}>}>,
+ * @param {{ id:string, dir:string, daily:boolean, static?:object, meta?:object, rewrites?:Array<{file:string, edits:Array<{line:number, from:string, to:string}>, leftover?:string[]}>,
  *   runtime?:object, tailwind?:{coldMs?:number, longLines?:number}, rules?:Array, envKeys?:Set<string>, classifyEnv?:Function, constants?:object }} m
  */
 export function mergeModule(m) {
   const { id, dir, daily = false, static: st = {}, meta = {}, rewrites = [], runtime, tailwind, rules = [], envKeys = new Set(), classifyEnv, constants } = m
   const findings = [...staticFindings(st, rules), ...runtimeFindings(runtime, rules, { envKeys, constants })]
   const flatRewrites = rewrites.flatMap((r) => (r.edits ?? []).map((e) => ({ file: r.file, line: e.line, from: e.from, to: e.to })))
+  const rewriteLeftover = [...new Set(rewrites.flatMap((r) => r.leftover ?? []))]     // self-pathed data/ the N1 rewrite did not reach (file:line) — the rewrite is partial
   const cells = cellsOf({ rules, static: st, runtime, tailwind })
   const configKeys = configKeysOf({ static: st, runtime, classifyEnv, envKeys, constants })
   const verdict = moduleVerdict({ module: id, findings, runtime, rewrites: flatRewrites })
@@ -195,6 +204,7 @@ export function mergeModule(m) {
     configKeys,
     findings,
     rewrites: flatRewrites,
+    rewriteLeftover,
     runtime: runtime ?? { state: 'skipped' },
     tailwind: { coldMs: tailwind?.coldMs ?? null, longLines: tailwind?.longLines ?? 0 },
     cells,

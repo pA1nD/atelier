@@ -28,11 +28,11 @@ test('the seed header is preserved verbatim: 37 fields, then the new columns aft
   if (fs.existsSync(SEED_CSV)) assert.equal(fs.readFileSync(SEED_CSV, 'utf8').split('\n')[0], SEED_HEADER)
 })
 
-test('rule column ids = the 32 seed rule columns + the 7 new rule cells, in order', () => {
-  assert.equal(RULE_COLUMN_IDS.length, 39)
+test('rule column ids = the 32 seed rule columns + the 8 new rule cells, in order', () => {
+  assert.equal(RULE_COLUMN_IDS.length, 40)
   assert.equal(RULE_COLUMN_IDS[0], 'D1')
   assert.equal(RULE_COLUMN_IDS[31], 'M4')
-  assert.deepEqual(RULE_COLUMN_IDS.slice(32), ['N1mix', 'N9', 'N10', 'N11', 'R1', 'R2', 'R3'])
+  assert.deepEqual(RULE_COLUMN_IDS.slice(32), ['N1mix', 'N9', 'N10', 'N11', 'R1', 'R2', 'R3', 'D14'])
 })
 
 test('rows: daily first in DAILY order, then alphabetical; every column present; CSV cells render the seed way', () => {

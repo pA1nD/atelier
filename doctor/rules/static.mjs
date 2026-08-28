@@ -15,11 +15,11 @@
 //     env: {KEY: class}, spawn:[bin], ctxModule:[id], crossModule:[id], relImportsBackend:n,
 //     mobile: {vh100, h_screen, fixed_bottom, small_input},
 //     meta: {declared, literal, computed, error, keys, chrome, isChrome, hidden, eager, line},
-//     moduleJson: {…}|null, metaDropped:[{key, rule, reason}],
+//     moduleJson: {…}|null (null for a chrome, D14), metaDropped:[{key, rule, reason}],
 //     existingModuleJson: {present, ok, dropped, invalid, error?},
 //     sqlite: {opens, unguarded}, scope: {found, line, ctxName, routerName}|null,
 //     configKeys: {operator, config, shell, laptop},
-//     findings: [{rule, severity, file, line, col, evidence, answer, scope?, key?, rewrite?:{to}}],
+//     findings: [{rule, severity, file, line, col, evidence, answer, scope?, key?, rewrite?:{to}, skipped?:reason}],
 //     rewrites: [{file, rule, line, from, to}], rewriteSkipped: [{file, rule, line, reason}],
 //     rewritten: {<rel>: text} }
 import nodeFs from 'node:fs'
@@ -124,7 +124,11 @@ export function analyzeFiles(id, files, { operatorKeys = new Set(), moduleJson =
         r.rewrites.push({ file: f.rel, ...e })
         for (const fd of r.findings) if (fd.file === f.rel && fd.rule === e.rule && fd.line === e.line && !fd.rewrite) fd.rewrite = { to: e.to }
       }
-      for (const s of rw.skipped) r.rewriteSkipped.push({ file: f.rel, ...s })
+      for (const s of rw.skipped) {
+        r.rewriteSkipped.push({ file: f.rel, ...s })
+        // the finding on a line the transform refused says why, instead of promising a mechanical rewrite
+        for (const fd of r.findings) if (fd.file === f.rel && fd.rule === s.rule && fd.line === s.line && !fd.rewrite && !fd.skipped) { fd.skipped = s.reason; fd.answer = `${RULE_BY_ID[s.rule].answer} — not rewritten mechanically here: ${s.reason}` }
+      }
       if (rw.edits.length) r.rewritten[f.rel] = rw.text
     }
     // meta (frontend.jsx only)
@@ -132,7 +136,9 @@ export function analyzeFiles(id, files, { operatorKeys = new Set(), moduleJson =
       const meta = metaOf(text)
       r.meta = { ...meta, chrome: meta.meta.chrome ?? null, isChrome: !!meta.meta.isChrome, hidden: !!meta.meta.hidden, eager: !!meta.meta.eager }
       delete r.meta.meta
-      if (meta.literal) {
+      if (meta.literal && meta.meta.isChrome) {
+        r.findings.push({ rule: 'D14', severity: RULE_BY_ID.D14.severity, file: f.rel, line: meta.line, col: 1, evidence: 'export const meta { isChrome: true }', answer: RULE_BY_ID.D14.answer, key: 'isChrome' })
+      } else if (meta.literal) {
         const mj = moduleJsonOf(meta.meta)
         r.moduleJson = mj.json
         r.metaDropped = mj.dropped

@@ -74,7 +74,7 @@ test('cells: catalogue count wins, then static.cells, then the R1–R3 fallbacks
   assert.equal(cells.R2, 1)
   assert.equal(cells.R3, 0)
   assert.equal(cells.M4, 0)
-  assert.equal(Object.keys(cells).length, 39)
+  assert.equal(Object.keys(cells).length, 40)
   for (const v of Object.values(cells)) assert.equal(typeof v, 'number')
 })
 
@@ -104,7 +104,8 @@ test('mergeModule: the report.json shape; static findings keep their file:line a
   const st = { findings: [{ rule: 'N1', severity: 'breaks-in-fleet', file: 'backend.js', line: 6, excerpt: "path.join(HERE, 'data')", rewrite: { to: 'ctx.dataDir' } }, { rule: 'N4', file: 'frontend.jsx', line: 4, excerpt: '/api/global/' }], cells: { N1: 1, N4: 1 }, files: { source: 2, client: 1, subfolderClient: 0 }, env: { LEGACY_TOKEN: 'config' } }
   const meta = { declared: true, literal: true, error: null, keys: ['name', 'icon', 'chrome'], moduleJson: { name: 'Legacy', icon: 'archive' }, dropped: [{ key: 'chrome', rule: 'D5', reason: 'dropped' }] }
   const r = mergeModule({ id: 'legacy-data', dir: '/c/legacy-data', daily: false, static: st, meta, rewrites: [{ file: 'backend.js', text: '…', edits: [{ line: 6, from: "path.join(HERE, 'data')", to: 'ctx.dataDir' }] }], runtime: { state: 'mounted', teardown: true, resources: {}, envReads: ['LEGACY_TOKEN'] }, tailwind: { coldMs: 2.1, longLines: 0 } })
-  assert.deepEqual(Object.keys(r), ['module', 'dir', 'daily', 'files', 'meta', 'moduleJson', 'configKeys', 'findings', 'rewrites', 'runtime', 'tailwind', 'cells', 'verdict'])
+  assert.deepEqual(Object.keys(r), ['module', 'dir', 'daily', 'files', 'meta', 'moduleJson', 'configKeys', 'findings', 'rewrites', 'rewriteLeftover', 'runtime', 'tailwind', 'cells', 'verdict'])
+  assert.deepEqual(r.rewriteLeftover, [])
   assert.equal(r.findings[0].answer, SEED_RULE_BY_ID.N1.answer)
   assert.deepEqual(r.findings[0].rewrite, { to: 'ctx.dataDir' })
   assert.equal(r.findings[1].severity, 'breaks-in-fleet')      // N4's catalogue default when the static finding carries none
@@ -120,6 +121,22 @@ test('mergeModule: the report.json shape; static findings keep their file:line a
   const empty = mergeModule({ id: 'e', dir: '/e' })
   assert.deepEqual(empty.runtime, { state: 'skipped' })
   assert.equal(empty.verdict.level, 'CLEAN')
+})
+
+test('a unix-socket connect into the home is D13 (a laptop socket), never N5; a row-W key read (TMPDIR) is no finding; an IMAGE_BINS spawn names its script', () => {
+  const fs = runtimeFindings({ state: 'mounted', teardown: true, egress: ['unix:~/Library/Application Support/hb-broker/broker.sock', 'unix:/tmp/atelier/peer.sock'], envReads: ['TMPDIR', 'APP_ID', 'HOME'], spawns: [{ bin: '/opt/homebrew/bin/node', fn: 'spawn', script: '<app>/mcp-server.js' }, 'ffmpeg'] })
+  assert.deepEqual(byRule(fs, 'N5'), [])
+  assert.deepEqual(byRule(fs, 'D13').map((f) => [f.severity, f.excerpt]), [['degrades', 'process.env.HOME'], ['breaks-in-fleet', 'egress unix:~/Library/Application Support/hb-broker/broker.sock (a laptop socket)']])
+  assert.deepEqual(byRule(fs, 'N2'), [])
+  assert.deepEqual(byRule(fs, 'D12').map((f) => [f.severity, f.excerpt, f.answer]), [
+    ['note', 'spawn /opt/homebrew/bin/node <app>/mcp-server.js', '`node` is in the image (IMAGE_BINS); the spawned script is a walked file — its own habits (a listen() is D2) are judged by the static rules'],
+    ['breaks-in-fleet', 'spawn ffmpeg', SEED_RULE_BY_ID.D12.answer],
+  ])
+  const ck = configKeysOf({ static: {}, runtime: { envReads: ['TMPDIR', 'PORT'] } })
+  assert.deepEqual(ck, { operator: [], config: [], shell: ['PORT'], laptop: [] })
+  // a partial N1 rewrite is named on the report
+  const r = mergeModule({ id: 'agent', dir: '/c/agent', rewrites: [{ file: 'backend.js', text: '…', edits: [{ rule: 'N1', line: 6, from: 'a', to: 'b' }], partial: true, leftover: ['signal-bridge.js:32', 'wab-bridge.js:31'] }] })
+  assert.deepEqual(r.rewriteLeftover, ['signal-bridge.js:32', 'wab-bridge.js:31'])
 })
 
 test("lane B's record objects ({key, n}, {target}, {bin}, {path}, {signal}, {code}) normalise to the seed shape for counts and findings", () => {

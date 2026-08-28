@@ -3,7 +3,7 @@
 // below and named in `stubbed`, so the CLI runs (and says what it could not judge) before the other
 // lanes land. THIS is the one place the export names are mapped — change the table, not the callers.
 //
-//   rules/catalogue.mjs   RULES (Rule[]), optional NODE_NOISE / IMAGE_BINS / SHELL_KEYS / LAPTOP_KEYS
+//   rules/catalogue.mjs   RULES (Rule[]), optional NODE_NOISE / IMAGE_BINS / SHELL_KEYS / LAPTOP_KEYS / ROW_W_ENV
 //   rules/walk.mjs        listModules(corpusDir) → [{id, dir, hasFrontend, hasBackend}]
 //   rules/static.mjs      runStatic({id, dir, rules, envKeys}) → {findings, cells?, hits?, files:{source, client, subfolderClient}, env:{KEY: class}, …}
 //   rules/meta.mjs        readMeta({dir}) → {declared, literal, error, keys, meta, moduleJson, dropped:[{key, rule, reason}]}
@@ -13,7 +13,7 @@
 //                         — wrapped below into {runtime, tailwind:null}; a lane returning {runtime, tailwind} passes through
 import fs from 'node:fs'
 import path from 'node:path'
-import { SEED_RULES, NODE_NOISE, IMAGE_BINS, SHELL_KEYS, LAPTOP_KEYS } from './seed-rules.mjs'
+import { SEED_RULES, NODE_NOISE, IMAGE_BINS, SHELL_KEYS, LAPTOP_KEYS, ROW_W_ENV } from './seed-rules.mjs'
 
 const here = path.dirname(new URL(import.meta.url).pathname)
 const laneFile = (rel) => path.join(here, '..', rel)
@@ -49,7 +49,7 @@ export function classifyEnvStub(key, envKeys = new Set()) {
 }
 
 const STUBS = {
-  rules: { RULES: SEED_RULES.map((r) => ({ ...r, detect: {}, rewrite: null, evidence: '' })), NODE_NOISE, IMAGE_BINS, SHELL_KEYS, LAPTOP_KEYS },
+  rules: { RULES: SEED_RULES.map((r) => ({ ...r, detect: {}, rewrite: null, evidence: '' })), NODE_NOISE, IMAGE_BINS, SHELL_KEYS, LAPTOP_KEYS, ROW_W_ENV },
   walk: { listModules: listModulesStub },
   static: { runStatic: async () => ({ findings: [], cells: {}, files: { source: 0, client: 0, subfolderClient: 0 }, env: {} }) },
   meta: { readMeta: async () => ({ declared: false, literal: false, error: null, keys: [], meta: {}, moduleJson: null, dropped: [] }) },
@@ -79,7 +79,7 @@ export async function loadLanes() {
   }
   return {
     rules: cat.RULES ?? cat.default ?? STUBS.rules.RULES,
-    constants: { NODE_NOISE: cat.NODE_NOISE ?? NODE_NOISE, IMAGE_BINS: cat.IMAGE_BINS ?? IMAGE_BINS, SHELL_KEYS: cat.SHELL_KEYS ?? SHELL_KEYS, LAPTOP_KEYS: cat.LAPTOP_KEYS ?? LAPTOP_KEYS },
+    constants: { NODE_NOISE: cat.NODE_NOISE ?? NODE_NOISE, IMAGE_BINS: cat.IMAGE_BINS ?? IMAGE_BINS, SHELL_KEYS: cat.SHELL_KEYS ?? SHELL_KEYS, LAPTOP_KEYS: cat.LAPTOP_KEYS ?? LAPTOP_KEYS, ROW_W_ENV: cat.ROW_W_ENV ?? ROW_W_ENV },
     listModules: mods.walk.listModules ?? listModulesStub,
     runStatic: mods.static.runStatic ?? STUBS.static.runStatic,
     readMeta: mods.meta.readMeta ?? STUBS.meta.readMeta,

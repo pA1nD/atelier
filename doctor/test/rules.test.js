@@ -103,14 +103,61 @@ test('D13: HOME reads and os.homedir() degrade, /Users breaks', () => {
   assert.equal(rules("process.env.PATH", 'D13').length, 0)
 })
 
-test('D2: the answer carries the plan sentence and the equivalent chosen by what the module does', () => {
+test('D2: the answer carries the plan sentence and the equivalent chosen per listened server', () => {
   const f = rules(be("s.listen(7475, '0.0.0.0')"), 'D2')[0]
   assert.match(f.answer, /expects an operator reverse proxy that the fleet does not have — here is the first-class equivalent/)
   assert.match(f.answer, /7475/)
-  const ws = rules("import { WebSocketServer } from 'ws'\nexport default { mountRoutes(r, ctx) { wss.listen(9000) } }", 'D2')[0]
-  assert.match(ws.answer, /WebSocket is the 2.1 upgrade lane/)
+  assert.match(f.answer, /the 2\.0 router/); assert.doesNotMatch(f.answer, /WebSocket/)
+  // intercom's shape: a server that exists for the WebSocket alone (426 stub handler) → the WS line is primary
+  const ws = rules("const { WebSocketServer } = require('ws')\nexport default { mountRoutes(r, ctx) {\n  const micSrv = http.createServer((req, res) => { res.writeHead(426); res.end('websocket only') })\n  const micWss = new WebSocketServer({ server: micSrv })\n  micSrv.listen(9000) } }", 'D2')[0]
+  assert.match(ws.answer, /equivalent: WebSocket is the 2.1 upgrade lane/)
+  // sites' shape: an HTTP docs server (§4.7 row 1, 2.0.0) that also accepts a live-reload upgrade → HTTP first, the WS as an "also"
+  const sites = rules("import { WebSocketServer } from 'ws'\nconst wss = new WebSocketServer({ noServer: true })\nexport default { mountRoutes(r, ctx) {\n  const server = http.createServer(async (req, res) => { if (req.method === 'OPTIONS') return res.end() })\n  server.on('upgrade', (req, socket, head) => wss.handleUpgrade(req, socket, head, () => {}))\n  server.listen(DOCS_PORT, DOCS_HOST) } }", 'D2')[0]
+  assert.match(sites.answer, /equivalent: the 2\.0 router .*; also: the WebSocket upgrade on `server` — WebSocket is the 2\.1 upgrade lane/)
+  // a `ws` import elsewhere in the file says nothing about THIS server
+  const other = rules("import { WebSocketServer } from 'ws'\nexport default { mountRoutes(r, ctx) {\n  const wss = new WebSocketServer({ server: a })\n  const b = http.createServer(h)\n  b.listen(9002) } }", 'D2')[0]
+  assert.doesNotMatch(other.answer, /WebSocket/)
   const sse = rules("export default { mountRoutes(r, ctx) { res.setHeader('content-type', 'text/event-stream'); s.listen(9001) } }", 'D2')[0]
   assert.match(sse.answer, /streamed HTTP/)
+})
+
+test('D2: a listen() in a top-level helper file the backend spawns is found (dashboard/mcp-server.js); a test file is not', () => {
+  const helper = "const PORT = parseInt(process.env.DASHBOARD_MCP_PORT || '4748', 10)\nhttpServer.listen(PORT, HOST, () => {})\n"
+  const f = rules(helper, 'D2', { kind: 'frontend', file: 'mcp-server.js' })
+  assert.equal(f.length, 1); assert.equal(f[0].file, 'mcp-server.js'); assert.match(f[0].answer, /the 2\.0 router/)
+  assert.equal(rules("s.listen(0, '127.0.0.1', () => {})", 'D2', { kind: 'frontend', file: 'test/integration.test.js' }).length, 0)
+  assert.equal(rules("s.listen(0)", 'D2', { kind: 'backend', file: 'lib/x.test.js' }).length, 0)
+  const r = analyzeFiles('dashboard', [{ rel: 'backend.js', kind: 'backend', text: be("spawn(process.execPath, [path.join(HERE, 'mcp-server.js')])") }, { rel: 'mcp-server.js', kind: 'frontend', text: helper }])
+  assert.equal(cellsOf(r).D2, 1)
+  assert.equal(cellsOf(analyzeFiles('auth', [{ rel: 'test/integration.test.js', kind: 'frontend', text: 's.listen(0)' }])).D2, 0)
+})
+
+test('D10: a root-absolute link in backend-served HTML (href/src/action) is named; /api/ and protocol-relative are not', () => {
+  const f = rules('const html = `<a href="/login">x</a><script src="/player.js"></script><form action="/submit">`', 'D10')
+  assert.equal(f.length, 3); assert.match(f[0].answer, /not rewritten by the proxy/)
+  assert.equal(rules("res.end('<a href=\\\"/x\\\">')", 'D10').length, 1)
+  assert.equal(rules('const html = `<a href="/api/x">x</a><script src="//cdn/x.js"></script><a href="x">`', 'D10').length, 0)
+  assert.equal(rules('<a href="/x">', 'D10', { kind: 'frontend' }).length, 0)
+  const r = analyzeFiles('demo', [{ rel: 'backend.js', kind: 'backend', text: "res.writeHead(302, { Location: '/login' }); const h = '<img src=\"/a.png\">'" }])
+  assert.equal(cellsOf(r).D10, 2)
+})
+
+test('D13: TMPDIR is row W (the host publishes it) — neither a static nor a counted laptop read', () => {
+  assert.equal(rules('process.env.TMPDIR', 'D13').length, 0)
+  assert.equal(rules('process.env.TMPDIR', 'N2').length, 0)
+  const r = analyzeFiles('demo', [{ rel: 'backend.js', kind: 'backend', text: 'const t = process.env.TMPDIR; const h = process.env.HOME' }])
+  assert.equal(cellsOf(r).D13, 1)
+  assert.equal(cellsOf(r, { envReads: ['TMPDIR'], egress: ['unix:~/Library/Application Support/hb-broker/broker.sock', 'unix:/tmp/peer.sock'] }).D13, 2)
+  assert.equal(cellsOf(r, { egress: ['unix:~/x.sock'] }).N5, 0)
+})
+
+test('D14: a chrome (meta.isChrome) is local-only — a breaks finding, no module.json, no N10 note', () => {
+  const r = analyzeFiles('midnight-chrome', [{ rel: 'frontend.jsx', kind: 'frontend', text: "export const meta = { isChrome: true, hidden: true, name: 'Midnight', icon: 'moon' }\nexport function chrome() { return null }\n" }])
+  assert.equal(r.moduleJson, null)
+  assert.deepEqual(r.findings.map((f) => [f.rule, f.severity]), [['D14', 'breaks-in-fleet']])
+  assert.match(r.findings[0].answer, /multi-chrome is local-only/)
+  assert.equal(cellsOf(r).D14, 1); assert.equal(cellsOf(r).N10, 0)
+  assert.equal(cellsOf(analyzeFiles('app', [{ rel: 'frontend.jsx', kind: 'frontend', text: "export const meta = { name: 'A', chrome: 'midnight' }\n" }])).D14, 0)
 })
 
 test('N6: the host\'s own /_atelier/health and /_atelier/report are not shell internals', () => {
@@ -138,6 +185,18 @@ test('N1: inside the span → mechanical (rewrite.to); outside → hoist; fronte
   assert.equal(noSpan[0].scope, 'outside-mountRoutes')
   const fe = rules("fetch('./data/x.json')", 'N1', { kind: 'frontend' })
   assert.equal(fe[0].severity, 'degrades')
+})
+
+test('N1/N4: a line the transform refused carries the reason on its finding, not the mechanical-rewrite promise', () => {
+  const snippet = "export default {\n  mountRoutes(router, ctx) {\n    router.get('/snippet', (req, res) => res.json({ js: `const JOBS = \\`http://x/api/global/jobs\\`` }))\n  }\n}\n"
+  const n4 = rules(snippet, 'N4')
+  assert.equal(n4.length, 1); assert.equal(n4[0].rewrite, undefined)
+  const r = analyzeFiles('jobs', [{ rel: 'backend.js', kind: 'backend', text: snippet }])
+  const f = r.findings.find((x) => x.rule === 'N4')
+  assert.match(f.skipped, /served snippet/); assert.match(f.answer, /^`\/api\/\$\{ctx\.workspace\}\/` in the backend.*not rewritten mechanically here: inside a template that holds escaped code/)
+  assert.deepEqual(r.rewrites, [])
+  const n1 = analyzeFiles('drive', [{ rel: 'backend.js', kind: 'backend', text: "const ROOT = path.join(os.homedir(), 'docs')\nexport default { mountRoutes(router, ctx) {\n  const a = path.join(ROOT, 'data')\n} }\n" }]).findings.find((x) => x.rule === 'N1')
+  assert.match(n1.skipped, /`ROOT` is not the module dir here/); assert.equal(n1.rewrite, undefined)
 })
 
 test('N1/N4: a renamed ctx parameter is honoured by the span', () => {
@@ -296,7 +355,10 @@ test('corpus: the seed\'s static module counts reproduce (RESULT.md row counts)'
     for (const [id, v] of Object.entries(c)) if (v > 0) n[id] = (n[id] || 0) + 1
   }
   assert.equal(literal, 58)
-  const want = { N1: 19, N1mix: 13, N2: 27, N3: 10, N4: 11, N5: 17, N6: 8, N7: 12, N8: 8, D1: 1, D2: 8, D2w: 4, D4: 2, D5: 52, D6: 13, D7: 45, D8: 4, D9: 6, D10: 1, D11: 3, D12: 27, D13: 28, I1: 19, I3: 1 }
+  assert.equal(mods.filter((m) => m.id !== 'midnight-chrome').every((m) => analyzeModule(m, { operatorKeys }).moduleJson || !m.hasFrontend), true)
+  // D2 10 (the seed's 8 + dashboard/mcp-server.js + llm/serve.js: a sidecar's listen() in a top-level helper), D10 2 (the seed's
+  // auth Location + sous' HTML `src="/…"`), D14 1 (midnight-chrome); the rest are the seed's numbers
+  const want = { N1: 19, N1mix: 13, N2: 27, N3: 10, N4: 11, N5: 17, N6: 8, N7: 12, N8: 8, D1: 1, D2: 10, D2w: 4, D4: 2, D5: 52, D6: 13, D7: 45, D8: 4, D9: 6, D10: 2, D11: 3, D12: 27, D13: 28, D14: 1, I1: 19, I3: 1 }
   for (const [id, v] of Object.entries(want)) assert.equal(n[id] || 0, v, `${id}: ${n[id] || 0} ≠ ${v}`)
   if (operatorKeys.size) assert.equal(n.N2op, 7)
   assert.equal(n.D3 || 0, 0)

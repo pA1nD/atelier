@@ -67,11 +67,17 @@ export function writeTargets({ dir, moduleJson, rewrites = [] }) {
 /**
  * Apply the rewrites and module.json INTO the judged folder. Refused (WriteRefused) unless the folder is inside
  * a git work tree and none of the files it would touch has an uncommitted change — every write stays
- * undoable by `git checkout`. Returns the files written (relative to `dir`).
+ * undoable by `git checkout`. A file whose N1 edits are `partial` (rewrite.mjs: other lines of the folder keep
+ * a self-pathed data/ — a bridge process on `<app>/data` beside a backend on `ctx.dataDir` is a split state)
+ * is refused unless `writePartial` (--write-partial). Returns the files written (relative to `dir`).
  */
-export function applyWrite({ dir, moduleJson, rewrites = [] }) {
+export function applyWrite({ dir, moduleJson, rewrites = [], writePartial = false }) {
   const targets = writeTargets({ dir, moduleJson, rewrites })
   if (!targets.length) return []
+  if (!writePartial) {
+    const partial = rewrites.filter((r) => r.partial && r.edits?.some((e) => e.rule === 'N1'))
+    if (partial.length) throw new WriteRefused(`--write refused: the N1 rewrite of ${partial.map((r) => path.join(path.basename(dir), r.file)).join(', ')} is partial — a self-pathed data/ stays at ${partial[0].leftover.join(', ')}; pass --write-partial to apply it anyway`)
+  }
   let top
   try { top = git(dir, ['rev-parse', '--show-toplevel']).trim() } catch { top = '' }
   if (!top) throw new WriteRefused(`--write refused: ${dir} is not inside a git work tree`)

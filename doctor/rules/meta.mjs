@@ -1,11 +1,16 @@
 // doctor/rules/meta.mjs — `export const meta` → module.json (PLAN OR10, DESIGN §3; rules N10, N11, D5, I3).
 //
-//   extractMetaStatically(src)  the 1.x reader verbatim (server.js extractMetaStatically): a brace-balanced
-//                               literal evaluated in an empty scope → {meta} | {meta:{}, error}. No sandbox
+//   extractMetaStatically(src)  the 1.x reader's balancer (server.js extractMetaStatically) with the evaluation
+//                               gated: the brace-balanced slice is tokenised (pureLiteral) and evaluated only
+//                               when it is a pure literal — strings, numbers, true/false/null/undefined,
+//                               nested {}/[] and plain keys. An identifier in value position, a call, an
+//                               operator or a template hole → {meta:{}, error:'computed meta: <token>'} —
+//                               nothing from the judged folder ever runs in the doctor's process. No sandbox
 //                               fallback: a computed meta is a `degrades` finding, not a child process.
 //   metaOf(src)                 {declared, literal, computed, error, meta, keys}
 //   moduleJsonOf(meta)          {json, dropped:[{key, rule, reason}]} — {name, icon, group, primary, color}
 //                               in that order, only the keys present; every other key dropped and named
+//                               (a meta with isChrome:true is D14: the callers generate no module.json)
 //   serializeModuleJson(json)   2-space JSON + newline (the bytes written to <out>/doctor/<module>/module.json)
 //   readMeta({dir})             lane C's entry: frontend.jsx → {declared, literal, computed, error, keys, meta,
 //                               moduleJson, dropped, existing} (existing = checkExistingModuleJson)
@@ -15,6 +20,41 @@ import nodeFs from 'node:fs'
 import path from 'node:path'
 import { checkModuleJson } from '../../host/supervisor/discovery.mjs'
 import { META_KEYS, DROPPED_META_KEYS } from './catalogue.mjs'
+
+// pureLiteral(slice) → null when the slice is a literal object, else the first offending token.
+const NUMBER = /^[+-]?(?:0[xX][0-9a-fA-F]+|\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+)/
+const IDENT = /^[A-Za-z_$][\w$]*/
+const LITERAL_IDENT = new Set(['true', 'false', 'null', 'undefined'])
+export function pureLiteral(slice) {
+  let i = 0
+  const n = slice.length
+  while (i < n) {
+    const c = slice[i]
+    if (/\s/.test(c)) { i++; continue }
+    if (c === '/' && slice[i + 1] === '/') { const e = slice.indexOf('\n', i); i = e < 0 ? n : e; continue }
+    if (c === '/' && slice[i + 1] === '*') { const e = slice.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1
+      while (j < n && slice[j] !== c) {
+        if (slice[j] === '\\') j++
+        else if (c === '`' && slice[j] === '$' && slice[j + 1] === '{') return '${'
+        j++
+      }
+      i = j + 1; continue
+    }
+    if ('{}[]:,'.includes(c)) { i++; continue }
+    const num = NUMBER.exec(slice.slice(i))
+    if (num) { i += num[0].length; continue }
+    const id = IDENT.exec(slice.slice(i))
+    if (id) {
+      const after = slice.slice(i + id[0].length).replace(/^\s+/, '')
+      if (LITERAL_IDENT.has(id[0]) || after[0] === ':') { i += id[0].length; continue }
+      return id[0]
+    }
+    return c
+  }
+  return null
+}
 
 export function extractMetaStatically(src) {
   const re = /export\s+const\s+meta\s*=\s*\{/.exec(src)
@@ -35,7 +75,10 @@ export function extractMetaStatically(src) {
     else if (c === '}') {
       depth--
       if (depth === 0) {
-        try { return { meta: new Function('return (' + src.slice(start, i + 1) + ')')() || {} } }
+        const slice = src.slice(start, i + 1)
+        const bad = pureLiteral(slice)
+        if (bad !== null) return { meta: {}, error: `computed meta: ${bad}` }
+        try { return { meta: new Function('return (' + slice + ')')() || {} } }
         catch (e) { return { meta: {}, error: e.message } }
       }
     }
@@ -81,6 +124,6 @@ export async function readMeta({ dir, fs = nodeFs }) {
   const existing = checkExistingModuleJson(dir, fs)
   if (!fs.existsSync(file)) return { declared: false, literal: false, computed: false, error: null, keys: [], meta: {}, moduleJson: null, dropped: [], existing }
   const m = metaOf(fs.readFileSync(file, 'utf8'))
-  const mj = m.literal ? moduleJsonOf(m.meta) : { json: null, dropped: [] }
+  const mj = m.literal && !m.meta.isChrome ? moduleJsonOf(m.meta) : { json: null, dropped: [] }
   return { ...m, moduleJson: mj.json, dropped: mj.dropped, existing }
 }

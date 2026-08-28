@@ -101,15 +101,17 @@ test('(b) a dirty app: every habit observed and attributed to the app, the write
   assert.deepEqual(r.envReads.map((e) => e.key), ['SPACES_PORT'])
   assert.equal(r.envReads[0].n, 1)
   assert.equal(r.envSpread, 1, 'the `{ ...process.env }` spread counts once as an enumeration, not as HOST/PORT/… reads')
-  assert.match(r.envReads[0].frame, /^backend\.js:14:\d+$/, 'frames are mapped through the source map to the source file')
+  assert.match(r.envReads[0].frame, /^backend\.js:15:\d+$/, 'frames are mapped through the source map to the source file')
   // D2: the sidecar listen — recorded, never bound
   assert.deepEqual(r.listens.map((l) => l.target), ['0.0.0.0:7475'])
-  // D12: the laptop binary — recorded, never run
-  assert.deepEqual(r.spawns.map((s) => [s.bin, s.fn]), [['ffmpeg', 'spawn']])
-  // N1: the writes into <app>/data — refused and recorded, and the reads under <app>/data recorded
-  assert.deepEqual(r.writesOutside.map((w) => [w.op, w.path, w.inApp]), [['mkdirSync', '<app>/data', true], ['writeFileSync', '<app>/data/x', true]])
+  // D12: the laptop binary — recorded, never run; the node helper carries its script
+  assert.deepEqual(r.spawns.map((s) => [s.bin, s.fn, s.script]), [['ffmpeg', 'spawn', undefined], [process.execPath, 'spawn', '<app>/mcp-server.js']])
+  // N1: the writes into <app>/data — refused and recorded, and the reads under <app>/data recorded; a symlink,
+  // a rename and a copy whose DESTINATION is the app folder are refused on that argument
+  assert.deepEqual(r.writesOutside.map((w) => [w.op, w.path, w.inApp]), [['mkdirSync', '<app>/data', true], ['writeFileSync', '<app>/data/x', true], ['symlinkSync', '<app>/link', true], ['renameSync', '<app>/x', true], ['copyFileSync', '<app>/copy', true]])
   assert.deepEqual(r.selfData.map((w) => [w.op, w.path, w.write]), [['mkdirSync', '<app>/data', true], ['writeFileSync', '<app>/data/x', true], ['existsSync', '<app>/data/y', false]])
-  assert.equal(fs.existsSync(path.join(DIRTY, 'data')), false)
+  for (const f of ['data', 'link', 'x', 'copy']) assert.equal(fs.existsSync(path.join(DIRTY, f)), false, f)
+  assert.equal(fs.existsSync(path.join(out, 'doctor', 'probe-dirty', 'probe', 'data', 'x')), true, 'the dataDir write went through and the refused rename left it in place')
   // N4/N5: the jobs beacon over the loopback and /api/global/
   assert.deepEqual(r.egress.map((e) => [e.via, e.target, e.loopback]), [['fetch', 'http://127.0.0.1:1844/api/global/jobs/beacon', true]])
   // D3: ctx.module of another app
@@ -117,11 +119,11 @@ test('(b) a dirty app: every habit observed and attributed to the app, the write
   // N8: the signal handler
   assert.deepEqual(r.signalHandlers.map((s) => s.signal), ['SIGINT'])
   assert.deepEqual(r.processExit, [])
-  assert.deepEqual(r.hooks.counts, { envRead: 1, listen: 1, spawn: 1, writeOutside: 2, selfData: 3, egress: 1, ctxModule: 1, signal: 1, exit: 0 })
+  assert.deepEqual(r.hooks.counts, { envRead: 1, listen: 1, spawn: 2, writeOutside: 5, selfData: 3, egress: 1, ctxModule: 1, signal: 1, exit: 0 })
   for (const k of KINDS) for (const o of r[LISTS[k]]) assert.match(o.frame, /^backend\.js:\d+:\d+$/, `${k} ${o.frame}`)
   assert.ok(r.stderrTail.some((l) => /sidecar on 7475/.test(l)), 'ctx.log reached stderr → worker.log')
   assert.equal(treeHash(DIRTY), before)
-  assert.match(probeLine(r), /env=1 listen=1 spawn=1 writeOut=2 selfData=3 egress=1 xmod=1$/)
+  assert.match(probeLine(r), /env=1 listen=1 spawn=2 writeOut=5 selfData=3 egress=1 xmod=1$/)
 })
 
 test('(c) mkdirSync(<app>/data) at import → load-error with the source file:line; nothing created', async (t) => {

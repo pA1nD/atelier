@@ -6,6 +6,7 @@
 //   net.Server#listen      recorded, never bound; 'listening' on the next tick  → listen    (D2)
 //   child_process.*        the binary recorded, never run; ENOENT-shaped errors → spawn     (D12)
 //   fs writes              outside dataDir/tmpDir/HOME/<probe dir> → EACCES     → writeOutside (N1, D13)
+//                          (every path a call writes: rename's source AND destination, the link/symlink/copy destination)
 //   fs reads/writes        under <app>/data recorded                            → selfData  (N1)
 //   node:sqlite            DatabaseSync(path) is a write at that path           → writeOutside
 //   fetch/http/https/net   target recorded (`via`), refused (ENETUNREACH; no network) → egress (N4, N5, I2)
@@ -169,14 +170,17 @@ function listenTarget(args) {
     return c
   }
   const enoent = (bin) => Object.assign(new Error(`spawn ${bin} ENOENT (doctor: the image has no ${bin})`), { code: 'ENOENT', errno: -2, syscall: `spawn ${bin}`, path: bin })
-  const rec = (fn, cmd) => { const bin = String(cmd).trim().split(/\s+/)[0]; record('spawn', attribute(), { bin, fn }, bin); return bin }
-  cp.spawn = (bin) => fake(rec('spawn', bin))
-  cp.fork = (bin) => fake(rec('fork', bin))
+  // the script a node/sh/python spawn runs (its first `.js/.mjs/.cjs/.sh/.py` argument), shortened — a walked
+  // file's own habits are judged by the static rules (dashboard/mcp-server.js listens on 4748)
+  const scriptOf = (args) => { const a = Array.isArray(args) ? args.find((x) => typeof x === 'string' && /\.(m?js|cjs|sh|py)$/.test(x)) : null; return a ? short(path.resolve(a)) : undefined }
+  const rec = (fn, cmd, args) => { const bin = String(cmd).trim().split(/\s+/)[0]; const script = scriptOf(args); record('spawn', attribute(), { bin, fn, ...(script ? { script } : {}) }, bin); return bin }
+  cp.spawn = (bin, args) => fake(rec('spawn', bin, args))
+  cp.fork = (bin) => fake(rec('fork', bin, [bin]))
   cp.exec = (cmd, o, cb) => { const b = rec('exec', cmd); const f = typeof o === 'function' ? o : cb; if (f) process.nextTick(() => f(Object.assign(new Error(`${b}: not found (doctor: the image has no ${b})`), { code: 127 }), '', '')); return fake(b) }
-  cp.execFile = (bin, a, o, cb) => { const b = rec('execFile', bin); const f = [a, o, cb].find((x) => typeof x === 'function'); if (f) process.nextTick(() => f(enoent(b), '', '')); return fake(b) }
+  cp.execFile = (bin, a, o, cb) => { const b = rec('execFile', bin, a); const f = [a, o, cb].find((x) => typeof x === 'function'); if (f) process.nextTick(() => f(enoent(b), '', '')); return fake(b) }
   cp.execSync = (cmd) => { const b = rec('execSync', cmd); throw Object.assign(new Error(`${b}: not found (doctor: the image has no ${b})`), { status: 127 }) }
-  cp.execFileSync = (bin) => { const b = rec('execFileSync', bin); throw enoent(b) }
-  cp.spawnSync = (bin) => { const b = rec('spawnSync', bin); return { status: null, signal: null, error: enoent(b), stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), pid: 0, output: [] } }
+  cp.execFileSync = (bin, a) => { const b = rec('execFileSync', bin, a); throw enoent(b) }
+  cp.spawnSync = (bin, a) => { const b = rec('spawnSync', bin, a); return { status: null, signal: null, error: enoent(b), stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), pid: 0, output: [] } }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -207,33 +211,41 @@ function refuse(r, p, op, wrapper, at) {
 }
 {
   const keep = (w, o) => { for (const k of Object.keys(o)) w[k] = o[k]; return w }     // fs.realpathSync.native, fs.realpath.native stay reachable
-  const guardSync = (name, pathIdx = 0, flagIdx = null, write = true) => {
+  // specs = the path arguments a call touches: [{idx, write}] — every written path is checked (rename unlinks its
+  // source AND creates its destination; copy/cp/link read arg 0 and create arg 1; symlink creates arg 1 — its
+  // arg 0 is the link's TEXT, not a path); the first refusal wins. flagIdx: the open() flags decide `write`.
+  const checkAll = (a, name, specs, flagIdx, w) => {
+    for (const { idx, write } of specs) { const e = check(a[idx], name, write && (flagIdx == null || isWriteFlag(a[flagIdx])), w); if (e) return e }
+    return null
+  }
+  const guardSync = (name, specs = W0, flagIdx = null) => {
     const o = fs[name]; if (typeof o !== 'function') return
-    const w = function (...a) { const e = check(a[pathIdx], name, write && (flagIdx == null || isWriteFlag(a[flagIdx])), w); if (e) throw e; return o.apply(this, a) }
+    const w = function (...a) { const e = checkAll(a, name, specs, flagIdx, w); if (e) throw e; return o.apply(this, a) }
     fs[name] = keep(w, o)
   }
-  const guardCb = (name, pathIdx = 0, flagIdx = null, write = true) => {
+  const guardCb = (name, specs = W0, flagIdx = null) => {
     const o = fs[name]; if (typeof o !== 'function') return
     const w = function (...a) {
-      const e = check(a[pathIdx], name, write && (flagIdx == null || isWriteFlag(a[flagIdx])), w)
+      const e = checkAll(a, name, specs, flagIdx, w)
       if (e) { const cb = a.find((x) => typeof x === 'function'); if (cb) { process.nextTick(cb, e); return } throw e }
       return o.apply(this, a)
     }
     fs[name] = keep(w, o)
   }
-  const guardP = (name, pathIdx = 0, flagIdx = null, write = true) => {
+  const guardP = (name, specs = W0, flagIdx = null) => {
     const o = fsp[name]; if (typeof o !== 'function') return
-    const w = function (...a) { const e = check(a[pathIdx], name, write && (flagIdx == null || isWriteFlag(a[flagIdx])), w); if (e) return Promise.reject(e); return o.apply(this, a) }
+    const w = function (...a) { const e = checkAll(a, name, specs, flagIdx, w); if (e) return Promise.reject(e); return o.apply(this, a) }
     fsp[name] = keep(w, o)
   }
-  const WRITES = ['writeFile', 'appendFile', 'mkdir', 'rm', 'rmdir', 'unlink', 'rename', 'truncate', 'symlink', 'mkdtemp', 'chmod', 'chown', 'utimes']
-  const DEST1 = ['copyFile', 'cp', 'link']     // the destination is the second argument
-  const READS = ['readFile', 'readdir', 'stat', 'lstat', 'access', 'realpath', 'opendir', 'watch']
-  for (const n of WRITES) { guardSync(n + 'Sync'); guardCb(n); guardP(n) }
-  for (const n of DEST1) { guardSync(n + 'Sync', 1); guardCb(n, 1); guardP(n, 1) }
-  guardSync('openSync', 0, 1); guardCb('open', 0, 1); guardP('open', 0, 1)
-  for (const n of READS) { guardSync(n + 'Sync', 0, null, false); guardCb(n, 0, null, false); guardP(n, 0, null, false) }
-  guardSync('existsSync', 0, null, false); guardSync('watchFile', 0, null, false); guardSync('createReadStream', 0, null, false)
+  const W0 = [{ idx: 0, write: true }], R0 = [{ idx: 0, write: false }]
+  const guard = (n, specs, flagIdx) => { guardSync(n + 'Sync', specs, flagIdx); guardCb(n, specs, flagIdx); guardP(n, specs, flagIdx) }
+  for (const n of ['writeFile', 'appendFile', 'mkdir', 'rm', 'rmdir', 'unlink', 'truncate', 'mkdtemp', 'chmod', 'chown', 'utimes']) guard(n, W0)
+  guard('rename', [{ idx: 0, write: true }, { idx: 1, write: true }])
+  for (const n of ['copyFile', 'cp', 'link']) guard(n, [{ idx: 0, write: false }, { idx: 1, write: true }])
+  guard('symlink', [{ idx: 1, write: true }])
+  guardSync('openSync', W0, 1); guardCb('open', W0, 1); guardP('open', W0, 1)
+  for (const n of ['readFile', 'readdir', 'stat', 'lstat', 'access', 'realpath', 'opendir', 'watch']) guard(n, R0)
+  guardSync('existsSync', R0); guardSync('watchFile', R0); guardSync('createReadStream', R0)
   const ocws = fs.createWriteStream
   const cws = function createWriteStream(p, o) { const e = check(p, 'createWriteStream', true, cws); if (e) throw e; return ocws.call(this, p, o) }
   fs.createWriteStream = cws

@@ -9,8 +9,8 @@ export const SEED_COLUMNS = Object.freeze(SEED_HEADER.split(','))
 export const IDENTITY_COLUMNS = Object.freeze(SEED_COLUMNS.slice(0, 5))
 export const SEED_RULE_IDS = Object.freeze(SEED_COLUMNS.slice(5))
 
-/** Appended after `M4`: rule cells first (N1mix, N9–N11, R1–R3), then probe/tailwind facts, then the verdict. */
-export const NEW_RULE_IDS = Object.freeze(['N1mix', 'N9', 'N10', 'N11', 'R1', 'R2', 'R3'])
+/** Appended after `M4`: rule cells first (N1mix, N9–N11, R1–R3, D14), then probe/tailwind facts, then the verdict. */
+export const NEW_RULE_IDS = Object.freeze(['N1mix', 'N9', 'N10', 'N11', 'R1', 'R2', 'R3', 'D14'])
 export const NEW_FACT_COLUMNS = Object.freeze(['long_lines', 'resident', 'teardown', 'killed', 'config_keys', 'operator_keys', 'verdict'])
 export const NEW_COLUMNS = Object.freeze([...NEW_RULE_IDS, ...NEW_FACT_COLUMNS])
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// doctor/cli.mjs — `atelier doctor [<dir>|<corpus>] [--out <dir>] [--write] [--yes-corpus] [--json] [--no-probe]
-//                   [--chrome <dir>] [--env-keys <file>] [--jobs <n>]`   (DESIGN §6)
+// doctor/cli.mjs — `atelier doctor [<dir>|<corpus>] [--out <dir>] [--write] [--write-partial] [--yes-corpus] [--json]
+//                   [--no-probe] [--chrome <dir>] [--env-keys <file>] [--jobs <n>]`   (DESIGN §6)
 // Dispatched from cli.js (`['doctor', './doctor/cli.mjs']`); the verb has already been stripped, so the
 // arguments start at argv[2]. Runs lane A (static) and lane B (probe) per module through report/lanes.mjs,
 // merges (report/merge.mjs), writes the --out layout (report/write.mjs), prints the table and the VERDICT.
@@ -14,16 +14,17 @@ import { finalVerdict, failVerdict } from './report/verdict.mjs'
 import { writeModuleOut, writeCorpusOut, applyWrite, outInside, WriteRefused } from './report/write.mjs'
 import { isDaily } from './report/daily.mjs'
 
-export const USAGE = 'usage: atelier doctor [<dir>|<corpus>] [--out <dir>] [--write] [--yes-corpus] [--json] [--no-probe] [--chrome <dir>] [--env-keys <file>] [--jobs <n>]'
+export const USAGE = 'usage: atelier doctor [<dir>|<corpus>] [--out <dir>] [--write] [--write-partial] [--yes-corpus] [--json] [--no-probe] [--chrome <dir>] [--env-keys <file>] [--jobs <n>]'
 
 export class UsageError extends Error {}
 
 export function parseArgs(argv) {
-  const o = { dir: null, out: './doctor-out', write: false, yesCorpus: false, json: false, noProbe: false, chrome: null, envKeys: null, jobs: 8 }
+  const o = { dir: null, out: './doctor-out', write: false, writePartial: false, yesCorpus: false, json: false, noProbe: false, chrome: null, envKeys: null, jobs: 8 }
   const takes = { '--out': 'out', '--chrome': 'chrome', '--env-keys': 'envKeys', '--jobs': 'jobs' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--write') o.write = true
+    else if (a === '--write-partial') o.writePartial = true
     else if (a === '--yes-corpus') o.yesCorpus = true
     else if (a === '--json') o.json = true
     else if (a === '--no-probe') o.noProbe = true
@@ -97,7 +98,10 @@ export async function run(argv, io = { stdout: (l) => process.stdout.write(l + '
       const report = mergeModule({ id: m.id, dir: m.dir, daily: isDaily(m.id), static: st, meta, rewrites, runtime: probe?.runtime, tailwind: probe?.tailwind, rules: lanes.rules, envKeys, classifyEnv: lanes.classifyEnv, constants: lanes.constants })
       writeModuleOut({ outDir, report, rewrites })
       if (opts.write) {
-        try { const w = applyWrite({ dir: m.dir, moduleJson: report.moduleJson, rewrites }); if (w.length) io.stderr(`doctor: wrote ${w.map((f) => path.join(m.id, f)).join(', ')}`) } catch (e) { if (e instanceof WriteRefused) { refused.push(e.message); io.stderr(e.message) } else throw e }
+        try {
+          const w = applyWrite({ dir: m.dir, moduleJson: report.moduleJson, rewrites, writePartial: opts.writePartial })
+          if (w.length) io.stderr(`doctor: wrote ${w.map((f) => path.join(m.id, f)).join(', ')}${report.rewriteLeftover.length ? ` (N1 partial — self-pathed data/ stays at ${report.rewriteLeftover.join(', ')})` : ''}`)
+        } catch (e) { if (e instanceof WriteRefused) { refused.push(e.message); io.stderr(e.message) } else throw e }
       }
       say(report.verdict.line)
       return report

@@ -21,6 +21,7 @@ export const SEED_RULES = Object.freeze([
   R('D11', '§4.8', '§4.8 "Also" [S:B6]', "req.on('close') footgun", 'degrades', "disconnect = `res.on('close') && !res.writableFinished` (proxy.mjs); `req` 'close' fires early on Node ≥ 16"),
   R('D12', '§4.8', '§4.8 laptop binaries', 'spawns laptop binaries', 'breaks-in-fleet', 'the image has no laptop binaries; ship the tool as an npm dep (two-phase install as the worker uid, §4.3) or drop the feature'),
   R('D13', '§4.8', '§4.8 laptop paths', 'laptop paths (/Users, ~/…, HOME/PWD)', 'breaks-in-fleet', 'the only writable places are `ctx.dataDir` and `TMPDIR`; `HOME` is the worker\'s 0700 scratch home (row W)'),
+  R('D14', '§4.8', '§4.8 "Also", §10 item 6', 'multi-chrome (local-only)', 'breaks-in-fleet', 'a chrome is not an app in the fleet: the shell delivers the one chrome (§4.1, §10 item 6); multi-chrome is local-only — no module.json is generated'),
   R('N1', 'NEW', '§4.8 N1', 'self-pathed data dir / writes into the app folder', 'breaks-in-fleet', '`ctx.dataDir` is the only data path (`/work/.atelier/data/<instance>`, outside the folder, survives a rename)'),
   R('N2', 'NEW', 'OR14, §4.8 N2', 'process.env config/secrets', 'degrades', 'the portal/spine config channel: the host injects the app\'s keys into that worker\'s env only — the read stays `process.env.X`, the SOURCE changes; `config-keys.json` names the keys the portal needs (names only, never values); under an empty channel the read silently defaults'),
   R('N2op', 'NEW', 'OR14', '…of which operator .env keys', 'breaks-in-fleet', 'fleet-wide operator secrets are never an app\'s config; each app\'s keys are set per app in the portal'),
@@ -53,5 +54,6 @@ export const SEED_RULE_BY_ID = Object.freeze(Object.fromEntries(SEED_RULES.map((
 /** Constants the observation classifier needs when the catalogue does not export them (seed report.mjs + DESIGN §4). */
 export const NODE_NOISE = new Set(['WATCH_REPORT_DEPENDENCIES', 'NODE_V8_COVERAGE', '__CF_USER_TEXT_ENCODING', 'WS_NO_BUFFER_UTIL', 'FORCE_COLOR', 'DEBUG', 'NODE_ENV', 'APP_ID', 'PATH', 'NODE_OPTIONS', 'LANG', 'LC_ALL', 'NODE_DEBUG', 'NO_COLOR', 'TERM', 'COLORTERM', 'ATELIER_WORKER', 'CI'])
 export const SHELL_KEYS = new Set(['HOST', 'PORT', 'BASE_URL'])
-export const LAPTOP_KEYS = new Set(['HOME', 'PWD', 'USER', 'TMPDIR', 'SHELL', 'XPC_SERVICE_NAME', 'LOGNAME'])
+export const ROW_W_ENV = new Set(['APP_ID', 'ATELIER_WORKER', 'TMPDIR'])       // the rest of the worker env the host sets — never a config read
+export const LAPTOP_KEYS = new Set(['HOME', 'PWD', 'USER', 'SHELL', 'XPC_SERVICE_NAME', 'LOGNAME'])      // TMPDIR is row W (the host publishes it)
 export const IMAGE_BINS = new Set(['node', 'npm', 'npx', 'git', 'sh', 'bash', 'python3', 'curl', 'tar', 'gzip'])
