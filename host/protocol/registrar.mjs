@@ -138,9 +138,11 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
   function writeMarkers(instance, slug, uid) {
     const dir = os.at(dirfd, instance)
     try { os.mkdir(dir, 0o711) } catch (e) { if (e.code !== 'EEXIST') throw e }
-    fsx.writeFile(os.at(dirfd, `${instance}/slug`), slug + '\n', 0o644)
-    fsx.writeFile(os.at(dirfd, `${instance}/uid`), uid + '\n', 0o644)
-    fsx.writeFile(os.at(dirfd, `${instance}/registered.json`), JSON.stringify({ instance, slug, uid, company: st.company }) + '\n', 0o600)
+    os.chmod(dir, 0o711)   // the host runs under umask 077: the mode is set explicitly (root-owned, before any chown)
+    const put = (name, text, mode) => { const p = os.at(dirfd, `${instance}/${name}`); fsx.writeFile(p, text, mode); os.chmod(p, mode) }
+    put('slug', slug + '\n', 0o644)
+    put('uid', uid + '\n', 0o644)
+    put('registered.json', JSON.stringify({ instance, slug, uid, company: st.company }) + '\n', 0o600)
   }
   function refuse(dir, code, error) {
     if (dir) writeClaimRefused(os, dir, `${code} ${error}`, now)

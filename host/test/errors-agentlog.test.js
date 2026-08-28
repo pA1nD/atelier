@@ -17,13 +17,13 @@ const mk = (extra = {}) => {
   return { state, os, clock, writes, err, log }
 }
 
-test('the file is created 0640 and chowned 0:1000 once, through the adapter; lines are ISO-stamped', () => {
+test('the file is created 0640 (chmod before the chown — umask 077) and chowned 0:1000 once, through the adapter; lines are ISO-stamped', () => {
   const { state, writes, log } = mk()
   log.line('host: started')
   log.line('host: ready')
   assert.deepEqual(writes.map((w) => [w.p, w.mode]), [['/work/.atelier/agent.log', AGENT_LOG_MODE], ['/work/.atelier/agent.log', AGENT_LOG_MODE]])
   assert.equal(writes[0].text, `${ISO} host: started\n`)
-  assert.deepEqual(state.calls, [['chown', '/work/.atelier/agent.log', 0, 1000]])
+  assert.deepEqual(state.calls, [['chmod', '/work/.atelier/agent.log', AGENT_LOG_MODE], ['chown', '/work/.atelier/agent.log', 0, 1000]])   // mode explicit under umask 077, before the chown
   assert.equal(AGENT_LOG_MODE, 0o640)
 })
 

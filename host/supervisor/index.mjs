@@ -40,6 +40,11 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   const chromeName = cfg.chromeDir ? path.basename(cfg.chromeDir) : null
   const company = () => registrar?.company ?? cfg.company ?? 'local'
   const origin = () => registrar?.origin ?? cfg.origin ?? 'http://127.0.0.1:1844'
+  // Paths handed to OTHER processes (the worker's codeDir/dataDir/tmpDir, the watchdog's du as the worker
+  // uid) must be real: the host's `at(dirfd, …)` form is `/proc/self/fd/N/…` and names the HOST's fd.
+  const atelierReal = (() => { try { return os.readlinkFd(dirfd) } catch { return null } })()
+  const dirfdPrefix = `/proc/self/fd/${dirfd}`
+  const realPath = (p) => (atelierReal && typeof p === 'string' && (p === dirfdPrefix || p.startsWith(dirfdPrefix + '/')) ? atelierReal + p.slice(dirfdPrefix.length) : p)
   const timers = new Set()
   const later = (ms, fn) => { const t = setTimeout(() => { timers.delete(t); fn() }, ms); t.unref?.(); timers.add(t); return t }
 
@@ -60,7 +65,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   function mkRow({ instance, slug, uid, company: co, dir }) {
     const row = {
       instance, slug, uid, company: co, dir, meta: null,
-      dataDir: os.at(dirfd, `data/${instance}`), tmpDir: os.at(dirfd, `tmp/${instance}`),
+      dataDir: realPath(os.at(dirfd, `data/${instance}`)), tmpDir: realPath(os.at(dirfd, `tmp/${instance}`)),
       sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
       state: 'unclaimed', claimed: false, rev: null, live: null, retiring: new Set(), kept: [], counter: 0, fingerprint: null,
       building: null, pending: false, broken: null, watcher: null,
@@ -80,7 +85,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     // one socket per rev: load-beside needs the new worker bound while the old one still serves, and a
     // proxy's keep-alive pool is keyed by socket path — the same name would keep feeding the old worker
     return {
-      instance: row.instance, slug: row.slug, company: row.company, uid: row.uid, rev, codeDir, appDir: row.dir,
+      instance: row.instance, slug: row.slug, name: row.meta?.name, company: row.company, uid: row.uid, rev, codeDir: realPath(codeDir), appDir: row.dir,
       dataDir: row.dataDir, tmpDir: row.tmpDir, sockDir: row.sockDir, sock: path.join(row.sockDir, `w-${rev}.sock`),
       baseUrl: `${origin()}/api/${row.company}/${row.slug}`, origin: origin(), configEnv, rlimits: T.rlimits,
     }

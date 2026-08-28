@@ -3,7 +3,8 @@
 //
 // The file is `0:1000 0640` under the root-owned `.atelier` dirfd: the agent (uid 1000, group
 // 1000) reads it, workers (groups cleared) cannot. It is created with its mode (open 'a' with
-// 0o640 — never chmod after chown) and chowned once through the adapter. Every append is
+// 0o640, then chmod 0640 because the host's umask 077 masks the open mode — before the chown, never
+// after) and chowned once through the adapter. Every append is
 // try/caught: ENOSPC [S:data-storage-4] or any other failure is mirrored to stderr with the line
 // itself and NEVER thrown into the caller — an uncaught append inside a build promise would
 // take the host down as an unhandled rejection.
@@ -55,7 +56,7 @@ export function agentLog({ os, path, now, stderr = process.stderr, append, slugO
   let lost = 0
   function ensureOwner() {
     if (owned || !os) return
-    try { os.chown(path, AGENT_LOG_OWNER.uid, AGENT_LOG_OWNER.gid); owned = true } catch (e) { mirror(`agent.log: chown ${e?.code ?? e?.message ?? e}`) }
+    try { os.chmod(path, AGENT_LOG_MODE); os.chown(path, AGENT_LOG_OWNER.uid, AGENT_LOG_OWNER.gid); owned = true } catch (e) { mirror(`agent.log: chown ${e?.code ?? e?.message ?? e}`) }
   }
   function mirror(text) { try { stderr.write(text.endsWith('\n') ? text : text + '\n') } catch {} }
   function line(text) {
