@@ -15,6 +15,7 @@
 // Reconnects back off 250 ms → 5 s; a socket that never opens is not an error the operator sees
 // more than once per backoff step. SKIPPED: the spine stream client, epoch registration from the
 // registrar's hello, the per-host ingest rate limit.
+import { visibleRows } from '../presence.mjs'
 import { randomBytes } from 'node:crypto'
 import { WebSocket } from 'ws'
 import { EventRing, validEvent, companyTopic } from '../../protocol/index.js'
@@ -121,12 +122,13 @@ export function createBusLocal({ registry, hostLink, log = () => {}, now = Date.
 
   const moduleRow = (r) => ({ id: r.slug, instance: r.instance, rev: r.rev ?? null, hasFrontend: r.hasFrontend !== false, meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) } })
 
-  async function snapshot(topic) {
+  async function snapshot(topic, { person = null } = {}) {
     const head = ring.head(topic)
     const base = { stream: head?.stream ?? null, seq: head?.seq ?? 0 }
     if (typeof topic === 'string' && topic.startsWith('company:')) {
       const company = topic.slice('company:'.length)
-      const rows = (await registry.apps(company)).filter((r) => !r.isChrome)
+      let rows = (await registry.apps(company)).filter((r) => !r.isChrome)
+      if (person) rows = await visibleRows(registry, person.id, rows)   // always true locally — the same seam as the fleet
       const chrome = registry.chrome(company)
       return { ...base, modules: rows.map(moduleRow), chrome: { qid: chrome.qid, digest: chrome.digest }, chromeRev: chrome.digest }
     }

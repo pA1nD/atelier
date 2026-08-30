@@ -135,13 +135,15 @@ bash shell/drill/smoke.sh > /tmp/shell-smoke.log        # + the real host: docum
 - `identity.resolve(req)` → `{ok, person:{id,name,claims}, credential:'cookie'|'none', epoch}` | `{ok:false, reason}`; `identity.session(req)`.
 - `registry`: `company(host)`, `companies()` ⊕ (`[{id,name,href}]` — the picker rows; fleet `[]`), `apps(c)`, `resolve(c,s)`,
   `byInstance(instance)` ⊕ (the socket and `/_atelier/topics` name topics by instance, not by company), `present(personId, instance)`,
-  `host(c)` → `HostRow {hostId, epoch, token, ip, port, tls, heartbeatAt, drainingAt}`, `chrome(c)` → `{qid, dir, digest}`, `watch(c, fn)`,
+  `hostOf(row)` → `HostRow {hostId, epoch, token, ip, port, tls, heartbeatAt, drainingAt}` ⊕ (the computer the APP lives on — what `/api`, `/modules`,
+  the entry imports, `/_atelier/report` and an app document's waking state dial; in the fleet the spine's `host` on the row, v36; locally the workspace's host),
+  `host(c)` → the company's freshest `HostRow` (an app-less document's "is anything up" probe only), `chrome(c)` → `{qid, dir, digest}`, `watch(c, fn)`,
   `noteProbe(c, probe)` ⊕ (the document probe feeds `heartbeatAt`/`epoch` locally), `refresh(c?)` ⊕ (lane B's fs.watch and the bus's
   unknown-qid frame call it), `unreachableAt(c)` ⊕ (the last failed `/_atelier/apps` fetch — the last rows the host answered are served stale meanwhile, across `refresh()` and the poll too),
   `start()/stop()` (the 5 s unref'd safety poll, local). An `AppRow` carries `primary` (applied locally from
   module.json, the registry's applied value in the fleet) and `isChrome` for the chrome staged as an app (hidden from the rail).
 - `gate`: `https(req)`, `hsts(req)` ⊕ (the HSTS value; `null` locally), `hostAllowed(req)`, `ticket(req,res)`, `unauthDocument(req, {company, path})`, `origin(req, credential)`.
-- `bus`: `ring`, `start()/stop()`, `publish(topic)`, `onAppend(fn)`, `snapshot(topic)`, `reprobe(company, probe)` ⊕ (a document-route probe
+- `bus`: `ring`, `start()/stop()`, `publish(topic)`, `onAppend(fn)`, `snapshot(topic, {person})` ⊕ (the `company:<c>` snapshot is the person's rows — presence-filtered, PLAN §4.1), `reprobe(company, probe)` ⊕ (a document-route probe
   with a new host epoch re-registers that host's topics), local `invalidate(company, instance)` for drills.
 - `hostLink`: `request({hostRow, app, person, method, path, headers, body})` → `{status, headers, body}` (throws `{code:'DIAL'|'TIMEOUT'|'BODY_CAP'}`),
   `probe(hostRow)`, `json({hostRow, path})` ⊕ (the small host views: apps, events), `dialMs` 1000, `close()`.

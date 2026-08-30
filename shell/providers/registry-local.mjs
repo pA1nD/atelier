@@ -128,6 +128,7 @@ export function createRegistryLocal({ workspaces, discover, chrome = null, hostL
     },
     async present() { return true },
     async host(company) { return hostRow(company) },
+    async hostOf(row) { return hostRow(row?.company) },     // one host per workspace: the row's company names it
     chrome() {
       if (!chrome?.qid) return { qid: null, dir: null, digest: null }
       if (!chromeCache || now() - chromeCache.at > CHROME_DIGEST_TTL_MS) chromeCache = { at: now(), digest: chrome.dir ? chromeDigest(chrome.dir) : null }

@@ -13,7 +13,7 @@ import { createGateLocal } from '../providers/gate-local.mjs'
 import { createGateFleet } from '../providers/gate-fleet.mjs'
 import { createHostLinkLocal } from '../providers/hostlink-local.mjs'
 import { createHostLinkFleet } from '../providers/hostlink-fleet.mjs'
-import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP, listen } from './fixtures.mjs'
+import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP, NOTES, listen } from './fixtures.mjs'
 
 const chromeRow = (company) => ({ instance: CHROME_APP, slug: 'catalyst-chrome', company, rev: 2, state: 'live', meta: {}, isChrome: true })
 const apps = (company) => [
@@ -24,16 +24,20 @@ const apps = (company) => [
 // company's registry and served on every company origin — a chat's pod (acme's host) carries no chrome row of its own
 export const FLEET_CHROME = { qid: 'portal/catalyst-chrome', digest: 1700 }
 
-async function rig(t, { mode = 'local', present, hostUp = true, chrome } = {}) {
+async function rig(t, { mode = 'local', present, hostUp = true, chrome, secondHost = false } = {}) {
   const host = fakeHost({ company: mode === 'local' ? 'global' : 'acme' })
   const hp = await host.start()
   if (!hostUp) await host.stop()
+  // a SECOND computer of acme (the fleet: a company owns one host per chat it owns) carrying `notes` alone
+  const host2 = secondHost ? fakeHost({ company: 'acme', epoch: 'e2', rows: [{ instance: NOTES, slug: 'notes', company: 'acme', rev: 5, state: 'live' }] }) : null
+  const hp2 = host2 ? await host2.start() : null
+  const notes = host2 ? [{ instance: NOTES, slug: 'notes', company: 'acme', rev: 5, state: 'live', meta: { name: 'Notes' }, host: { port: hp2, token: 'tok2', epoch: 'e2' } }] : []
   const traces = [], logs = []
   const minter = createMinter()
   const stores = fleetStores()
   const companies = mode === 'local'
     ? { global: { apps: [...apps('global'), chromeRow('global')], host: { port: hp, token: 'dev' } }, lab: { apps: [], host: { port: hp, token: 'dev' } } }
-    : { portal: { apps: [chromeRow('portal')], host: { port: hp, token: 'tok', epoch: 'e1' } }, acme: { apps: apps('acme'), host: { port: hp, token: 'tok', epoch: 'e1' } }, beta: { apps: [], host: { port: hp, token: 'tok', epoch: 'e1' } } }
+    : { portal: { apps: [chromeRow('portal')], host: { port: hp, token: 'tok', epoch: 'e1' } }, acme: { apps: [...apps('acme'), ...notes], host: { port: hp, token: 'tok', epoch: 'e1' } }, beta: { apps: [], host: { port: hp, token: 'tok', epoch: 'e1' } } }
   const registry = fakeRegistry({ mode, companies, present, chrome: chrome ?? (mode === 'fleet' ? FLEET_CHROME : undefined) })
   const bus = fakeBus({ registry })
   const { cfg } = createConfig({ mode, config: {}, env: { PORT: '0' } })
@@ -43,7 +47,7 @@ async function rig(t, { mode = 'local', present, hostUp = true, chrome } = {}) {
   const shell = createShell({ cfg, providers, log: (l) => logs.push(l), trace: (r) => traces.push(r) })
   shell.start()
   const { port } = await shell.listen({ port: 0, host: '127.0.0.1' })
-  t.after(async () => { await shell.close(100); if (hostUp) await host.stop() })
+  t.after(async () => { await shell.close(100); if (hostUp) await host.stop(); if (host2) await host2.stop().catch(() => {}) })
   const sid = mode === 'fleet' ? await stores.sessions.create({ person: { id: 'p1', name: 'Bayard' }, company: 'acme' }) : null
   const hostHeader = mode === 'fleet' ? { host: 'acme.portal.pa1nd.de' } : {}
   // node's fetch refuses a custom Host header — the fleet rows need one, so the client is http.request
@@ -58,7 +62,7 @@ async function rig(t, { mode = 'local', present, hostUp = true, chrome } = {}) {
     req.on('error', reject)
     req.end(body)
   })
-  return { shell, host, registry, bus, stores, traces, logs, port, go, sid, minter, hostPort: hp }
+  return { shell, host, host2, registry, bus, stores, traces, logs, port, go, sid, minter, hostPort: hp, hostPort2: hp2 }
 }
 
 test('lane 0: normalisation rows (B6) and the route parser', () => {
@@ -271,6 +275,13 @@ test('fleet: presence 404 identical to a stranger; Origin 403 on cookie writes a
   assert.equal((await r.go('/api/acme/wiki/x')).status, 404); assert.equal(r.traces.at(-1).lane, 'presence')
   assert.equal((await r.go('/modules/acme/wiki/frontend.js')).status, 404)
   assert.equal((await r.go(`/_atelier/topics/${WIKI}`)).status, 404)
+  // NO TRACE EITHER (review 2026-08-30): the document's module list, the rail and the company snapshot are the person's rows —
+  // a member outside wiki's chat sees todo alone (PLAN §4.1: the same 404 as a stranger, so no name, icon or rev of it)
+  const doc = await r.go('/acme/todo'); assert.equal(doc.status, 200)
+  assert.match(doc.text, /"modules":\[\{"id":"todo"[^\]]*\]/); assert.ok(!doc.text.includes('"id":"wiki"'), 'wiki is not in the bootstrap'); assert.ok(!doc.text.includes(WIKI))
+  assert.deepEqual((await r.go('/_atelier/rail')).json().modules.map((m) => m.id), ['todo'])
+  assert.deepEqual((await r.go('/_atelier/topics/company:acme')).json().modules.map((m) => m.id), ['todo'])
+  const wikiDoc = await r.go('/acme/wiki'); assert.equal(wikiDoc.status, 200); assert.match(wikiDoc.text, /"activeQid":null/)   // the document renders app-less; the fetches are the 404s above
   const ok = await r.go('/api/acme/todo/items', { method: 'POST', body: '{}', headers: { origin: 'https://acme.portal.pa1nd.de', 'content-type': 'application/json' } })
   assert.equal(ok.status, 200); assert.deepEqual(ok.json().person, { id: 'p1', name: 'Bayard', claims: {} })
   assert.equal(r.host.seen.at(-1).headers.authorization, 'Bearer e1.tok')
@@ -346,17 +357,54 @@ test('fleet: the ticket lands only on a normalised app path of this company; the
   assert.equal((await redeem('/acme/wiki')).status, 302)
 })
 
-test('fleet: a stale heartbeat or a draining host is the waking page without a dial', async (t) => {
+test('fleet: a stale heartbeat or a draining host is the waking page without a dial — the APP\'s host row for an app document, the company\'s freshest for an app-less one', async (t) => {
   const r = await rig(t, { mode: 'fleet' })
   r.registry.companies = undefined
   const before = r.host.seen.length
   const reg = r.registry
-  const orig = reg.host.bind(reg)
-  reg.host = async (c) => ({ ...(await orig(c)), heartbeatAt: Date.now() - 31_000 })
-  const stale = await r.go('/acme/todo'); assert.equal(stale.status, 503); assert.match(stale.text, /Waking up acme/)
-  reg.host = async (c) => ({ ...(await orig(c)), drainingAt: Date.now() })
+  const origOf = reg.hostOf.bind(reg), orig = reg.host.bind(reg)
+  reg.hostOf = async (row) => ({ ...(await origOf(row)), heartbeatAt: Date.now() - 31_000 })
+  const stale = await r.go('/acme/todo'); assert.equal(stale.status, 503); assert.match(stale.text, /Waking up acme/); assert.match(stale.text, /\/_atelier\/wake\?company=acme&app=todo/)
+  reg.hostOf = async (row) => ({ ...(await origOf(row)), drainingAt: Date.now() })
   assert.equal((await r.go('/acme/todo')).status, 503)
-  assert.equal(r.host.seen.length, before, 'no dial happened')
+  assert.equal((await r.go('/acme/')).status, 200, 'the app-less document asks the company\'s freshest host, which is fine')
+  reg.hostOf = origOf
+  reg.host = async (c) => ({ ...(await orig(c)), drainingAt: Date.now() })
+  assert.equal((await r.go('/acme/todo')).status, 200, 'the app document never asks host(company)')
+  const bare = await r.go('/acme/'); assert.equal(bare.status, 503); assert.match(bare.text, /wake\?company=acme"/)
+  assert.equal(r.host.seen.filter((s) => s.url === '/_host/healthz').length, r.host.seen.slice(0, before).filter((s) => s.url === '/_host/healthz').length + 2, 'a probe only for the two documents that rendered')
   reg.host = orig
+  assert.equal((await r.go('/acme/')).status, 200)
+})
+
+test('fleet: one company, two hosts — every app is proxied to ITS computer; a stopped pod wakes its own apps alone (marks per host); wake?app= asks that host', async (t) => {
+  const r = await rig(t, { mode: 'fleet', secondHost: true })
+  // todo lives on host A (acme's default row), notes on host B — each request lands on its own computer with its own bearer
+  const a0 = r.host.seen.length, b0 = r.host2.seen.length
+  assert.equal((await r.go('/api/acme/notes/x')).status, 200)
+  assert.equal(r.host2.seen.length, b0 + 1); assert.equal(r.host.seen.length, a0); assert.equal(r.host2.seen.at(-1).headers.authorization, 'Bearer e2.tok2'); assert.equal(r.host2.seen.at(-1).identity.app, NOTES)
+  assert.equal((await r.go('/api/acme/todo/x')).status, 200)
+  assert.equal(r.host.seen.length, a0 + 1); assert.equal(r.host2.seen.length, b0 + 1); assert.equal(r.host.seen.at(-1).headers.authorization, 'Bearer e1.tok')
+  const m = await r.go('/modules/acme/notes/frontend.js?rev=5'); assert.equal(m.status, 200); assert.equal(r.host2.seen.at(-1).url, '/modules/acme/notes/frontend.js?rev=5')
+  // the documents: notes' entry imports come from host B; the rail lists both
+  const doc = await r.go('/acme/notes'); assert.equal(doc.status, 200); assert.match(doc.text, /modulepreload" href="\/modules\/acme\/notes\/x\.js\?rev=5"/)
+  assert.deepEqual((await r.go('/_atelier/rail')).json().modules.map((x) => x.id), ['todo', 'wiki', 'notes'])
+  const rep = await r.go('/_atelier/report', { method: 'POST', body: JSON.stringify({ instance: NOTES, message: 'boom' }), headers: { 'content-type': 'application/json', origin: 'https://acme.portal.pa1nd.de' } })
+  assert.deepEqual([rep.status, rep.lane, rep.json()], [200, 'proxy', { ok: true, app: NOTES }]); assert.equal(r.host2.seen.at(-1).identity.path, '/_atelier/report')
+  // host B stops: notes is waking, todo is not — the document, the fetch, the wake poll and the mark all name the HOST, not the company
+  await r.host2.stop()
+  const w = await r.go('/acme/notes'); assert.equal(w.status, 503); assert.match(w.text, /Waking up acme/); assert.match(w.text, /\/_atelier\/wake\?company=acme&app=notes/)
   assert.equal((await r.go('/acme/todo')).status, 200)
+  assert.equal((await r.go('/acme/')).status, 200, 'the app-less document: the company has a live host')
+  const t0 = Date.now()
+  const n = await r.go('/api/acme/notes/x'); assert.equal(n.status, 503); assert.deepEqual(n.json(), { waking: true }); assert.ok(Date.now() - t0 < 200, 'marked by the probe — no dial')
+  assert.equal((await r.go('/api/acme/todo/x')).status, 200, 'host A is not marked by host B\'s failure')
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=todo')).json(), { ok: true })
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme')).json(), { ok: true })
+  // host B is back on its port: notes renders again
+  await r.host2.start(r.hostPort2)
+  await new Promise((res) => setTimeout(res, 2100))
+  assert.equal((await r.go('/acme/notes')).status, 200)
+  assert.equal((await r.go('/api/acme/notes/x')).status, 200)
 })
