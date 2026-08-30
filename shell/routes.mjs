@@ -159,8 +159,12 @@ export async function laneDocument(ctx) {
   }
   if (!isRead) return jsonR('document', 405, {})
   // the host that must be up is the APP's (its row's computer); an app-less document, or a slug the registry does
-  // not know, asks whether anything of the company is up (the freshest host) and renders — the client tidies the URL
-  const app = ctx.route.slug ? await ctx.providers.registry.resolve(company, ctx.route.slug) : null
+  // not know, asks whether anything of the company is up (the freshest host) and renders — the client tidies the URL.
+  // PRESENCE FIRST (review 2026-08-30, C06): a slug the person is not present on is a slug that does not exist for
+  // them — the same app-less 200 as a stranger's, never a waking page naming it (an existence + liveness oracle) and
+  // never a probe of a pod that is none of their business (presence.mjs: the rail and the module list keep the same law)
+  const row = ctx.route.slug ? await ctx.providers.registry.resolve(company, ctx.route.slug) : null
+  const app = row && (await ctx.providers.registry.present(id.person.id, row.instance)) ? row : null
   const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, app, marks: ctx.marks, now: ctx.now })
   const nonce = newNonce()
   if (state.waking) {
@@ -319,9 +323,12 @@ export async function laneProxy(ctx) {
   if (name === 'wake' && ctx.method === 'GET') {
     const company = ctx.company
     if (!company) return jsonR('proxy', 200, { ok: false })
-    // `?app=<slug>` (the waking page of an app document sends it): that app's host; without it the company's freshest
+    // `?app=<slug>` (the waking page of an app document sends it): that app's host; without it the company's freshest.
+    // Presence first (C06): an app the person is not present on is asked about as if it did not exist — the company's
+    // freshest host answers, no probe of the other room's pod, no waking mark on it
     const slug = new URLSearchParams(ctx.search).get('app')
-    const app = slug && SLUG_RE.test(slug) ? await registry.resolve(company, slug) : null
+    const row = slug && SLUG_RE.test(slug) ? await registry.resolve(company, slug) : null
+    const app = row && (await registry.present(ctx.person.id, row.instance)) ? row : null
     const state = await hostState({ registry, hostLink, bus, company, app, marks: ctx.marks, now: ctx.now })
     return jsonR('proxy', 200, { ok: !state.waking, ...(state.waking ? { reason: state.reason } : {}) })
   }

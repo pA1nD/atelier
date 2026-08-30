@@ -37,11 +37,14 @@ export function fakeHost({ epoch = 'e1', company = 'acme', rows } = {}) {
 
 // fakeRegistry({mode, companies: {acme: {apps: [...], host: {...}}}, chrome, present})
 //   an app row may carry its own `host: {port, token, epoch, heartbeatAt, drainingAt}` — a second computer of the same
-//   company (the fleet: one host per chat the company owns); rows without one live on the company's `host`
+//   company (the fleet: one host per chat the company owns); a row without one is given the company's `host` AT THE ROW
+//   (as the spine puts `host` on every row, v36) — `hostOf(row)` itself is the production rule, `row.host` or null,
+//   never a fallback to the company's host (review 2026-08-30, C14: an explicit `host: null` is a computer the spine
+//   does not know, and the seam must say no-host rather than coin-toss another pod)
 export function fakeRegistry({ mode = 'local', companies, chrome = { qid: 'global/catalyst-chrome', digest: 1700 }, present = async () => true, domain = 'portal.pa1nd.de', now = Date.now } = {}) {
   const watchers = new Map()
   const probes = new Map()
-  const all = () => Object.entries(companies).flatMap(([id, c]) => (c.apps ?? []).map((a) => ({ company: id, hasFrontend: true, primary: false, meta: {}, ...a })))
+  const all = () => Object.entries(companies).flatMap(([id, c]) => (c.apps ?? []).map((a) => ({ company: id, hasFrontend: true, primary: false, meta: {}, ...a, host: a.host === undefined ? (c.host ?? null) : a.host })))
   const shape = (h, p) => ({ hostId: h.hostId ?? 'local', epoch: p?.epoch ?? h.epoch ?? null, token: h.token ?? 'dev', ip: '127.0.0.1', port: h.port, tls: null, heartbeatAt: h.heartbeatAt !== undefined ? h.heartbeatAt : (p?.heartbeatAt ?? now()), drainingAt: h.drainingAt ?? null })
   return {
     kind: mode,
@@ -52,13 +55,14 @@ export function fakeRegistry({ mode = 'local', companies, chrome = { qid: 'globa
     async byInstance(instance) { return all().find((a) => a.instance === instance) ?? null },
     present,
     async host(company) { const h = companies[company]?.host; return h ? shape(h, probes.get(company)) : null },
-    async hostOf(row) { if (row?.host) return shape(row.host, null); const h = companies[row?.company]?.host; return h ? shape(h, probes.get(row.company)) : null },
+    async hostOf(row) { if (!row?.host) return null; return shape(row.host, row.host === companies[row.company]?.host ? probes.get(row.company) : null) },
     chrome() { return { qid: chrome?.qid ?? null, dir: chrome?.dir ?? null, digest: chrome?.digest ?? null } },
     watch(company, fn) { let s = watchers.get(company); if (!s) { s = new Set(); watchers.set(company, s) } s.add(fn); return () => s.delete(fn) },
     fire(company) { for (const fn of watchers.get(company) ?? []) fn() },
     noteProbe(company, r) { if (r?.ok) probes.set(company, { heartbeatAt: now(), epoch: r.epoch }) },
     async refresh() { return false },
     watchers,
+    data: companies,   // a test's hand: push a row, pull a host
   }
 }
 

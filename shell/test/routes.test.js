@@ -13,6 +13,7 @@ import { createGateLocal } from '../providers/gate-local.mjs'
 import { createGateFleet } from '../providers/gate-fleet.mjs'
 import { createHostLinkLocal } from '../providers/hostlink-local.mjs'
 import { createHostLinkFleet } from '../providers/hostlink-fleet.mjs'
+import { ASLEEP_COPY, WAKE_GIVE_UP_MS } from '../waking.mjs'
 import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP, NOTES, listen } from './fixtures.mjs'
 
 const chromeRow = (company) => ({ instance: CHROME_APP, slug: 'catalyst-chrome', company, rev: 2, state: 'live', meta: {}, isChrome: true })
@@ -186,7 +187,12 @@ test('local: the host is down → the waking page on documents (503, ≤ 1.2 s),
   const doc = await r.go('/global/todo')
   assert.equal(doc.status, 503); assert.ok(Date.now() - t0 < 1200)
   assert.equal(doc.headers.get('retry-after'), '3'); assert.equal(doc.headers.get('cache-control'), 'no-store')
-  assert.match(doc.text, /Waking up global/); assert.match(doc.text, /\/_atelier\/wake\?company=global/); assert.match(doc.text, /http-equiv="refresh" content="3"/)
+  assert.match(doc.text, /Waking up global/); assert.match(doc.text, /\/_atelier\/wake\?company=global/)
+  // BOUNDED (C13): no <meta refresh> re-arming the poll forever; after WAKE_GIVE_UP_MS the script stops polling and says the computer is asleep
+  assert.ok(!/http-equiv="refresh"/.test(doc.text), 'no meta refresh')
+  assert.ok(doc.text.includes(`until=Date.now()+${WAKE_GIVE_UP_MS}`), 'the deadline is in the page')
+  assert.ok(doc.text.includes('if(Date.now()>until){asleep();return}'), 'past the deadline the poll stops')
+  assert.ok(doc.text.includes(JSON.stringify(ASLEEP_COPY)), 'the honest copy')
   const api = await r.go('/api/global/todo/x')
   assert.equal(api.status, 503); assert.deepEqual(api.json(), { waking: true }); assert.equal(api.headers.get('x-atelier-waking'), '1')
   assert.deepEqual((await r.go('/_atelier/wake?company=global')).json(), { ok: false, reason: 'DIAL' })
@@ -407,4 +413,35 @@ test('fleet: one company, two hosts — every app is proxied to ITS computer; a 
   await new Promise((res) => setTimeout(res, 2100))
   assert.equal((await r.go('/acme/notes')).status, 200)
   assert.equal((await r.go('/api/acme/notes/x')).status, 200)
+})
+
+test('fleet: a row whose computer the spine does not know (host: null) on a company that HAS a live host → that app is waking no-host (document 503, wake {ok:false, reason:no-host}, one loud log); the app-less document and the other apps are fine — no fallback to the company\'s host (C14)', async (t) => {
+  const r = await rig(t, { mode: 'fleet' })
+  r.registry.data.acme.apps.push({ instance: 'i-3333333333333333', slug: 'ghost', rev: 1, state: 'live', meta: { name: 'Ghost' }, host: null })
+  const doc = await r.go('/acme/ghost'); assert.equal(doc.status, 503); assert.match(doc.text, /Waking up acme/); assert.match(doc.text, /\/_atelier\/wake\?company=acme&app=ghost/)
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=ghost')).json(), { ok: false, reason: 'no-host' })
+  assert.ok(r.logs.some((l) => /acme\/ghost waking \(no-host\)/.test(l)), r.logs.join('\n'))
+  assert.equal((await r.go('/acme/')).status, 200)
+  assert.equal((await r.go('/acme/todo')).status, 200)
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme')).json(), { ok: true })
+  const api = await r.go('/api/acme/ghost/x'); assert.equal(api.status, 503); assert.deepEqual(api.json(), { waking: true })
+})
+
+test('fleet: presence before liveness (C06) — a stopped pod of an app the person is NOT present on is invisible: the document and wake?app= answer exactly as for a nonexistent slug, and the pod is never probed', async (t) => {
+  const r = await rig(t, { mode: 'fleet', secondHost: true, present: async (_p, i) => i === TODO })
+  // host B up: the document and the wake poll for notes never dial it (the app-less rule asks host A, the company's freshest)
+  const b0 = r.host2.seen.length
+  const up = await r.go('/acme/notes'); assert.equal(up.status, 200); assert.match(up.text, /"activeQid":null/); assert.ok(!up.text.includes(NOTES))
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: true })
+  assert.equal(r.host2.seen.length, b0, 'the other room\'s pod is not probed')
+  // host B stopped: the answers are byte-for-byte the nonexistent slug's — no waking page naming it, no 503, no mark
+  await r.host2.stop()
+  const notes = await r.go('/acme/notes'), none = await r.go('/acme/nonexistent')
+  assert.equal(notes.status, 200); assert.equal(none.status, notes.status)
+  assert.ok(!/app=notes/.test(notes.text), 'no waking page naming the slug'); assert.ok(!notes.text.includes(NOTES))
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), (await r.go('/_atelier/wake?company=acme&app=nonexistent')).json())
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: true })
+  // the person's own app is untouched
+  assert.equal((await r.go('/acme/todo')).status, 200)
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=todo')).json(), { ok: true })
 })

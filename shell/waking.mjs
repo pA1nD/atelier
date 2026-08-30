@@ -1,10 +1,16 @@
 // shell/waking.mjs — the waking page and `/_atelier/wake` (DESIGN §3.5; PLAN §4.3 Network).
 // A document route whose host is waking (fleet: heartbeat older than 30 s or draining; both modes:
 // the 1 s probe failed) serves this page: no chrome, plain, status 503, `Retry-After: 3`,
-// `Cache-Control: no-store`, a `<meta refresh>` of 3 s plus a 2 s JS poll of
-// `/_atelier/wake?company=<c>` that reloads on `{ok:true}`. Fetch routes answer `503 {waking:true}`
-// (proxy.mjs) and the client shows its own fallback.
+// `Cache-Control: no-store`, a 2 s JS poll of `/_atelier/wake?company=<c>[&app=<slug>]` that
+// reloads on `{ok:true}` — BOUNDED (review 2026-08-30, C13): nothing in the fleet wakes a chat pod
+// outside a turn (the wake verb is step 7's sleep/wake), so after WAKE_GIVE_UP_MS of `{ok:false}` the
+// page stops polling and says so honestly — the computer is asleep, a message in its chat wakes it.
+// No `<meta refresh>`: a reload would re-arm the poll forever. Fetch routes answer `503 {waking:true}`
+// (proxy.mjs) and the client shows its own fallback (client/waking.js — its own backoff is unbounded;
+// R3-12 keeps client/ closed in step 5, named in LANES-STEP5 Deferred).
 export const WAKE_POLL_MS = 2000
+export const WAKE_GIVE_UP_MS = 60_000
+export const ASLEEP_COPY = 'This computer is asleep — send a message in its chat to wake it (it comes back within a minute of your message).'
 export const HEARTBEAT_STALE_MS = 30_000
 export const WAKING_MARK_MS = 2000
 
@@ -38,10 +44,10 @@ export function wakingHtml({ company, slug = null, nonce }) {
   const url = `/_atelier/wake?company=${encodeURIComponent(company ?? '')}${slug ? `&app=${encodeURIComponent(slug)}` : ''}`
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="3"><title>Waking up…</title>
-<style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif}p{opacity:.7}</style>
-</head><body><main><h1>Waking up ${esc(company ?? '')}…</h1><p>The computer behind this app is starting. This page reloads by itself.</p></main>
-<script nonce="${esc(nonce)}">(function(){var t=${WAKE_POLL_MS};function poll(){fetch(${JSON.stringify(url)},{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){if(j&&j.ok)location.reload();else setTimeout(poll,t)}).catch(function(){setTimeout(poll,t)})}setTimeout(poll,t)})();</script>
+<title>Waking up…</title>
+<style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif}main{max-width:32rem;padding:1rem}p{opacity:.7}</style>
+</head><body><main><h1 id="h">Waking up ${esc(company ?? '')}…</h1><p id="p">The computer behind this app is starting. This page reloads by itself.</p></main>
+<script nonce="${esc(nonce)}">(function(){var t=${WAKE_POLL_MS},until=Date.now()+${WAKE_GIVE_UP_MS};function asleep(){document.title='Asleep';document.getElementById('h').textContent='Asleep';document.getElementById('p').textContent=${JSON.stringify(ASLEEP_COPY)}}function poll(){if(Date.now()>until){asleep();return}fetch(${JSON.stringify(url)},{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){if(j&&j.ok)location.reload();else setTimeout(poll,t)}).catch(function(){setTimeout(poll,t)})}setTimeout(poll,t)})();</script>
 </body></html>
 `
 }
