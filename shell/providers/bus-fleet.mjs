@@ -8,6 +8,7 @@
 // (OR16), never to a member's tab.
 import { EventRing, validEvent, companyTopic } from '../../protocol/index.js'
 import { randomBytes } from 'node:crypto'
+import { visibleRows } from '../presence.mjs'
 
 /**
  * createBusFleet({ registry, stream, log })
@@ -49,12 +50,16 @@ export function createBusFleet({ registry, stream, log = () => {} }) {
       return accept(frame).ok ? frame : null
     },
     onAppend(fn) { listeners.add(fn); return () => listeners.delete(fn) },
-    async snapshot(topic) {
+    // snapshot(topic, {person}): the rail (`company:<c>`) is the PERSON's — rows they are not present on are
+    // not in it (PLAN §4.1: a member outside the app's chat gets the same 404 as a stranger); without a person
+    // (a drill, a test) the company's whole list
+    async snapshot(topic, { person = null } = {}) {
       const head = ring.head(topic)
       const base = { stream: head?.stream ?? null, seq: head?.seq ?? 0 }
       if (typeof topic === 'string' && topic.startsWith('company:')) {
         const company = topic.slice('company:'.length)
-        const rows = await registry.apps(company)
+        let rows = await registry.apps(company)
+        if (person) rows = await visibleRows(registry, person.id, rows)
         const chrome = registry.chrome(company)
         return { ...base, modules: rows.map(moduleRow), chrome: { qid: chrome.qid, digest: chrome.digest }, chromeRev: chrome.digest }
       }

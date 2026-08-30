@@ -11,19 +11,22 @@ export const WAKING_MARK_MS = 2000
 // The waking marks (one set per shell): a host that just failed a probe or a dial is answered
 // 503 {waking:true} on fetch routes for WAKING_MARK_MS without a new dial — a stopped computer
 // costs one second once, not one second (or the 30 s idle cap) per request; a mark expires by
-// itself and the next request dials. The local registry's `unreachableAt(company)` (a failed
-// /_atelier/apps fetch) counts as a mark too.
+// itself and the next request dials. Keyed by the HOST (`hostKey`: its address — a company owns
+// one host per chat it owns in the fleet, review 2026-08-30; one host per workspace locally), so a
+// stopped chat pod marks its own apps waking and no other pod's. The local registry's
+// `unreachableAt(company)` (a failed /_atelier/apps fetch) counts as a mark for that company too.
+export const hostKey = (hostRow, company) => (hostRow ? `${hostRow.ip}:${hostRow.port}` : `company:${company}`)
 export function createWakingMarks({ ms = WAKING_MARK_MS } = {}) {
   const marks = new Map()
   return {
-    mark(company, now = Date.now()) { if (company) marks.set(company, now + ms) },
-    clear(company) { marks.delete(company) },
-    isWaking(company, now = Date.now(), registry = null) {
-      const at = registry?.unreachableAt?.(company)
+    mark(key, now = Date.now()) { if (key) marks.set(key, now + ms) },
+    clear(key) { marks.delete(key) },
+    isWaking(key, now = Date.now(), registry = null, company = null) {
+      const at = registry?.unreachableAt?.(company ?? key)
       if (at != null && now - at < ms) return true
-      const until = marks.get(company)
+      const until = marks.get(key)
       if (until === undefined) return false
-      if (until <= now) { marks.delete(company); return false }
+      if (until <= now) { marks.delete(key); return false }
       return true
     },
   }
@@ -31,8 +34,8 @@ export function createWakingMarks({ ms = WAKING_MARK_MS } = {}) {
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
-export function wakingHtml({ company, nonce }) {
-  const url = `/_atelier/wake?company=${encodeURIComponent(company ?? '')}`
+export function wakingHtml({ company, slug = null, nonce }) {
+  const url = `/_atelier/wake?company=${encodeURIComponent(company ?? '')}${slug ? `&app=${encodeURIComponent(slug)}` : ''}`
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="3"><title>Waking up…</title>
@@ -53,15 +56,19 @@ export function wakingHeaders({ nonce }) {
   }
 }
 
-// hostState({registry, hostLink, bus, company, now}) → {waking:false, hostRow, probe} | {waking:true, reason, hostRow}
-export async function hostState({ registry, hostLink, bus, company, marks = null, now = Date.now, staleMs = HEARTBEAT_STALE_MS }) {
-  const hostRow = await registry.host(company)
-  if (!hostRow) { marks?.mark(company, now()); return { waking: true, reason: 'no-host', hostRow: null } }
+// hostState({registry, hostLink, bus, company, app, now}) → {waking:false, hostRow, probe} | {waking:true, reason, hostRow}
+// The host is the APP's (`registry.hostOf(row)` — the computer its row lives on); with no app row
+// (an app-less document, `/<c>/`) it is the company's freshest (`registry.host(c)`): "is anything
+// of this company up". Marks are per host (hostKey).
+export async function hostState({ registry, hostLink, bus, company, app = null, marks = null, now = Date.now, staleMs = HEARTBEAT_STALE_MS }) {
+  const hostRow = app ? await registry.hostOf(app) : await registry.host(company)
+  const key = hostKey(hostRow, company)
+  if (!hostRow) { marks?.mark(key, now()); return { waking: true, reason: 'no-host', hostRow: null } }
   if (hostRow.drainingAt != null) return { waking: true, reason: 'draining', hostRow }
   if (registry.kind === 'fleet' && (hostRow.heartbeatAt == null || now() - hostRow.heartbeatAt > staleMs)) return { waking: true, reason: 'heartbeat-stale', hostRow }
   const probe = await hostLink.probe(hostRow)
   registry.noteProbe?.(company, probe)
-  if (probe.ok) { marks?.clear(company); await bus?.reprobe?.(company, probe); return { waking: false, hostRow, probe } }
-  marks?.mark(company, now())
+  if (probe.ok) { marks?.clear(key); await bus?.reprobe?.(company, probe); return { waking: false, hostRow, probe } }
+  marks?.mark(key, now())
   return { waking: true, reason: probe.code ?? 'probe', hostRow }
 }

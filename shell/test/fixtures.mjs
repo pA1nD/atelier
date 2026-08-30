@@ -4,7 +4,7 @@ import http from 'node:http'
 import { EventRing, companyTopic, decode } from '../../protocol/index.js'
 
 export const listen = (server, port = 0) => new Promise((r) => server.listen(port, '127.0.0.1', () => r(server.address().port)))
-export const TODO = 'i-0123456789abcdef', WIKI = 'i-fedcba9876543210', CHROME_APP = 'i-cccccccccccccccc'
+export const TODO = 'i-0123456789abcdef', WIKI = 'i-fedcba9876543210', CHROME_APP = 'i-cccccccccccccccc', NOTES = 'i-1111111111111111'
 
 // fakeHost(): what the shell dials — healthz, apps, events, modules, api echo, report
 export function fakeHost({ epoch = 'e1', company = 'acme', rows } = {}) {
@@ -36,10 +36,13 @@ export function fakeHost({ epoch = 'e1', company = 'acme', rows } = {}) {
 }
 
 // fakeRegistry({mode, companies: {acme: {apps: [...], host: {...}}}, chrome, present})
+//   an app row may carry its own `host: {port, token, epoch, heartbeatAt, drainingAt}` — a second computer of the same
+//   company (the fleet: one host per chat the company owns); rows without one live on the company's `host`
 export function fakeRegistry({ mode = 'local', companies, chrome = { qid: 'global/catalyst-chrome', digest: 1700 }, present = async () => true, domain = 'portal.pa1nd.de', now = Date.now } = {}) {
   const watchers = new Map()
   const probes = new Map()
   const all = () => Object.entries(companies).flatMap(([id, c]) => (c.apps ?? []).map((a) => ({ company: id, hasFrontend: true, primary: false, meta: {}, ...a })))
+  const shape = (h, p) => ({ hostId: h.hostId ?? 'local', epoch: p?.epoch ?? h.epoch ?? null, token: h.token ?? 'dev', ip: '127.0.0.1', port: h.port, tls: null, heartbeatAt: h.heartbeatAt !== undefined ? h.heartbeatAt : (p?.heartbeatAt ?? now()), drainingAt: h.drainingAt ?? null })
   return {
     kind: mode,
     company(host) { const h = String(host ?? '').replace(/:\d+$/, ''); return mode === 'fleet' && h.endsWith('.' + domain) ? h.slice(0, -(domain.length + 1)) : null },
@@ -48,7 +51,8 @@ export function fakeRegistry({ mode = 'local', companies, chrome = { qid: 'globa
     async resolve(company, slug) { return all().find((a) => a.company === company && a.slug === slug) ?? null },
     async byInstance(instance) { return all().find((a) => a.instance === instance) ?? null },
     present,
-    async host(company) { const h = companies[company]?.host; if (!h) return null; const p = probes.get(company); return { hostId: 'local', epoch: p?.epoch ?? h.epoch ?? null, token: h.token ?? 'dev', ip: '127.0.0.1', port: h.port, tls: null, heartbeatAt: h.heartbeatAt !== undefined ? h.heartbeatAt : (p?.heartbeatAt ?? now()), drainingAt: h.drainingAt ?? null } },
+    async host(company) { const h = companies[company]?.host; return h ? shape(h, probes.get(company)) : null },
+    async hostOf(row) { if (row?.host) return shape(row.host, null); const h = companies[row?.company]?.host; return h ? shape(h, probes.get(row.company)) : null },
     chrome() { return { qid: chrome?.qid ?? null, dir: chrome?.dir ?? null, digest: chrome?.digest ?? null } },
     watch(company, fn) { let s = watchers.get(company); if (!s) { s = new Set(); watchers.set(company, s) } s.add(fn); return () => s.delete(fn) },
     fire(company) { for (const fn of watchers.get(company) ?? []) fn() },
@@ -69,9 +73,13 @@ export function fakeBus({ registry, adoptFirst = true } = {}) {
     onAppend(fn) { listeners.add(fn); return () => listeners.delete(fn) },
     publish(topic) { bus.published.push(topic); if (!ring.epochOf(topic)?.epoch) ring.registerEpoch(topic, 'shell1'); return append('shell:shell1', topic) },
     emit(topic, n = 1, stream = 'local:e1') { let ev; for (let i = 0; i < n; i++) ev = append(stream, topic); return ev },
-    async snapshot(topic) {
+    async snapshot(topic, { person = null } = {}) {
       const head = ring.head(topic); const base = { stream: head?.stream ?? null, seq: head?.seq ?? 0 }
-      if (topic.startsWith('company:')) { const c = topic.slice(8); const rows = await registry.apps(c); return { ...base, modules: rows.map((r) => ({ id: r.slug, instance: r.instance, rev: r.rev })), chrome: registry.chrome(c), chromeRev: registry.chrome(c).digest } }
+      if (topic.startsWith('company:')) {
+        const c = topic.slice(8); let rows = await registry.apps(c)
+        if (person) { const keep = await Promise.all(rows.map((r) => registry.present(person.id, r.instance))); rows = rows.filter((_, i) => keep[i]) }
+        return { ...base, modules: rows.map((r) => ({ id: r.slug, instance: r.instance, rev: r.rev })), chrome: registry.chrome(c), chromeRev: registry.chrome(c).digest }
+      }
       const row = await registry.byInstance(topic); return row ? { ...base, rev: row.rev, error: null } : null
     },
     reprobes: [], async reprobe(company, probe) { bus.reprobes.push([company, probe?.epoch]); return false },

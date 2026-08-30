@@ -12,7 +12,8 @@
 //   3  ticket       gate.ticket on /_t/<opaque> — creates the session                        fleet
 //   4a assets       /assets/* — public bytes                                                  both
 //   4b documents    Host-first: Host = path company (fleet) → identity → 302-to-/go (fleet) →
-//                   host waking → compose                                                     both
+//                   the APP's host waking (its row's computer; the company's freshest for an
+//                   app-less document) → compose — the module list is the person's (presence)   both
 //   4c fetches      session-first: identity fails → 401 {} without Location → Host = path
 //                   company (fleet) → reserved company heads → 404                            both
 //   5  presence     registry.resolve → 404; registry.present → 404 (same as a stranger); the
@@ -22,7 +23,9 @@
 //                   `global/<chrome>`); the assertion carries the chrome row's instance          both
 //   6  Origin       gate.origin on writes + the WS upgrade, only when the credential is a cookie both
 //   7  authorize    the per-app hook — none in 2.0.0 (presence is the ACL); a visible no-op    both
-//   8  proxy        /api, /modules through hostLink; /_atelier/{ws,whoami,report,topics,rail,wake}  both
+//   8  proxy        /api, /modules through hostLink to the APP's host (`registry.hostOf(row)` — a
+//                   company owns one host per chat it owns; waking marks are per host);
+//                   /_atelier/{ws,whoami,report,topics,rail,wake} (rail/topics: the person's rows)    both
 //   anything else → 404 {}; a non-GET/HEAD on a document route → 401 unauthenticated (no Location,
 //   no ticket mint), 405 with a session; an Upgrade anywhere but
 //   /_atelier/ws → 426. The 1.x-only surfaces (/_atelier/inflight, client-errors, takeover, observe)
@@ -32,8 +35,9 @@ import path from 'node:path'
 import { SLUG_RE, companyTopic, isReservedTopic } from '../protocol/index.js'
 import { renderDocument, relativeImports, appAsset } from './document.mjs'
 import { proxyRequest, json as sendJson } from './proxy.mjs'
-import { wakingHtml, wakingHeaders, hostState } from './waking.mjs'
+import { wakingHtml, wakingHeaders, hostState, hostKey } from './waking.mjs'
 import { newNonce } from './document.mjs'
+import { visibleRows } from './presence.mjs'
 
 export const RESERVED_HEADS = new Set(['api', 'assets', 'modules', '_atelier', '_host', '_t', 'favicon.ico', 'robots.txt'])
 export const RESERVED_MODULE_COMPANIES = new Set(['api', 'assets', 'modules', '_atelier'])
@@ -154,11 +158,14 @@ export async function laneDocument(ctx) {
     return r('document', u.status, { body: 'Sign-in did not stick on this origin (cookies blocked?). Open the link again from the portal.', headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } })
   }
   if (!isRead) return jsonR('document', 405, {})
-  const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, marks: ctx.marks, now: ctx.now })
+  // the host that must be up is the APP's (its row's computer); an app-less document, or a slug the registry does
+  // not know, asks whether anything of the company is up (the freshest host) and renders — the client tidies the URL
+  const app = ctx.route.slug ? await ctx.providers.registry.resolve(company, ctx.route.slug) : null
+  const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, app, marks: ctx.marks, now: ctx.now })
   const nonce = newNonce()
   if (state.waking) {
-    ctx.log(`document: ${company} waking (${state.reason})`)
-    return r('document', 503, { body: wakingHtml({ company, nonce }), headers: wakingHeaders({ nonce }) })
+    ctx.log(`document: ${company}${app ? '/' + app.slug : ''} waking (${state.reason})`)
+    return r('document', 503, { body: wakingHtml({ company, slug: app ? app.slug : null, nonce }), headers: wakingHeaders({ nonce }) })
   }
   const doc = await composeFor(ctx, { company, slug: ctx.route.slug, person: id.person, epoch: id.epoch, nonce })
   ctx.ensureWatch?.(company)
@@ -173,10 +180,11 @@ const chromeShape = (registry, company) => {
   return { qid: c.qid, rev: c.digest, hasKit: has('kit'), hasStyles }
 }
 
-// composeFor(): rows + chrome + the entry's relative imports (fetched once per (instance, rev)) → the document
+// composeFor(): the PERSON's rows (presence — a member outside an app's chat sees no trace of it, PLAN §4.1) + chrome
+// + the entry's relative imports (fetched once per (instance, rev)) → the document
 export async function composeFor(ctx, { company, slug, person, epoch, nonce }) {
   const registry = ctx.providers.registry
-  const rows = (await registry.apps(company)).filter((x) => !x.isChrome)
+  const rows = await visibleRows(registry, person.id, (await registry.apps(company)).filter((x) => !x.isChrome))
   const chrome = chromeShape(registry, company)
   const app = slug ? rows.find((x) => x.slug === slug && x.instance) : null
   let entryImports = []
@@ -188,7 +196,7 @@ async function entryImportsFor(ctx, { company, app, person }) {
   const key = `${app.instance}:${app.rev}`
   const hit = ctx.entryCache.get(key)
   if (hit) return hit
-  const hostRow = await ctx.providers.registry.host(company)
+  const hostRow = await ctx.providers.registry.hostOf(app)
   if (!hostRow) return []
   try {
     const up = await ctx.providers.hostLink.request({ hostRow, app, person, method: 'GET', path: appAsset(company, app.slug, 'frontend.js', app.rev), headers: { accept: 'application/javascript' } })
@@ -269,13 +277,17 @@ export async function laneProxy(ctx) {
   const { registry, hostLink, bus } = ctx.providers
   if (k === 'api' || k === 'modules') {
     if (ctx.upgrade) return jsonR('proxy', 426, {})
-    const hostRow = await registry.host(ctx.appCompany)
-    if (!hostRow || ctx.marks.isWaking(ctx.appCompany, ctx.now(), registry)) { ctx.req.resume(); return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' }) }
+    // THE APP'S HOST: the computer its registry row lives on (the chrome row's: the system host). A company owns one
+    // host per chat it owns, so `registry.host(company)` — the freshest heartbeat — would send this app to another
+    // chat's pod half the time (review 2026-08-30); the waking mark is that host's, not the company's
+    const hostRow = await registry.hostOf(ctx.app)
+    const key = hostKey(hostRow, ctx.appCompany)
+    if (!hostRow || ctx.marks.isWaking(key, ctx.now(), registry, ctx.appCompany)) { ctx.req.resume(); return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' }) }
     const app = ctx.app.chrome ? { instance: ctx.app.instance, company: ctx.app.company, slug: ctx.app.slug } : ctx.app
-    // the host is the app's company's (the chrome's: the system host); the origin the answer is served on is
-    // this request's (`ctx.company` = the Host company in the fleet) — an ACAO may match only that one
+    // the origin the answer is served on is this request's (`ctx.company` = the Host company in the fleet) — an ACAO
+    // may match only that one
     const out = await proxyRequest({ req: ctx.req, res: ctx.res, hostLink, hostRow, app, person: ctx.person, credential: ctx.credential, companyOrigin: ctx.cfg.origin(ctx.company ?? ctx.appCompany), forwardPath: ctx.forward, log: ctx.log })
-    if (out.error === 'DIAL' || out.error === 'TIMEOUT') ctx.marks.mark(ctx.appCompany, ctx.now())
+    if (out.error === 'DIAL' || out.error === 'TIMEOUT') ctx.marks.mark(key, ctx.now())
     return { lane: 'proxy', handled: true }
   }
   if (k !== 'atelier') return null
@@ -296,18 +308,21 @@ export async function laneProxy(ctx) {
       const row = await registry.byInstance(topic)
       if (!row || (ctx.company && row.company !== ctx.company) || !(await registry.present(ctx.person.id, topic))) return jsonR('proxy', 404, {})
     }
-    const snap = await bus.snapshot(topic)
+    const snap = await bus.snapshot(topic, { person: ctx.person })
     return snap ? jsonR('proxy', 200, snap) : jsonR('proxy', 404, {})
   }
   if (name === 'rail' && ctx.method === 'GET') {
     if (!ctx.company) return jsonR('proxy', 404, {})
-    const snap = await bus.snapshot(companyTopic(ctx.company))
+    const snap = await bus.snapshot(companyTopic(ctx.company), { person: ctx.person })
     return snap ? jsonR('proxy', 200, snap) : jsonR('proxy', 404, {})
   }
   if (name === 'wake' && ctx.method === 'GET') {
     const company = ctx.company
     if (!company) return jsonR('proxy', 200, { ok: false })
-    const state = await hostState({ registry, hostLink, bus, company, marks: ctx.marks, now: ctx.now })
+    // `?app=<slug>` (the waking page of an app document sends it): that app's host; without it the company's freshest
+    const slug = new URLSearchParams(ctx.search).get('app')
+    const app = slug && SLUG_RE.test(slug) ? await registry.resolve(company, slug) : null
+    const state = await hostState({ registry, hostLink, bus, company, app, marks: ctx.marks, now: ctx.now })
     return jsonR('proxy', 200, { ok: !state.waking, ...(state.waking ? { reason: state.reason } : {}) })
   }
   if (name === 'report' && ctx.method === 'POST') {
@@ -318,7 +333,7 @@ export async function laneProxy(ctx) {
     const row = typeof instance === 'string' ? await registry.byInstance(instance) : null
     if (!row || (ctx.company && row.company !== ctx.company)) return jsonR('proxy', 404, {})
     if (!(await registry.present(ctx.person.id, row.instance))) return jsonR('proxy', 404, {})
-    const hostRow = await registry.host(row.company)
+    const hostRow = await registry.hostOf(row)
     if (!hostRow) return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' })
     try {
       const up = await hostLink.request({ hostRow, app: row, person: ctx.person, method: 'POST', path: '/_atelier/report', headers: { 'content-type': 'application/json', 'content-length': body.length }, body })
