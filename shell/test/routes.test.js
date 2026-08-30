@@ -15,11 +15,14 @@ import { createHostLinkLocal } from '../providers/hostlink-local.mjs'
 import { createHostLinkFleet } from '../providers/hostlink-fleet.mjs'
 import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP, listen } from './fixtures.mjs'
 
+const chromeRow = (company) => ({ instance: CHROME_APP, slug: 'catalyst-chrome', company, rev: 2, state: 'live', meta: {}, isChrome: true })
 const apps = (company) => [
   { instance: TODO, slug: 'todo', company, rev: 3, state: 'live', meta: { name: 'Todo', icon: '✅' }, primary: true },
   { instance: WIKI, slug: 'wiki', company, rev: 1, state: 'stopped', meta: { name: 'Wiki' } },
-  { instance: CHROME_APP, slug: 'catalyst-chrome', company, rev: 2, state: 'live', meta: {}, isChrome: true },
 ]
+// THE FLEET'S CHROME (step 5): one row, `portal/catalyst-chrome` on the system host's company `portal`, named by every
+// company's registry and served on every company origin — a chat's pod (acme's host) carries no chrome row of its own
+export const FLEET_CHROME = { qid: 'portal/catalyst-chrome', digest: 1700 }
 
 async function rig(t, { mode = 'local', present, hostUp = true, chrome } = {}) {
   const host = fakeHost({ company: mode === 'local' ? 'global' : 'acme' })
@@ -29,9 +32,9 @@ async function rig(t, { mode = 'local', present, hostUp = true, chrome } = {}) {
   const minter = createMinter()
   const stores = fleetStores()
   const companies = mode === 'local'
-    ? { global: { apps: apps('global'), host: { port: hp, token: 'dev' } }, lab: { apps: [], host: { port: hp, token: 'dev' } } }
-    : { acme: { apps: apps('acme'), host: { port: hp, token: 'tok', epoch: 'e1' } }, beta: { apps: [], host: { port: hp, token: 'tok', epoch: 'e1' } } }
-  const registry = fakeRegistry({ mode, companies, present, chrome })
+    ? { global: { apps: [...apps('global'), chromeRow('global')], host: { port: hp, token: 'dev' } }, lab: { apps: [], host: { port: hp, token: 'dev' } } }
+    : { portal: { apps: [chromeRow('portal')], host: { port: hp, token: 'tok', epoch: 'e1' } }, acme: { apps: apps('acme'), host: { port: hp, token: 'tok', epoch: 'e1' } }, beta: { apps: [], host: { port: hp, token: 'tok', epoch: 'e1' } } }
+  const registry = fakeRegistry({ mode, companies, present, chrome: chrome ?? (mode === 'fleet' ? FLEET_CHROME : undefined) })
   const bus = fakeBus({ registry })
   const { cfg } = createConfig({ mode, config: {}, env: { PORT: '0' } })
   const providers = mode === 'local'
@@ -224,6 +227,13 @@ test('fleet: https 301 + HSTS; Host allowlist 404 (never a redirect); Host = pat
   assert.equal(doc.status, 200); assert.equal(doc.headers.get('strict-transport-security'), 'max-age=63072000; includeSubDomains')
   assert.match(doc.text, /"portal":"https:\/\/portal\.pa1nd\.de"/); assert.match(doc.text, /"companies":\[\]/)
   assert.match(doc.headers.get('content-security-policy'), /form-action 'self' https:\/\/portal\.pa1nd\.de/)
+  // the company document wears the fleet's chrome — the system host's row on `portal`, not one of acme's — so the preloads, the
+  // kit import map and the sheet of an app-less document name `/modules/portal/catalyst-chrome/*`; acme's rail holds its own apps only
+  assert.match(doc.text, /"chromeQid":"portal\/catalyst-chrome"/); assert.match(doc.text, /"chromes":\["portal\/catalyst-chrome"\]/)
+  assert.match(doc.text, /modulepreload" href="\/modules\/portal\/catalyst-chrome\/frontend\.js\?rev=1700"/); assert.match(doc.text, /"@atelier\/kit":"\/modules\/portal\/catalyst-chrome\/kit\.js\?rev=1700"/)
+  assert.match(doc.text, /"modules":\[\{"id":"todo"[^\]]*\{"id":"wiki"/); assert.ok(!doc.text.includes('"id":"catalyst-chrome"'))
+  const bare = await r.go('/acme/'); assert.match(bare.text, /href="\/modules\/portal\/catalyst-chrome\/styles\.css\?rev=1700"/)
+  const rail = await r.go('/_atelier/rail'); assert.deepEqual(rail.json().modules.map((m) => m.id), ['todo', 'wiki']); assert.deepEqual(rail.json().chrome, { qid: 'portal/catalyst-chrome', dir: null, digest: 1700 })
   const evil = await r.go('/acme/todo', { hostname: 'evil.example' }); assert.equal(evil.status, 404); assert.equal(evil.lane, 'host')
   const unknownCo = await r.go('/acme/todo', { hostname: 'nope.portal.pa1nd.de' }); assert.equal(unknownCo.status, 404); assert.equal(unknownCo.lane, 'host')
   const portal = await r.go('/acme/todo', { hostname: 'portal.pa1nd.de' }); assert.equal(portal.status, 404); assert.equal(portal.lane, 'host')
@@ -272,13 +282,19 @@ test('fleet: presence 404 identical to a stranger; Origin 403 on cookie writes a
   const get = await r.go('/api/acme/todo/items', { headers: { origin: 'https://evil.example' } }); assert.equal(get.status, 200)
   const pre = await r.go('/api/acme/todo/items', { method: 'OPTIONS', headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' } })
   assert.equal(pre.status, 204); assert.equal(pre.headers.get('access-control-allow-origin'), null)
-  // the chrome (assets and its backend) is exempt from presence and from the Host = path company check, served by the Host company's host under its row
-  assert.equal((await r.go('/modules/global/catalyst-chrome/kit.js')).status, 200)
-  assert.equal(r.host.seen.at(-1).identity.app, CHROME_APP)
-  const docs = await r.go('/api/global/catalyst-chrome/docs'); assert.equal(docs.status, 200); assert.equal(docs.json().app, CHROME_APP)
-  // no row for the chrome on this Host company → 404 (the fleet's shell-served chrome is PLAN §10 item 6, not built)
-  r.registry.chrome = () => ({ qid: 'global/other-chrome', dir: null, digest: 1 })
-  assert.equal((await r.go('/modules/global/other-chrome/kit.js')).status, 404); assert.equal(r.traces.at(-1).lane, 'presence')
+  // THE CHROME ON EVERY COMPANY ORIGIN (step 5): acme's registry names `portal/catalyst-chrome` — the system host's row on
+  // company `portal` — so its assets and its backend are exempt from presence (`present` above admits todo alone) and from
+  // the Host = path company check; the proxy dials the QID's company's host with that row's instance in the assertion
+  const kit = await r.go('/modules/portal/catalyst-chrome/kit.js'); assert.equal(kit.status, 200); assert.equal(kit.text, 'export const kit = 1')
+  assert.equal(r.host.seen.at(-1).identity.app, CHROME_APP); assert.equal(r.host.seen.at(-1).url, '/modules/portal/catalyst-chrome/kit.js')
+  const docs = await r.go('/api/portal/catalyst-chrome/docs'); assert.equal(docs.status, 200); assert.equal(docs.json().app, CHROME_APP)
+  assert.equal((await r.go('/modules/portal/catalyst-chrome/kit.js', { cookie: false })).status, 401, 'session-gated (R3-11)')
+  // every other cross-company path stays a Host mismatch (portal's other rows are not on acme); the old `global/…` name is nothing here
+  assert.equal((await r.go('/modules/portal/other/x.js')).status, 404); assert.equal(r.traces.at(-1).lane, 'fetch')
+  assert.equal((await r.go('/modules/global/catalyst-chrome/kit.js')).status, 404); assert.equal(r.traces.at(-1).lane, 'fetch')
+  // a chrome qid whose company holds no such row → 404 at presence (chrome delivery by digest per computer is step 7)
+  r.registry.chrome = () => ({ qid: 'portal/other-chrome', dir: null, digest: 1 })
+  assert.equal((await r.go('/modules/portal/other-chrome/kit.js')).status, 404); assert.equal(r.traces.at(-1).lane, 'presence')
 })
 
 test('fleet: the ticket lane — Continue page without a user gesture, 302 + session on one, wrong aud 403 (not burnt), used 410, unknown 404, query 404', async (t) => {
