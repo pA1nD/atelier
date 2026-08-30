@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { memory } from '../adapters/os.mjs'
-import { AGENT, AGENT_DATA_GID, SECRETS, scrub, bootPlan, hostEnv, sessionEnv, helperEnv } from '../hygiene.mjs'
+import { AGENT, AGENT_DATA_GID, SECRETS, NEVER_BELOW, scrub, bootPlan, hostEnv, sessionEnv, helperEnv } from '../hygiene.mjs'
 import { runPlan, createLauncher, config, crashLine } from '../launcher.mjs'
 
 const CFG = { work: '/work', run: '/run/atelier', control: '/control', tmp: '/tmp', graceS: 40 }
@@ -23,10 +23,12 @@ const POD_ENV = {
   PATH: '/work/.local/bin:/usr/local/bin:/usr/bin:/bin', HOME: '/work', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'xterm-256color',
   CHAT_ID: 'c1', PERSONA: 'bayard', PERSONA_TEXT: 'You are…', STORY_TEXT: 'story',
   CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1',
-  ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', DISABLE_AUTOUPDATER: '1',
+  ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', CLAUDE_MODEL: 'claude-y', DISABLE_AUTOUPDATER: '1', OPENAI_VOICE_TOKEN: 'voice-secret',
   HORSE_BROWSER_BIN: '/usr/local/bin/chrome-egress', HORSE_BROWSER_UNATTENDED: '1', FLEET_EGRESS: 'http://exit', FLEET_EGRESS_TZ: 'Europe/Berlin',
   PIP_USER: '1', NPM_CONFIG_PREFIX: '/work/.npm-global',
   ATELIER_BOOTSTRAP: 'boot-secret', ATELIER_GRACE_S: '40', CLAUDE_CODE_OAUTH_TOKEN: 'oauth-secret', KUBERNETES_SERVICE_HOST: '10.0.0.1',
+  // a wrapper that forgot the unset: the leaf PEMs are dropped under every key list (NEVER_BELOW), never below the launcher
+  ATELIER_HOST_TLS_CERT: '-----BEGIN CERTIFICATE-----', ATELIER_HOST_TLS_KEY: '-----BEGIN PRIVATE KEY-----', ATELIER_HOST_TLS_CA: '-----BEGIN CERTIFICATE-----',
 }
 
 test('bootPlan: the step list is byte-exact (DESIGN §2.1 steps 1–3b)', () => {
@@ -177,6 +179,7 @@ test('runPlan: a failing step stops the plan and is reported; the launcher exits
 test('env rows: H has no secret and no CHANNEL_*; S keeps the supervisor contract minus ATELIER_*; X is PATH only', () => {
   const H = hostEnv(POD_ENV, config(POD_ENV))
   for (const k of SECRETS) assert.equal(k in H, false, `${k} not in H`)
+  for (const k of NEVER_BELOW) assert.equal(k in POD_ENV, true, `${k} staged in POD_ENV so the drop is exercised`)
   assert.equal(Object.keys(H).some((k) => k.startsWith('CHANNEL_')), false)
   assert.deepEqual(H, {
     PATH: POD_ENV.PATH, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'xterm-256color', ATELIER_GRACE_S: '40',
@@ -187,13 +190,18 @@ test('env rows: H has no secret and no CHANNEL_*; S keeps the supervisor contrac
   assert.equal('ATELIER_BOOTSTRAP' in S, false); assert.equal('ATELIER_GRACE_S' in S, false); assert.equal('KUBERNETES_SERVICE_HOST' in S, false)
   assert.deepEqual(S, {
     PATH: POD_ENV.PATH, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'xterm-256color', CHAT_ID: 'c1', PERSONA: 'bayard', PERSONA_TEXT: 'You are…', STORY_TEXT: 'story',
-    CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1', ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret',
-    DISABLE_AUTOUPDATER: '1', HORSE_BROWSER_BIN: '/usr/local/bin/chrome-egress', HORSE_BROWSER_UNATTENDED: '1', FLEET_EGRESS: 'http://exit', FLEET_EGRESS_TZ: 'Europe/Berlin',
+    CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1', ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', CLAUDE_MODEL: 'claude-y',
+    DISABLE_AUTOUPDATER: '1', OPENAI_VOICE_TOKEN: 'voice-secret', HORSE_BROWSER_BIN: '/usr/local/bin/chrome-egress', HORSE_BROWSER_UNATTENDED: '1', FLEET_EGRESS: 'http://exit', FLEET_EGRESS_TZ: 'Europe/Berlin',
     PIP_USER: '1', NPM_CONFIG_PREFIX: '/work/.npm-global', HOME: '/work',
   })
   assert.deepEqual(helperEnv(POD_ENV), { PATH: POD_ENV.PATH })
-  // scrub never spreads: a key not in the list is absent; ATELIER_BOOTSTRAP is absent even when named
+  // the leaf PEMs reach no row: not H (despite ATELIER_* in HOST_KEEP), not S, not X
+  for (const k of ['ATELIER_HOST_TLS_CERT', 'ATELIER_HOST_TLS_KEY', 'ATELIER_HOST_TLS_CA']) {
+    assert.equal(k in H, false, `${k} not in H`); assert.equal(k in S, false, `${k} not in S`)
+  }
+  // scrub never spreads: a key not in the list is absent; a NEVER_BELOW key is absent even when named or prefix-matched
   assert.deepEqual(scrub({ A: '1', B: '2', ATELIER_BOOTSTRAP: 'x' }, ['A', 'ATELIER_BOOTSTRAP']), { A: '1' })
+  assert.deepEqual(scrub({ ATELIER_HOST_TLS: '/run/atelier/tls/cert.pem,…', ATELIER_HOST_TLS_KEY: 'pem' }, ['ATELIER_*', 'ATELIER_HOST_TLS_KEY']), { ATELIER_HOST_TLS: '/run/atelier/tls/cert.pem,…' })
   assert.deepEqual(scrub({ FOO_X: '1', FOO_Y: '2', BAR: '3' }, ['FOO_*']), { FOO_X: '1', FOO_Y: '2' })
 })
 

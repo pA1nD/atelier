@@ -10,15 +10,19 @@ export const WORKER_UID_MAX = 65535
 export const appgid = (uid) => uid           // an app's group id is its worker uid
 export const INSTANCE_RE = /^i-[0-9a-f]{16}$/
 
-// Never below the launcher (H) or never at all (ATELIER_BOOTSTRAP): `scrub` copies ATELIER_BOOTSTRAP
-// under no key list — the bootstrap secret leaves the launcher only as /run/atelier/bootstrap.token.
-export const SECRETS = Object.freeze(['ATELIER_BOOTSTRAP', 'CHANNEL_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'])
+// Never at all: `scrub` copies these under no key list. The bootstrap secret leaves the launcher only
+// as /run/atelier/bootstrap.token; the pod-env leaf PEMs (ATELIER_HOST_TLS_{CERT,KEY,CA}) only as the
+// image wrapper's /run/atelier/tls/*.pem behind `ATELIER_HOST_TLS` — dropped here even if a wrapper
+// forgot the unset (`ATELIER_*` in HOST_KEEP would otherwise admit them to row H).
+export const NEVER_BELOW = Object.freeze(['ATELIER_BOOTSTRAP', 'ATELIER_HOST_TLS_CERT', 'ATELIER_HOST_TLS_KEY', 'ATELIER_HOST_TLS_CA'])
+// Never below the launcher in row H (S keeps the channel/anthropic ones — the supervisor's contract).
+export const SECRETS = Object.freeze([...NEVER_BELOW, 'CHANNEL_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'])
 
 /** A NEW env object from an explicit key list; an entry ending in `*` is a prefix. */
 export function scrub(env, keep) {
   const out = {}
   for (const k of Object.keys(env)) {
-    if (k === 'ATELIER_BOOTSTRAP' || env[k] === undefined) continue
+    if (NEVER_BELOW.includes(k) || env[k] === undefined) continue
     if (keep.some((p) => (p.endsWith('*') ? k.startsWith(p.slice(0, -1)) : k === p))) out[k] = env[k]
   }
   return out
@@ -38,11 +42,13 @@ export function hostEnv(podEnv, cfg) {
 
 // Row S — the image's session supervisor, its production env contract unchanged: everything the
 // spine (k8s.ts buildSessionPod) and the Containerfile set, minus ATELIER_* (the bootstrap secret
-// and the host's knobs), HOME pinned to /work.
+// and the host's knobs), HOME pinned to /work. CLAUDE_MODEL is the supervisor's model pick
+// (session-supervisor.mjs reads it at claude launch); OPENAI_VOICE_TOKEN is the pod's `voice`
+// secret (envFrom) that speak/draw need.
 export const SESSION_KEEP = Object.freeze([
   'PATH', 'LANG', 'LC_ALL', 'TERM', 'TZ', 'CHAT_ID', 'PERSONA*', 'STORY_TEXT',
-  'CHANNEL_URL', 'CHANNEL_TOKEN', 'CHANNEL_CHAT', 'ANTHROPIC_*', 'DISABLE_AUTOUPDATER',
-  'HORSE_BROWSER_*', 'FLEET_EGRESS*', 'PIP_USER', 'NPM_CONFIG_PREFIX',
+  'CHANNEL_URL', 'CHANNEL_TOKEN', 'CHANNEL_CHAT', 'ANTHROPIC_*', 'CLAUDE_MODEL', 'DISABLE_AUTOUPDATER',
+  'OPENAI_VOICE_TOKEN', 'HORSE_BROWSER_*', 'FLEET_EGRESS*', 'PIP_USER', 'NPM_CONFIG_PREFIX',
 ])
 export function sessionEnv(podEnv) { return { ...scrub(podEnv, SESSION_KEEP), HOME: '/work' } }
 

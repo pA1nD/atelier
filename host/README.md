@@ -30,7 +30,14 @@ The container's command is `bash /app/host/entrypoint.sh` with the §4.3 pod sha
 `runAsUser: 0`, caps `{SETUID, SETGID, CHOWN, KILL}`, no `fsGroup`, `/work` volume, tmpfs `/run/atelier`,
 `/control`). The launcher reads the pod env (`ATELIER_BOOTSTRAP` becomes `/run/atelier/bootstrap.token`,
 `CHANNEL_URL` becomes the host's `ATELIER_SPINE_URL`) and starts the host with row H's env and fd 3 =
-the `.atelier` dirfd. The host registers at `ATELIER_SPINE_URL` (DESIGN §7 routes), loads the last-good
+the `.atelier` dirfd, and the image's session supervisor with row S's env (the spine's rows — `CHAT_ID`,
+`PERSONA*`, `CHANNEL_*`, `ANTHROPIC_*`, `CLAUDE_MODEL`, `OPENAI_VOICE_TOKEN`, `HORSE_BROWSER_*`,
+`FLEET_EGRESS*` … — minus every `ATELIER_*`, `HOME=/work`; `hygiene.mjs` `SESSION_KEEP` is the list).
+The per-pod leaf arrives as pod env `ATELIER_HOST_TLS_CERT`/`_KEY`/`_CA` (PEM); the image's wrapper
+(`/app/host/entrypoint.sh`) writes them to `/run/atelier/tls/{cert,key,ca}.pem` 0400 root, unsets them
+and sets `ATELIER_HOST_TLS` before exec'ing `host/entrypoint.sh` — and the launcher drops the three
+under every row anyway (`NEVER_BELOW`, with the bootstrap), so no process below it ever holds a PEM.
+The host registers at `ATELIER_SPINE_URL` (DESIGN §7 routes), loads the last-good
 snapshots, runs the startup permission audit (nothing listens while a credential or a snapshot is
 readable by a foreign uid), binds both listeners, writes `/run/atelier/host-ready` once the registrar
 has an epoch (the readiness probe), then scans the folder. A renamed or removed `/work/.atelier` is a
