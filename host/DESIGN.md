@@ -141,6 +141,10 @@ Constants (`hygiene.mjs`, imported everywhere): `AGENT = {uid:1000, gid:1000}`,
 `launcher.mjs`, in this order, each step logged `[launcher] +<s>s <step>: ok|FAILED <errno>`;
 a FAILED step before (4) exits 2 (a genuine fault; the kubelet restarts):
 
+0. `chown 0:0 /work` iff it is `1000:1000` — a MIGRATED volume (the per-conversation recipe chowns it whole);
+   root holds no DAC_OVERRIDE under the four caps and is "other" on it, so step 1's first `mkdir` would be
+   EACCES (D0 row c) on every such boot. Taken back here, handed over in step 2: a chown round trip, no
+   uid-1000 process alive yet. A fresh `0:0` volume passes through.
 1. `mkdir` the root-owned markers with their final modes (`mkdirSync(p, {mode})`, never chmod after
    chown): `/work/.atelier` 0755, `/work/.atelier/data` 0711, `/work/.atelier/last-good` 0711,
    `/work/.atelier/scratch` 0711, `/run/atelier` 0711, `/run/atelier/dev` 0710 (then `chown 0:1000`),
@@ -148,8 +152,8 @@ a FAILED step before (4) exits 2 (a genuine fault; the kubelet restarts):
    exists with the wrong owner/mode is logged and left (the host's audit refuses to serve, §6.5).
    Open `/work/.atelier` as a dirfd (`os.openDir`, §5) and keep it for the launcher's life.
 1b. `chown 1000:1000 /work/lost+found` if it exists and is `0:0`.
-2. `chown 1000:1000 /work` iff `/work` is `0:0`; a `1000:1000` volume is left untouched.
-   `mkdir /work/apps` 0755 + `chown 1000:1000` iff missing (before the `/work` chown, while root can).
+2. `chown 1000:1000 /work` — always (fresh, or taken back in step 0; a chown touches no mode, so a migrated
+   `2775` stays `2775`). `mkdir /work/apps` 0755 + `chown 1000:1000` iff missing (before the `/work` chown, while root can).
 3. `mkdir -m 0700 /tmp/tmux-1000` + `chown 1000:1000`; `mkdir -m 1777 /tmp/.X11-unix` (root, no chown).
 3b. Tokens: write `$ATELIER_RUN/bootstrap.token` (0400 root) from `process.env.ATELIER_BOOTSTRAP`;
    mint 32 random bytes hex as the dev token → `$ATELIER_RUN/dev.token` (0400 root) and
@@ -216,7 +220,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 
 | path | owner:group mode | who | notes |
 |---|---|---|---|
-| `/work` | `1000:1000` (0755 fresh, 2775 migrated) | launcher chowns once | agent owns it: can rename `.atelier` → the host works through the dirfd and treats a renamed/missing `.atelier` as a fault (`readlinkFd(dirfd) !== /work/.atelier` checked every 5 s) |
+| `/work` | `1000:1000` (0755 fresh, 2775 migrated) | launcher, every boot (taken back 0:0 for the markers, then to the agent — steps 0/2) | agent owns it: can rename `.atelier` → the host works through the dirfd and treats a renamed/missing `.atelier` as a fault (`readlinkFd(dirfd) !== /work/.atelier` checked every 5 s) |
 | `/work/lost+found` | `1000:1000 0700` | launcher (chown only) | before the `/work` chown |
 | `/work/apps` | `1000:1000 0755` | launcher iff missing | |
 | `/work/apps/<slug>` | `1000:<uid> 2750` | agent (mkdir); host round trip §6.2(a) at claim | the worker reads its sources through appgid; peers EACCES |

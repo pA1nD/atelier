@@ -74,6 +74,13 @@ export function bootPlan(cfg, { bootstrap, devToken }) {
   const W = cfg.work, R = cfg.run, T = cfg.tmp ?? '/tmp'
   return [
     { op: 'umask', mode: 0o000 },                                   // modes below are exact, not masked
+    // 0. /work is root's while root creates the markers (review 2026-08-30): a MIGRATED volume arrives
+    //    1000:1000 (the per-conversation recipe chowns it whole) and root without CAP_DAC_OVERRIDE is
+    //    "other" there — the first mkdir below was EACCES on every such boot (D0 row c measured the
+    //    syscall), exit 2, a crashloop for every chat but a brand-new one. CAP_CHOWN is one of the four:
+    //    take /work back here, hand it to the agent in step 2 (a chown round trip, the R1 pattern; no
+    //    uid-1000 process exists yet). A fresh 0:0 volume passes through untouched.
+    { op: 'chownIf', path: W, ifOwner: [AGENT.uid, AGENT.gid], uid: 0, gid: 0 },
     // 1. root-owned markers, before anything else
     { op: 'mkdir', path: `${W}/.atelier`, mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: `${W}/.atelier/data`, mode: 0o711, owner: [0, 0] },
@@ -88,9 +95,10 @@ export function bootPlan(cfg, { bootstrap, devToken }) {
     { op: 'unlink', path: `${R}/host-ready` },                     // the previous life's sentinel never lies at birth
     // 1b. lost+found while root still owns /work
     { op: 'chownIf', path: `${W}/lost+found`, ifOwner: [0, 0], uid: AGENT.uid, gid: AGENT.gid, missingOk: true },
-    // 2. /work/apps while root can still create in /work; then /work itself iff fresh (0:0)
+    // 2. /work/apps while root can still create in /work; then /work itself to the agent — always
+    //    (fresh 0:0, or taken back in step 0; chown touches no mode: a migrated 2775 stays 2775)
     { op: 'mkdirIfMissing', path: `${W}/apps`, mode: 0o755, uid: AGENT.uid, gid: AGENT.gid },
-    { op: 'chownIf', path: W, ifOwner: [0, 0], uid: AGENT.uid, gid: AGENT.gid },
+    { op: 'chown', path: W, uid: AGENT.uid, gid: AGENT.gid },
     // 3. tmux socket dir (mode first, then owner — never chmod after chown); X11 socket dir root 1777
     { op: 'mkdir', path: `${T}/tmux-1000`, mode: 0o700, owner: [AGENT.uid, AGENT.gid] },
     { op: 'chown', path: `${T}/tmux-1000`, uid: AGENT.uid, gid: AGENT.gid },

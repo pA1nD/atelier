@@ -19,6 +19,18 @@ function fakeIo(state) {
     unlink: (p) => { delete state.fs[p]; state.calls.push(['unlink', p]) },
   }
 }
+// root WITHOUT CAP_DAC_OVERRIDE (the four-cap set, R1): creating an entry needs write on the parent by the
+// ordinary bits — owner 0 → the owner bits, group 0 → the group bits, else "other". The memory adapter
+// models no permissions; this wraps it for the rows that are about them (a parent the state does not
+// carry — /run, /tmp — is fine).
+function withDac(os, io, state) {
+  const dirname = (p) => p.slice(0, p.lastIndexOf('/')) || '/'
+  const mayCreateIn = (dir) => { const e = state.fs[dir]; if (!e) return true; const bit = e.uid === 0 ? 0o200 : e.gid === 0 ? 0o020 : 0o002; return (e.mode & bit) !== 0 }
+  const deny = () => { const e = new Error('EACCES'); e.code = 'EACCES'; throw e }
+  const mkdir = os.mkdir, write = io.write
+  os.mkdir = (p, mode) => { if (!state.fs[p] && !mayCreateIn(dirname(p))) deny(); return mkdir(p, mode) }
+  io.write = (p, data, mode) => { if (!mayCreateIn(dirname(p))) deny(); return write(p, data, mode) }
+}
 const POD_ENV = {
   PATH: '/work/.local/bin:/usr/local/bin:/usr/bin:/bin', HOME: '/work', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'xterm-256color',
   CHAT_ID: 'c1', PERSONA: 'bayard', PERSONA_TEXT: 'You are…', STORY_TEXT: 'story',
@@ -35,6 +47,7 @@ test('bootPlan: the step list is byte-exact (DESIGN §2.1 steps 1–3b)', () => 
   const plan = bootPlan(CFG, { bootstrap: 'B', devToken: 'D' })
   assert.deepEqual(plan, [
     { op: 'umask', mode: 0 },
+    { op: 'chownIf', path: '/work', ifOwner: [1000, 1000], uid: 0, gid: 0 },
     { op: 'mkdir', path: '/work/.atelier', mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: '/work/.atelier/data', mode: 0o711, owner: [0, 0] },
     { op: 'mkdir', path: '/work/.atelier/last-good', mode: 0o711, owner: [0, 0] },
@@ -48,7 +61,7 @@ test('bootPlan: the step list is byte-exact (DESIGN §2.1 steps 1–3b)', () => 
     { op: 'unlink', path: '/run/atelier/host-ready' },
     { op: 'chownIf', path: '/work/lost+found', ifOwner: [0, 0], uid: 1000, gid: 1000, missingOk: true },
     { op: 'mkdirIfMissing', path: '/work/apps', mode: 0o755, uid: 1000, gid: 1000 },
-    { op: 'chownIf', path: '/work', ifOwner: [0, 0], uid: 1000, gid: 1000 },
+    { op: 'chown', path: '/work', uid: 1000, gid: 1000 },
     { op: 'mkdir', path: '/tmp/tmux-1000', mode: 0o700, owner: [1000, 1000] },
     { op: 'chown', path: '/tmp/tmux-1000', uid: 1000, gid: 1000 },
     { op: 'mkdir', path: '/tmp/.X11-unix', mode: 0o1777, owner: [0, 0] },
@@ -66,6 +79,9 @@ test('bootPlan: the step list is byte-exact (DESIGN §2.1 steps 1–3b)', () => 
   assert.equal(plan.some((s) => s.op === 'chmod'), false)
   assert.equal(plan.findIndex((s) => s.op === 'chmodIfRootOwned'), plan.findIndex((s) => s.op === 'mkdir' && s.path === '/run/atelier') + 1)
   assert.ok(plan.findIndex((s) => s.op === 'chmodIfRootOwned') < plan.findIndex((s) => s.op === 'chown'))
+  // the /work round trip brackets the markers: taken back (iff the agent's) before the first mkdir, handed over after /work/apps
+  assert.equal(plan.findIndex((s) => s.op === 'chownIf' && s.path === '/work'), 1)
+  assert.ok(plan.findIndex((s) => s.op === 'chown' && s.path === '/work') > plan.findIndex((s) => s.op === 'mkdirIfMissing' && s.path === '/work/apps'))
   assert.ok(plan.filter((s) => s.op === 'mkdir').every((s) => typeof s.mode === 'number'))
   assert.equal(bootPlan(CFG, { devToken: 'D' }).some((s) => s.path === '/run/atelier/bootstrap.token' && s.op === 'write'), false)
 })
@@ -109,8 +125,9 @@ test('runPlan on a fresh volume: order, chown-iff-0:0, populate-then-chown, mode
   assert.deepEqual(state.fs['/work/.atelier'], { uid: 0, gid: 0, mode: 0o711, type: 'dir' })
   // the previous life's sentinel is unlinked before anything is spawned
   assert.ok(ops.includes('unlink'))
-  assert.match(logs[1], /^mkdir \/work\/.atelier 0711: ok$/)
-  assert.match(logs.find((l) => l.startsWith('chownIf /work ')), /0:0 → 1000:1000/)
+  assert.match(logs[1], /^chownIf \/work 0:0: ok \(already 0:0 — untouched\)$/)   // fresh: root's already, nothing taken back
+  assert.match(logs[2], /^mkdir \/work\/.atelier 0711: ok$/)
+  assert.match(logs.find((l) => l.startsWith('chown /work 1000:1000')), /: ok$/)
 })
 
 test('runPlan on a migrated volume: /work 1000:1000 untouched, existing markers audited, session dir reclaimed', () => {
@@ -127,9 +144,12 @@ test('runPlan on a migrated volume: /work 1000:1000 untouched, existing markers 
   const os = memory(state), io = fakeIo(state), logs = []
   const r = runPlan(bootPlan(CFG, { devToken: 'NEW' }), { os, io, log: (l) => logs.push(l) })
   assert.equal(r.failed, undefined)
-  assert.equal(state.calls.some((c) => c[0] === 'chown' && c[1] === '/work'), false, '/work left alone')
+  // the round trip: taken back before the markers (EEXIST-audited here), handed to the agent after /work/apps — the volume ends as it came
+  const rt = (uid) => state.calls.findIndex((c) => c[0] === 'chown' && c[1] === '/work' && c[2] === uid)
+  assert.ok(rt(0) >= 0 && rt(0) < state.calls.findIndex((c) => c[0] === 'mkdir') && rt(1000) > rt(0))
+  assert.deepEqual(state.fs['/work'], { uid: 1000, gid: 1000, mode: 0o2775, type: 'dir' }, '2775 kept: chown touches no mode')
   assert.equal(state.calls.some((c) => c[0] === 'mkdir' && c[1] === '/work/apps'), false)
-  assert.match(logs.find((l) => l.startsWith('chownIf /work ')), /already 1000:1000 — untouched/)
+  assert.match(logs.find((l) => l.startsWith('chownIf /work ')), /1000:1000 → 0:0/)
   assert.match(logs.find((l) => l.startsWith('chownIf /work/lost\\+found') || l.startsWith('chownIf /work/lost+found')), /absent/)
   assert.match(logs.find((l) => l.startsWith('mkdir /work/.atelier/data')), /exists 1000:1000 0711 — wrong \(want 0:0 0711\), left/)
   assert.deepEqual([state.fs['/work/.atelier/data'].uid, state.fs['/work/.atelier/data'].gid], [1000, 1000], 'left, not repaired')
@@ -141,6 +161,39 @@ test('runPlan on a migrated volume: /work 1000:1000 untouched, existing markers 
   assert.deepEqual(state.fs['/run/atelier/session/dev.token'], { uid: 1000, gid: 1000, mode: 0o400, type: 'file', data: 'NEW' })
   assert.deepEqual([state.fs['/run/atelier/session'].uid, state.fs['/run/atelier/session'].gid], [1000, 1000])
   assert.equal(state.fs['/run/atelier/host-ready'], undefined, 'stale sentinel unlinked')
+})
+
+test('runPlan on a MIGRATED volume without .atelier — the first step-5 boot (review 2026-08-30): root without DAC_OVERRIDE is "other" on the 1000-owned /work, so the plan takes /work back for the markers and hands it to the agent again', () => {
+  const migrated = () => ({ fs: {
+    '/work': { uid: 1000, gid: 1000, mode: 0o2775, type: 'dir' },           // the per-conversation recipe: chown -R 1000:1000, g+ws
+    '/work/apps': { uid: 1000, gid: 1000, mode: 0o755, type: 'dir' },
+    '/work/lost+found': { uid: 1000, gid: 1000, mode: 0o700, type: 'dir' },
+  } })
+  const plan = bootPlan(CFG, { bootstrap: 'B', devToken: 'D' })
+  // the model bites: the plan MINUS its reclaim step dies at the first marker with the errno D0 row c measured
+  const s0 = migrated(); const os0 = memory(s0), io0 = fakeIo(s0); withDac(os0, io0, s0)
+  const r0 = runPlan(plan.filter((s) => !(s.op === 'chownIf' && s.path === '/work')), { os: os0, io: io0, log: () => {} })
+  assert.equal(r0.failed?.step.path, '/work/.atelier'); assert.equal(r0.failed?.error.code, 'EACCES')
+  // the plan as shipped
+  const s = migrated(); const os = memory(s), io = fakeIo(s); withDac(os, io, s); const logs = []
+  const r = runPlan(plan, { os, io, log: (l) => logs.push(l) })
+  assert.equal(r.failed, undefined, logs.join('\n'))
+  assert.equal(r.dirfd, 3)
+  const at = (op, p, uid) => s.calls.findIndex((c) => c[0] === op && c[1] === p && (uid === undefined || c[2] === uid))
+  assert.ok(at('chown', '/work', 0) >= 0 && at('chown', '/work', 0) < at('mkdir', '/work/.atelier'), 'taken back before the first marker')
+  assert.ok(at('mkdir', '/work/.atelier/scratch') < at('chown', '/work', 1000), 'handed over after the markers')
+  assert.ok(at('openDir', '/work/.atelier') < at('chown', '/work', 1000))
+  assert.ok(at('chown', '/work', 1000) < s.calls.findIndex((c) => c[0] === 'spawn' || c[0] === 'write'), 'the agent owns /work again before any token is written')
+  assert.deepEqual(s.fs['/work'], { uid: 1000, gid: 1000, mode: 0o2775, type: 'dir' })
+  for (const p of ['/work/.atelier', '/work/.atelier/data', '/work/.atelier/last-good', '/work/.atelier/scratch']) assert.deepEqual(s.fs[p], { uid: 0, gid: 0, mode: 0o711, type: 'dir' })
+  assert.deepEqual(s.fs['/work/lost+found'], { uid: 1000, gid: 1000, mode: 0o700, type: 'dir' }, 'already the agent\'s: untouched')
+  assert.equal(s.calls.some((c) => c[0] === 'mkdir' && c[1] === '/work/apps'), false)
+  assert.match(logs[1], /^chownIf \/work 0:0: ok \(1000:1000 → 0:0\)$/)
+  assert.equal(logs.filter((l) => l.includes('FAILED')).length, 0)
+  // the fresh volume under the same model still passes (root owns it: the owner bits)
+  const f = { fs: { '/work': { uid: 0, gid: 0, mode: 0o755, type: 'dir' } } }; const osf = memory(f), iof = fakeIo(f); withDac(osf, iof, f)
+  assert.equal(runPlan(plan, { os: osf, io: iof, log: () => {} }).failed, undefined)
+  assert.deepEqual([f.fs['/work'].uid, f.fs['/work'].gid], [1000, 1000])
 })
 
 test('runPlan: the $run tmpfs mount root arrives 0:0 1777 → chmodded 0711 before any token or spawn; a non-root $run is left and logged', () => {
@@ -161,7 +214,7 @@ test('runPlan: the $run tmpfs mount root arrives 0:0 1777 → chmodded 0711 befo
 })
 
 test('runPlan: a failing step stops the plan and is reported; the launcher exits 2 before any spawn', () => {
-  const state = { fs: {} }
+  const state = { fs: { '/work': { uid: 0, gid: 0, mode: 0o755, type: 'dir' } } }   // a pod always has /work mounted; a missing one is a fault of its own (step 0's lstat)
   const os = memory(state), io = fakeIo(state)
   os.mkdir = (p, mode) => { if (p === '/run/atelier') { const e = new Error('EROFS'); e.code = 'EROFS'; throw e } state.fs[p] = { uid: 0, gid: 0, mode, type: 'dir' }; state.calls.push(['mkdir', p, mode]) }
   const logs = []
