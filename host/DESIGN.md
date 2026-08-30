@@ -177,13 +177,24 @@ a FAILED step before (4) exits 2 (a genuine fault; the kubelet restarts):
    verdict on the stale `/control/.supervisor-ready` owns the pod: condemned when no app is served,
    released otherwise): an agent death never touches the host (PLAN §4.3). No `.host-crash` line for it;
    the supervisor's own boot is written for a restart inside one pod (the image's launch chain
-   continue → fresh, the sentinel rewritten).
+   continue → fresh, the sentinel rewritten; it kills the previous life's tmux server before its first
+   launch — die() never signals tmux or claude — and a launch whose new-session did not take is a
+   die()). A BOOT DEATH is a life that ended inside `supBootMs` (30 s) of its spawn; `parkExits` (10)
+   of them IN A ROW is a boot storm (log `session supervisor: 10 lives in a row died within 30 s of
+   the spawn — a boot storm; ending the container (exit 4)`) and the container ENDS: the host is torn
+   down as on SIGTERM (its drain; SIGKILL at grace − 5 s) and the launcher exits `SUP_BOOT_STORM_EXIT`
+   (4) once it is gone. Ten lives that never got through their boot mean the container's state is what
+   is wrong (a tmux server the next life cannot reclaim, a `/control` it cannot write, a seed it cannot
+   install) and only a container restart clears it; a respawn in place would loop for ever, an in-place
+   park would leave the chat deaf behind a serving host with nothing to rebuild it. The backoff before
+   the verdict is the storm rule's (ten boot deaths take ≥ 90 s — never a tight loop); a life that
+   outlived the boot window resets the row, and the window rule owns the mixed case (parked in place).
 6. Signals: SIGTERM → SIGTERM the host first, wait ≤ `grace − 5 s` (grace = `ATELIER_GRACE_S`,
    default 40) for its exit while forwarding SIGTERM to the session supervisor (a pending restart of
    either child is cancelled); then exit with the supervisor's code — its last exit's when it was down —
    or `128 + signal` when it died by signal. Supervisor exit → step 5 policy; host exit → step 4 policy;
-   neither ends the container on its own. The launcher exits only on SIGTERM, a failed plan step (2)
-   or a parked host (3). `sup.kill` EPERM arrives as a ChildProcess `error` event (handled, logged,
+   neither ends the container on its own. The launcher exits only on SIGTERM, a failed plan step (2),
+   a parked host (3) or a supervisor boot storm (4). `sup.kill` EPERM arrives as a ChildProcess `error` event (handled, logged,
    treated as exited). The launcher never exits for a policy reason (auth/limit/claude-gone are the
    session supervisor's relaunches).
 
@@ -606,7 +617,7 @@ and run inside the drill pod (§8.2).
 | lane | file(s) | what is asserted (pass line) |
 |---|---|---|
 | architect | `adapters.test.js` | `memory()` records; `setprivArgv`/`prlimitArgv` exact; wrapper argv for row W byte-exact |
-| launcher | `launcher.test.js`, `launcher-signals.test.js`, `launcher-process.test.js` | step order 1→5 as recorded calls (markers before any chown; lost+found before `/work`; chown iff `0:0`; mkdir-with-mode never chmod-after-chown); token files 0400 `wx`; env at rows H/S/X exact (no `ATELIER_BOOTSTRAP` anywhere below the launcher, no `CHANNEL_TOKEN` in H); the storm rule for BOTH children (0.5→30 s, park after 10/10 min, windows independent): a parked host ends the container (supervisor SIGTERM → SIGKILL 10 s, exit 3 whatever it exited with, a pending supervisor restart cancelled), a supervisor exit is a respawn in place (host untouched, no crash line, never a container exit; parked = the host serves on); `host-ready` unlinked + `.host-crash` line via the uid-1000 helper on host exit; SIGTERM order, restart timers cancelled, `128+sig` mirroring with fake clock; the real-process rows (a host crash and a supervisor exit both restarted, SIGTERM mirrors) |
+| launcher | `launcher.test.js`, `launcher-signals.test.js`, `launcher-process.test.js` | step order 1→5 as recorded calls (markers before any chown; lost+found before `/work`; chown iff `0:0`; mkdir-with-mode never chmod-after-chown); token files 0400 `wx`; env at rows H/S/X exact (no `ATELIER_BOOTSTRAP` anywhere below the launcher, no `CHANNEL_TOKEN` in H); the storm rule for BOTH children (0.5→30 s, park after 10/10 min, windows independent): a parked host ends the container (supervisor SIGTERM → SIGKILL 10 s, exit 3 whatever it exited with, a pending supervisor restart cancelled), a supervisor exit is a respawn in place (host untouched, no crash line, never a container exit; a runtime storm's park = the host serves on) while a BOOT storm (10 lives in a row dead within 30 s of the spawn) ends the container (host SIGTERM → SIGKILL at grace − 5 s, exit 4, a pending host restart cancelled; a long life resets the row, the window rule then parks in place); `host-ready` unlinked + `.host-crash` line via the uid-1000 helper on host exit; SIGTERM order, restart timers cancelled, `128+sig` mirroring with fake clock; the real-process rows (a host crash and a supervisor exit both restarted, SIGTERM mirrors) |
 | supervisor | `supervisor-discovery.test.js`, `-watcher`, `-bundle`, `-tailwind`, `-lastgood`, `-swap`, `-idle` | module.json rule + slug refusals; exclusion list (100 `data/` writes → 0 rebuilds; a `node_modules` storm → 1 rebuild after quiescence); two-fingerprint quiescence; real esbuild bundle with `import.meta.url` rewritten (createRequire resolves from the app folder); the 8 failure classes with `file:line:col` + hint; one-sheet CSS over a 3-file chrome fixture, long line split, no candidate leak between two apps; rev dirs fsync+rename, `current` swap, checksum, previous kept, `?rev=` window; 200 four-fetch observations across 3 saves → 0 mixed revs, 0 non-2xx (real workers, `unprivileged()`); a syntax error / throwing mount / half-written save → users on old rev, report called once each; MOUNT-ERROR retry after old exit; idle-stop only on empty resources; resume held, never 502; broken folder while stopped → served from snapshot |
 | workers | `worker-spawn.test.js`, `-runtime`, `-router`, `-proxy`, `-jail`, `-install` | SpawnSpec → exact argv/env/cwd/stdio for linuxRoot and unprivileged; READY parsed from fd 3, 8 s timeout, EAGAIN/134 → `spawn-eagain`; router = b6's 20 asserts + `req.json` 413 + HEAD→GET; ctx frozen, `req.user` only from internal headers; teardown runs on SIGTERM before exit (child process of the module killed); resources report shape; proxy streams 1 MiB in / 4 MiB out with byte counts, 502/504/426 mapping, header filters; jailPlan step list per §3 byte-exact; claimRoundTrip order; install orchestration with a fake spawn (scratch layout, freeze argv, cleanup on abort). Drill-gated: real uid drop rows (secret EACCES, peer dir/socket EACCES, `groups=[uid]`, env keys exact, `RLIMIT_DATA` RangeError in-worker, fork EAGAIN at the cap), freeze.py 10/10 |
 | errors | `errors-collector.test.js`, `-report`, `-agentlog`, `-push`, `-watchdog`, `-limits` | fingerprint = protocol's; 1 s tally → count; stale-rev dropped before sinks; setRunning reset; frontend `rev-mismatch`; agent.log lines, mode 0640 root:1000 (memory), ENOSPC swallowed + stderr; push validates first, one in flight, retry ladder, 4xx drop; watchdog with fake `/proc`: RSS kill at cap, throttle duty cycle bounded 400 ms, no kill on CPU, statfs 95 % → SIGSTOP the largest dataDir, SIGCONT at 90 %; limits: 512M refused, default 1 GiB, core 0, `--max-old-space-size` formula |
@@ -728,7 +739,9 @@ Deviations from §2.1–§2.2 as built, current state (details in `host/drill/la
    the last 10 min (one crash is not a loop: the blink after a `kill -9` is the host's boot alone —
    §I1 rows); the 10th exit in the window parks the host and ends the container (exit 3, the supervisor
    SIGTERMed first). The session supervisor has a window of its own under the same rule (`supExitTimes`);
-   parked, it stays down while the host serves. `exits` in the crash line is the launcher-life total.
+   parked, it stays down while the host serves — unless the park is a BOOT storm (`supBootDeaths`: ten
+   lives in a row each dead within `supBootMs` = 30 s of the spawn), which ends the container (exit 4,
+   the host SIGTERMed first). `exits` in the crash line is the launcher-life total.
    Before every restart the launcher SIGKILLs the dead host's workers (`orphanedWorkers()`: every
    `/proc/<pid>/status` whose real uid is in 20000–65535; root + CAP_KILL) — measured: without it the
    first life's four workers ran on beside the second life's, the sqlite one holding its lock.

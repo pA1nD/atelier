@@ -1,11 +1,11 @@
 // host/launcher.mjs — the restart policy of BOTH children (the storm rule), the crash line through the
-// uid-1000 helper, a parked host ending the container, SIGTERM order, exit-code mirroring (DESIGN §2.1
-// steps 4–6) with the memory adapter and a fake clock.
+// uid-1000 helper, a parked host ending the container, a session supervisor boot storm ending it too,
+// SIGTERM order, exit-code mirroring (DESIGN §2.1 steps 4–6) with the memory adapter and a fake clock.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { memory } from '../adapters/os.mjs'
 import { helperEnv } from '../hygiene.mjs'
-import { createLauncher, backoffMs, storm, exitCode, orphanedWorkers, RESTART, HOST_PARKED_EXIT } from '../launcher.mjs'
+import { createLauncher, backoffMs, storm, exitCode, orphanedWorkers, RESTART, HOST_PARKED_EXIT, SUP_BOOT_STORM_EXIT } from '../launcher.mjs'
 
 function fakeClock() {
   let t = 1_000_000, id = 0
@@ -50,10 +50,12 @@ const helpers = (state) => state.spawned.filter((c) => c.spec.argv[0] === 'sh')
 const hosts = (state) => state.spawned.filter((c) => c.spec.argv[1] === '/app/host/index.mjs')
 const sups = (state) => state.spawned.filter((c) => c.spec.argv[1] === '/app/session-supervisor.mjs')
 // exits until the storm parks it: every exit of the current child, the clock advanced through each restart delay
-// (`n` exits, `delays` measured; the last exit is the parking one and starts no restart)
-function stormOf(state, clock, list, n = RESTART.parkExits, code = 134) {
+// (`n` exits, `delays` measured; the last exit is the parking one and starts no restart). `liveMs` = how long each
+// life runs before it exits (0 = dead at the spawn — a boot death for the supervisor).
+function stormOf(state, clock, list, n = RESTART.parkExits, code = 134, liveMs = 0) {
   const delays = []
   for (let i = 1; i <= n; i++) {
+    if (liveMs) clock.advance(liveMs)
     const before = list(state).length, t0 = clock.now()
     list(state).at(-1).exit(code)
     if (i === n) break
@@ -188,18 +190,21 @@ test('supervisor exit: respawned in place at once — the host untouched, no cra
   assert.deepEqual(sups(state)[1].spec, sups(state)[0].spec, 'the same spawn spec: uid 1000, groups [19999], row S env, cwd /work')
   assert.equal(helpers(state).length, 0, 'no .host-crash line for a supervisor exit')
   assert.ok(logs.some((l) => /session supervisor: exited code=3 signal=null/.test(l)))
-  assert.ok(logs.some((l) => /session supervisor: restart in 0 ms \(exit 1 in window\)/.test(l)))
+  assert.ok(logs.some((l) => /session supervisor: restart in 0 ms \(exit 1 in window\) after a 0\.0 s life — boot death 1\/10/.test(l)), logs.join('\n'))
   assert.equal(clock.pending(), 0)
   // a death by signal is the same restart (the code was never mirrored into the container)
   sups(state).at(-1).exit(null, 'SIGSEGV'); clock.advance(500)
   assert.equal(sups(state).length, 3); assert.equal(exited(), null)
+  // a life that outlives the boot window (30 s) is not a boot death: the row resets
+  clock.advance(RESTART.supBootMs); sups(state).at(-1).exit(1)
+  assert.ok(logs.some((l) => /session supervisor: restart in 1000 ms \(exit 3 in window\) after a 30\.0 s life$/.test(l)), logs.join('\n'))
   assert.equal(exitCode({ code: null, signal: 'SIGTERM' }), 143); assert.equal(exitCode({ code: 7, signal: null }), 7); assert.equal(exitCode(null), 1)
 })
 
-test('supervisor storm: 0.5 → 30 s doubling, parked after 10 exits in 10 min — the host keeps serving, the launcher never exits; SIGTERM then mirrors the last supervisor exit', () => {
+test('supervisor RUNTIME storm (lives that ran ≥ 30 s): 0.5 → 30 s doubling, parked after 10 exits in 10 min — the host keeps serving, the launcher never exits; SIGTERM then mirrors the last supervisor exit', () => {
   const { state, host, clock, logs, exited, handlers } = boot()
   const hostSignals = []; host.onSignal = (s) => hostSignals.push(s)
-  const delays = stormOf(state, clock, sups, RESTART.parkExits, 2)
+  const delays = stormOf(state, clock, sups, RESTART.parkExits, 2, RESTART.supBootMs)   // 10 × 30 s + 91.5 s of backoff < the 10 min window
   assert.deepEqual(delays, [0, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000])
   assert.ok(logs.some((l) => /session supervisor: parked after 10 exits\/10 min — the host keeps serving/.test(l)), logs.join('\n'))
   clock.advance(120_000)
@@ -212,6 +217,66 @@ test('supervisor storm: 0.5 → 30 s doubling, parked after 10 exits in 10 min �
   assert.deepEqual(hostSignals, ['SIGTERM'])
   host.exit(0)
   assert.equal(exited(), 2, 'the last supervisor exit code')
+})
+
+test('supervisor BOOT storm: 10 lives in a row each dead within 30 s of its spawn → the container ends (exit 4): the backoff stands (never a tight loop), the host SIGTERMed first (its drain), no 11th spawn, exit once the host is gone', () => {
+  const { state, host, clock, logs, exited } = boot()
+  const hostSignals = []; host.onSignal = (s) => hostSignals.push(s)
+  const delays = stormOf(state, clock, sups, RESTART.parkExits, 1, RESTART.supBootMs - 1)   // every life one ms short of the boot window
+  assert.deepEqual(delays, [0, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000], 'the storm rule\'s backoff before the verdict: ten boot deaths take ≥ 90 s')
+  assert.ok(logs.some((l) => /session supervisor: restart in 30000 ms \(exit 9 in window\) after a 30\.0 s life — boot death 9\/10/.test(l)), logs.join('\n'))
+  assert.ok(logs.some((l) => /session supervisor: 10 lives in a row died within 30 s of the spawn — a boot storm; ending the container \(exit 4\)/.test(l)), logs.join('\n'))
+  assert.ok(logs.some((l) => /boot storm: host first, session supervisor next, 35000 ms for the teardown/.test(l)))
+  assert.equal(sups(state).length, 10, 'no 11th spawn')
+  assert.deepEqual(hostSignals, ['SIGTERM'], 'the host drains')
+  assert.equal(exited(), null, 'waits for the host')
+  assert.equal(hosts(state).length, 1)
+  host.exit(0)
+  assert.equal(exited(), SUP_BOOT_STORM_EXIT, 'exit 4 — the pod restarts with the kubelet backoff, the container\'s state (the old tmux server, /tmp) gone with it')
+  assert.equal(clock.pending(), 0, 'no restart, no deadline left')
+  clock.advance(120_000)
+  assert.equal(sups(state).length, 10); assert.equal(hosts(state).length, 1)
+  assert.ok(logs.some((l) => /exit 4 \(session supervisor boot storm; session supervisor code=1 signal=null\)/.test(l)), logs.join('\n'))
+})
+
+test('a boot storm while the host is between restarts: the pending host restart is cancelled, exit 4 at once (no host to wait for)', () => {
+  const { state, clock, exited } = boot()
+  stormOf(state, clock, sups, RESTART.parkExits - 1, 1)     // nine boot deaths, the 9th respawn awaited
+  clock.advance(0); while (sups(state).length === RESTART.parkExits - 1) clock.advance(100)
+  assert.equal(sups(state).length, RESTART.parkExits)
+  hosts(state).at(-1).exit(1); clock.advance(0)              // the host's first exit: back at once
+  hosts(state).at(-1).exit(1)                                // its second: a 500 ms restart pending
+  assert.equal(hosts(state).length, 2); assert.equal(clock.pending(), 1)
+  sups(state).at(-1).exit(1)                                 // the 10th boot death in a row
+  assert.equal(exited(), SUP_BOOT_STORM_EXIT, 'no host to wait for')
+  assert.equal(clock.pending(), 0, 'the host restart is cancelled')
+  clock.advance(120_000)
+  assert.equal(hosts(state).length, 2); assert.equal(sups(state).length, RESTART.parkExits)
+})
+
+test('a boot storm: the host is SIGKILLed at the deadline when it ignores SIGTERM', () => {
+  const { state, clock, exited, host } = boot()
+  const hostSignals = []; host.onSignal = (s) => { hostSignals.push(s); if (s === 'SIGKILL') host.exit(null, 'SIGKILL') }
+  stormOf(state, clock, sups, RESTART.parkExits, 1, 5_000)
+  assert.deepEqual(hostSignals, ['SIGTERM']); assert.equal(exited(), null)
+  clock.advance(34_999); assert.deepEqual(hostSignals, ['SIGTERM'])
+  clock.advance(1); assert.deepEqual(hostSignals, ['SIGTERM', 'SIGKILL'])
+  assert.equal(exited(), SUP_BOOT_STORM_EXIT)
+})
+
+test('the boot row resets on a life that outlived the boot window: 9 boot deaths, one long life, 9 more — never a boot storm; the window rule parks in place at its 10th', () => {
+  const { state, clock, exited, logs } = boot()
+  stormOf(state, clock, sups, 9, 1)                          // nine boot deaths, the 9th respawn awaited
+  clock.advance(0); while (sups(state).length === 9) clock.advance(100)
+  assert.equal(sups(state).length, 10)
+  clock.advance(RESTART.windowMs)                            // a life of 10 min: the boot row AND the window reset
+  sups(state).at(-1).exit(1); clock.advance(0)
+  assert.equal(sups(state).length, 11, 'restarted at once (the first exit in a fresh window)')
+  assert.ok(logs.some((l) => /restart in 0 ms \(exit 1 in window\) after a 600\.0 s life$/.test(l)), logs.join('\n'))
+  stormOf(state, clock, sups, 9, 1)                          // nine more boot deaths = the window's 10th exit
+  assert.equal(exited(), null, 'not a boot storm (9 in a row)')
+  assert.ok(logs.some((l) => /session supervisor: parked after 10 exits\/10 min — the host keeps serving/.test(l)), logs.join('\n'))
+  assert.equal(sups(state).length, 19); assert.equal(clock.pending(), 0)
 })
 
 test('exits older than 10 min fall out of the supervisor\'s window too: back to an immediate restart after a quiet window', () => {

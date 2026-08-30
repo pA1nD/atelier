@@ -77,7 +77,7 @@ test('real process: plan on disk, fd 3 to the host, crash → helper line → re
   const { code } = await r.done
   const out = r.out()
   assert.equal(code, 1, out)
-  assert.match(out, /session supervisor: exited code=3 signal=null/); assert.match(out, /session supervisor: restart in 0 ms \(exit 1 in window\)/)
+  assert.match(out, /session supervisor: exited code=3 signal=null/); assert.match(out, /session supervisor: restart in 0 ms \(exit 1 in window\) after a [0-9.]+ s life — boot death 1\/10/)
   assert.match(out, /exit 1 \(session supervisor code=1 signal=null\)/, 'the SIGTERM exit mirrors the second supervisor\'s code')
   // the plan landed with its modes (umask 0 while the plan ran)
   assert.equal(mode(`${p.work}/.atelier`), '0711'); assert.equal(mode(`${p.work}/.atelier/data`), '0711'); assert.equal(mode(`${p.work}/.atelier/last-good`), '0711'); assert.equal(mode(`${p.work}/.atelier/scratch`), '0711')

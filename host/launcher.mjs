@@ -4,8 +4,11 @@
 // image's session supervisor (uid 1000 + [AGENT_DATA_GID]) in parallel, and restarts EITHER child in
 // place under the storm rule (at once, then 0.5 s doubling to 30 s, parked after 10 exits in 10 min) —
 // an agent death never touches the host (PLAN §4.3). It exits only on SIGTERM (mirroring the session
-// supervisor's code), a failed plan step (2), or a PARKED HOST (HOST_PARKED_EXIT: a Running pod with no
-// host is deaf to the shell and the probe alike, so the container ends and the kubelet's backoff owns it).
+// supervisor's code), a failed plan step (2), a PARKED HOST (HOST_PARKED_EXIT: a Running pod with no
+// host is deaf to the shell and the probe alike, so the container ends and the kubelet's backoff owns it),
+// or a session supervisor BOOT STORM (SUP_BOOT_STORM_EXIT: ten lives in a row that died inside the boot
+// window never got through their boot — the container's state is what is wrong, and only a container
+// restart clears it).
 // Everything with a side effect is injected (os, io, clock, exit, signals) so the tests drive it.
 import fs from 'node:fs'
 import path from 'node:path'
@@ -18,12 +21,20 @@ import { AGENT, AGENT_DATA_GID, WORKER_UID_BASE, WORKER_UID_MAX, bootPlan, hostE
 const here = path.dirname(fileURLToPath(import.meta.url))
 export const HOST_ENTRY = path.join(here, 'index.mjs')            // /app/host/index.mjs in the image
 export const SESSION_SUPERVISOR = '/app/session-supervisor.mjs'   // the image's, not in this repo
-export const RESTART = Object.freeze({ baseMs: 500, capMs: 30_000, parkExits: 10, windowMs: 600_000, supKillMs: 10_000 })
+export const RESTART = Object.freeze({ baseMs: 500, capMs: 30_000, parkExits: 10, windowMs: 600_000, supKillMs: 10_000, supBootMs: 30_000 })
 /** The container's exit code once the HOST parked (review 2026-08-30): the pod would otherwise stay Running with no
  *  host — unready to kube (host-ready gone), deaf to the shell, the spine still pasting — and nothing restarts a
  *  parked host. Ending the container non-zero hands the storm to the kubelet's backoff and the spine's condemn
  *  at ≥ 40 s, the one path that rebuilds it. Distinct from 2 (a failed plan step). */
 export const HOST_PARKED_EXIT = 3
+/** The container's exit code once the SESSION SUPERVISOR parked on a BOOT storm (step 5 review, 2026-08-30): parkExits
+ *  lives in a row that each died inside `supBootMs` of their spawn never got through their boot — a tmux server the
+ *  previous life left that this one cannot reclaim, a /control it cannot write, a seed it cannot install — so the
+ *  container's state is what is wrong, and a container restart (a fresh process tree, a fresh /tmp) is the one
+ *  remedy: a respawn in place would loop for ever, an in-place park would leave the chat deaf behind a serving host
+ *  with nothing to rebuild it. A runtime storm (lives that ran past the window) still parks in place. Distinct from
+ *  2 (a failed plan step) and 3 (a parked host). */
+export const SUP_BOOT_STORM_EXIT = 4
 
 export function config(env) {
   return {
@@ -142,6 +153,7 @@ export function createLauncher(d) {
     dirfd: null, host: null, sup: null, supResult: null, exiting: false, deadline: null,
     parked: false, exits: 0, exitTimes: [], timer: null,              // the host's storm state (`exits` = the launcher-life total, the crash line's)
     supParked: false, supExits: 0, supExitTimes: [], supTimer: null,  // the session supervisor's
+    supSpawnedAt: null, supBootDeaths: 0, supBootStorm: false,         // its boot-storm state (lives in a row dead inside supBootMs)
   }
 
   // Fires fn once per child: on 'exit', or on 'error' (a spawn failure, or a kill EPERM) — logged, treated as exited.
@@ -214,6 +226,7 @@ export function createLauncher(d) {
     st.supTimer = null
     const child = os.spawn({ argv: sessionArgv, env: sessionEnv(env), cwd: cfg.work, uid: AGENT.uid, gid: AGENT.gid, groups: [AGENT_DATA_GID], umask: 0o022, stdio: ['ignore', 'inherit', 'inherit'] })
     st.sup = child
+    st.supSpawnedAt = clock.now()
     say(`session supervisor: spawned pid ${child.pid} uid ${AGENT.uid}:${AGENT.gid} groups [${AGENT_DATA_GID}]`)
     once(child, 'session supervisor', (code, signal) => onSupExit(child, code, signal))
   }
@@ -224,6 +237,9 @@ export function createLauncher(d) {
   // (the image's launch chain: continue → fresh, the sentinel rewritten). Parked, it leaves the host serving and
   // the pod Ready; the spine's supervisor-silent verdict (the stale /control/.supervisor-ready) owns the pod then —
   // condemned when no app is served, released otherwise (C13) — and a SIGTERM still mirrors the last exit.
+  // A BOOT death is a life that ended inside supBootMs of its spawn (the launch never took, a die() on the first
+  // tick, a crash at boot); parkExits of them IN A ROW is a boot storm — the container ends (parkSupBoot). A life
+  // that outlived the window resets the row; the window rule above owns the mixed case.
   function onSupExit(child, code, signal) {
     if (child !== st.sup) return
     st.sup = null
@@ -231,25 +247,46 @@ export function createLauncher(d) {
     say(`session supervisor: exited code=${code} signal=${signal}`)
     if (st.exiting) { settle(); return }
     const now = clock.now()
+    const lifeMs = now - st.supSpawnedAt
+    st.supBootDeaths = lifeMs < RESTART.supBootMs ? st.supBootDeaths + 1 : 0
     st.supExits += 1
     const { times, delay } = storm(st.supExitTimes, now)
     st.supExitTimes = times
+    if (st.supBootDeaths >= RESTART.parkExits) { parkSupBoot(); return }
     if (delay === null) { st.supParked = true; say(`session supervisor: parked after ${RESTART.parkExits} exits/${RESTART.windowMs / 60_000} min — the host keeps serving; the spine's supervisor-silent verdict owns the pod now`); return }
-    say(`session supervisor: restart in ${delay} ms (exit ${times.length} in window)`)
+    say(`session supervisor: restart in ${delay} ms (exit ${times.length} in window) after a ${(lifeMs / 1000).toFixed(1)} s life${st.supBootDeaths ? ` — boot death ${st.supBootDeaths}/${RESTART.parkExits}` : ''}`)
     st.supTimer = clock.setTimeout(spawnSup, delay)
+  }
+
+  // A session supervisor boot storm ends the container (SUP_BOOT_STORM_EXIT above): the host is torn down the way a
+  // SIGTERM does it (host-ready gone, draining at the spine, close, stop; SIGKILL at grace − 5 s) and the launcher
+  // exits once it is gone. The backoff before this point is the storm rule's (at once, 0.5 s doubling to 30 s):
+  // ten boot deaths take ≥ 90 s, never a tight loop.
+  function parkSupBoot() {
+    st.supParked = true
+    st.supBootStorm = true
+    st.exiting = true
+    say(`session supervisor: ${RESTART.parkExits} lives in a row died within ${RESTART.supBootMs / 1000} s of the spawn — a boot storm; ending the container (exit ${SUP_BOOT_STORM_EXIT}) for the kubelet's backoff`)
+    teardown('boot storm')
   }
 
   function onTerm() {
     if (st.exiting) return
     st.exiting = true
+    teardown('SIGTERM')
+  }
+
+  // The teardown: a pending restart of either child cancelled, SIGTERM the host first and the session supervisor
+  // next, SIGKILL whatever is left at grace − 5 s, then settle once both are gone.
+  function teardown(why) {
     if (st.timer) clock.clearTimeout(st.timer)
     if (st.supTimer) clock.clearTimeout(st.supTimer)
     const budget = Math.max(1, cfg.graceS - 5) * 1000
-    say(`SIGTERM: host first, session supervisor next, ${budget} ms for the teardown`)
+    say(`${why}: host first, session supervisor next, ${budget} ms for the teardown`)
     if (st.host) kill(st.host, 'SIGTERM')
     if (st.sup) kill(st.sup, 'SIGTERM')
     st.deadline = clock.setTimeout(() => {
-      say('SIGTERM: budget spent — SIGKILL')
+      say(`${why}: budget spent — SIGKILL`)
       if (st.host) kill(st.host, 'SIGKILL')
       if (st.sup) kill(st.sup, 'SIGKILL')
     }, budget)
@@ -259,8 +296,8 @@ export function createLauncher(d) {
   function settle() {
     if (!st.exiting || st.host || st.sup) return
     if (st.deadline) clock.clearTimeout(st.deadline)
-    const code = st.parked ? HOST_PARKED_EXIT : exitCode(st.supResult)
-    say(`exit ${code} (${st.parked ? 'host parked; ' : ''}session supervisor code=${st.supResult?.code} signal=${st.supResult?.signal})`)
+    const code = st.supBootStorm ? SUP_BOOT_STORM_EXIT : st.parked ? HOST_PARKED_EXIT : exitCode(st.supResult)
+    say(`exit ${code} (${st.supBootStorm ? 'session supervisor boot storm; ' : st.parked ? 'host parked; ' : ''}session supervisor code=${st.supResult?.code} signal=${st.supResult?.signal})`)
     exit(code)
   }
 
