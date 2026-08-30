@@ -1,8 +1,11 @@
 // host/launcher.mjs — the thin root launcher (DESIGN §2.1, PLAN §4.3 "Process tree", R1).
 // PID 1 (entrypoint.sh) runs it as root with the whole pod env. It executes the boot plan of
 // hygiene.mjs through the adapter, spawns the host (root, fd 3 = the .atelier dirfd) and the
-// image's session supervisor (uid 1000 + [AGENT_DATA_GID]) in parallel, restarts the host alone
-// with backoff, and mirrors the session supervisor's exit. It never exits for a policy reason.
+// image's session supervisor (uid 1000 + [AGENT_DATA_GID]) in parallel, and restarts EITHER child in
+// place under the storm rule (at once, then 0.5 s doubling to 30 s, parked after 10 exits in 10 min) —
+// an agent death never touches the host (PLAN §4.3). It exits only on SIGTERM (mirroring the session
+// supervisor's code), a failed plan step (2), or a PARKED HOST (HOST_PARKED_EXIT: a Running pod with no
+// host is deaf to the shell and the probe alike, so the container ends and the kubelet's backoff owns it).
 // Everything with a side effect is injected (os, io, clock, exit, signals) so the tests drive it.
 import fs from 'node:fs'
 import path from 'node:path'
@@ -16,6 +19,11 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 export const HOST_ENTRY = path.join(here, 'index.mjs')            // /app/host/index.mjs in the image
 export const SESSION_SUPERVISOR = '/app/session-supervisor.mjs'   // the image's, not in this repo
 export const RESTART = Object.freeze({ baseMs: 500, capMs: 30_000, parkExits: 10, windowMs: 600_000, supKillMs: 10_000 })
+/** The container's exit code once the HOST parked (review 2026-08-30): the pod would otherwise stay Running with no
+ *  host — unready to kube (host-ready gone), deaf to the shell, the spine still pasting — and nothing restarts a
+ *  parked host. Ending the container non-zero hands the storm to the kubelet's backoff and the spine's condemn
+ *  at ≥ 40 s, the one path that rebuilds it. Distinct from 2 (a failed plan step). */
+export const HOST_PARKED_EXIT = 3
 
 export function config(env) {
   return {
@@ -90,6 +98,12 @@ export const exitCode = (r) => (!r ? 1 : r.signal ? 128 + (osConstants.signals[r
 /** Restart delay after the n-th host exit inside the window: the first at once (one crash is not a loop; the
  *  blink is the host's boot alone), then 0.5 s doubling, capped at 30 s. */
 export const backoffMs = (exitsInWindow) => (exitsInWindow <= 1 ? 0 : Math.min(RESTART.capMs, RESTART.baseMs * 2 ** (exitsInWindow - 2)))
+/** The storm rule, per child: the exit times still inside the window plus this one, and the restart delay —
+ *  `null` = parked (the 10th exit in 10 min). One rule for the host and the session supervisor. */
+export function storm(exitTimes, now) {
+  const times = exitTimes.filter((t) => now - t < RESTART.windowMs).concat(now)
+  return { times, delay: times.length >= RESTART.parkExits ? null : backoffMs(times.length) }
+}
 
 /** Every process whose real uid is a worker's (WORKER_UID_BASE…WORKER_UID_MAX), from /proc — the workers a dead
  *  host left behind (they are detached process groups; nothing else reaps them). `readdir`/`read` injectable. */
@@ -124,7 +138,11 @@ export function createLauncher(d) {
   const sessionArgv = d.sessionArgv ?? ['node', SESSION_SUPERVISOR]
   const t0 = clock.now()
   const say = (m) => log(`[launcher] +${((clock.now() - t0) / 1000).toFixed(2)}s ${m}`)
-  const st = { dirfd: null, host: null, sup: null, supResult: null, exiting: false, parked: false, exits: 0, exitTimes: [], timer: null, deadline: null }
+  const st = {
+    dirfd: null, host: null, sup: null, supResult: null, exiting: false, deadline: null,
+    parked: false, exits: 0, exitTimes: [], timer: null,              // the host's storm state (`exits` = the launcher-life total, the crash line's)
+    supParked: false, supExits: 0, supExitTimes: [], supTimer: null,  // the session supervisor's
+  }
 
   // Fires fn once per child: on 'exit', or on 'error' (a spawn failure, or a kill EPERM) — logged, treated as exited.
   const once = (child, label, fn) => {
@@ -152,12 +170,28 @@ export function createLauncher(d) {
     sweepWorkers()
     const now = clock.now()
     st.exits += 1
-    st.exitTimes = st.exitTimes.filter((t) => now - t < RESTART.windowMs).concat(now)
+    const { times, delay } = storm(st.exitTimes, now)
+    st.exitTimes = times
     reportCrash({ at: now, code, signal, exits: st.exits })
-    if (st.exitTimes.length >= RESTART.parkExits) { st.parked = true; say(`host: parked after ${RESTART.parkExits} exits/${RESTART.windowMs / 60_000} min`); return }
-    const delay = backoffMs(st.exitTimes.length)
-    say(`host: restart in ${delay} ms (exit ${st.exitTimes.length} in window)`)
+    if (delay === null) { parkHost(); return }
+    say(`host: restart in ${delay} ms (exit ${times.length} in window)`)
     st.timer = clock.setTimeout(spawnHost, delay)
+  }
+
+  // A parked host ends the container (HOST_PARKED_EXIT above). Its workers are already gone (sweepWorkers ran on
+  // the exit; a host that tore itself down took them with it); the session supervisor is SIGTERMed now — its own
+  // drain (the sentinel dropped, claude's tmux ended) — and SIGKILLed after supKillMs; the container exits
+  // HOST_PARKED_EXIT once it is gone, whatever code it exits with.
+  function parkHost() {
+    st.parked = true
+    st.exiting = true
+    say(`host: parked after ${RESTART.parkExits} exits/${RESTART.windowMs / 60_000} min — ending the container (exit ${HOST_PARKED_EXIT}) for the kubelet's backoff; session supervisor SIGTERM first`)
+    if (st.supTimer) { clock.clearTimeout(st.supTimer); st.supTimer = null }
+    if (st.sup) {
+      kill(st.sup, 'SIGTERM')
+      st.deadline = clock.setTimeout(() => { if (st.sup) { say(`session supervisor: SIGKILL after ${RESTART.supKillMs} ms`); kill(st.sup, 'SIGKILL') } }, RESTART.supKillMs)
+    }
+    settle()
   }
 
   // A host that died without its teardown (kill -9, a crash) leaves its workers running as detached process
@@ -177,31 +211,39 @@ export function createLauncher(d) {
   }
 
   function spawnSup() {
+    st.supTimer = null
     const child = os.spawn({ argv: sessionArgv, env: sessionEnv(env), cwd: cfg.work, uid: AGENT.uid, gid: AGENT.gid, groups: [AGENT_DATA_GID], umask: 0o022, stdio: ['ignore', 'inherit', 'inherit'] })
     st.sup = child
     say(`session supervisor: spawned pid ${child.pid} uid ${AGENT.uid}:${AGENT.gid} groups [${AGENT_DATA_GID}]`)
-    once(child, 'session supervisor', onSupExit)
+    once(child, 'session supervisor', (code, signal) => onSupExit(child, code, signal))
   }
 
-  function onSupExit(code, signal) {
+  // An agent death never touches the host (PLAN §4.3; review 2026-08-30 — mirroring the exit restarted the whole
+  // container, blinked every app and rode the CrashLoopBackOff tail for a tmux timeout): the session supervisor is
+  // respawned in place under the same storm rule as the host. Its boot is written for a restart inside one pod
+  // (the image's launch chain: continue → fresh, the sentinel rewritten). Parked, it leaves the host serving and
+  // the pod Ready; the spine's supervisor-silent verdict (the stale /control/.supervisor-ready) owns the pod then —
+  // condemned when no app is served, released otherwise (C13) — and a SIGTERM still mirrors the last exit.
+  function onSupExit(child, code, signal) {
+    if (child !== st.sup) return
     st.sup = null
     st.supResult = { code, signal }
     say(`session supervisor: exited code=${code} signal=${signal}`)
-    if (!st.exiting) {
-      st.exiting = true
-      if (st.timer) clock.clearTimeout(st.timer)
-      if (st.host) {
-        kill(st.host, 'SIGTERM')
-        st.deadline = clock.setTimeout(() => { if (st.host) { say(`host: SIGKILL after ${RESTART.supKillMs} ms`); kill(st.host, 'SIGKILL') } }, RESTART.supKillMs)
-      }
-    }
-    settle()
+    if (st.exiting) { settle(); return }
+    const now = clock.now()
+    st.supExits += 1
+    const { times, delay } = storm(st.supExitTimes, now)
+    st.supExitTimes = times
+    if (delay === null) { st.supParked = true; say(`session supervisor: parked after ${RESTART.parkExits} exits/${RESTART.windowMs / 60_000} min — the host keeps serving; the spine's supervisor-silent verdict owns the pod now`); return }
+    say(`session supervisor: restart in ${delay} ms (exit ${times.length} in window)`)
+    st.supTimer = clock.setTimeout(spawnSup, delay)
   }
 
   function onTerm() {
     if (st.exiting) return
     st.exiting = true
     if (st.timer) clock.clearTimeout(st.timer)
+    if (st.supTimer) clock.clearTimeout(st.supTimer)
     const budget = Math.max(1, cfg.graceS - 5) * 1000
     say(`SIGTERM: host first, session supervisor next, ${budget} ms for the teardown`)
     if (st.host) kill(st.host, 'SIGTERM')
@@ -217,8 +259,8 @@ export function createLauncher(d) {
   function settle() {
     if (!st.exiting || st.host || st.sup) return
     if (st.deadline) clock.clearTimeout(st.deadline)
-    const code = exitCode(st.supResult)
-    say(`exit ${code} (session supervisor code=${st.supResult?.code} signal=${st.supResult?.signal})`)
+    const code = st.parked ? HOST_PARKED_EXIT : exitCode(st.supResult)
+    say(`exit ${code} (${st.parked ? 'host parked; ' : ''}session supervisor code=${st.supResult?.code} signal=${st.supResult?.signal})`)
     exit(code)
   }
 

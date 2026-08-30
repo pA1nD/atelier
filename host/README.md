@@ -13,7 +13,8 @@ host/
                        registrar/transport → events → supervisor(spawn, proxy, jail, install) → watchdog →
                        protocol server + dev shell → boot order → host-ready → scan → teardown on SIGTERM
   entrypoint.sh        PID 1 in the pod (bash reaper) → launcher.mjs
-  launcher.mjs         root: the boot plan (markers, tokens), spawns the host (fd 3 = .atelier dirfd) and the session supervisor
+  launcher.mjs         root: the boot plan (markers, tokens), spawns the host (fd 3 = .atelier dirfd) and the session supervisor;
+                       restarts either in place (0.5→30 s, parked after 10 exits/10 min); a parked host ends the container (exit 3)
   hygiene.mjs          env rows, constants, the boot plan as data
   adapters/os.mjs      linuxRoot() | unprivileged() | memory() — every privileged/Linux-only call
   supervisor/          discovery, watcher, bundle, tailwind, last-good store, serve, the Supervisor

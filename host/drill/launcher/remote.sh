@@ -6,7 +6,7 @@
 #   3 kill -9 the host: new host pid, launcher+supervisor pids unchanged, Ready back ≤ 3 s, one .host-crash
 #     line owned 1000, peer curl loop at 50 ms → ≤ 2 non-200
 #   4 kill -TERM 1 → exit 1 mirrored (host torn down first) → in-place container restart → Ready again, tokens re-minted, session dir reclaimed
-#   5 ten host kills in the second life → parked, pod stays Running, supervisor untouched
+#   5 ten host kills in the second life → parked → the container ends (exit 3, supervisor SIGTERMed first) → kubelet restart → Ready again
 #   6 pod delete with grace 40 → SIGTERM order in the logs, host teardown before PID 1 exits, termination ≤ 40 s
 set -u
 NS=spike-host-launcher; K="kubectl -n $NS"; CODE=/tmp/spike-host-launcher-code; OUT=$CODE/out; mkdir -p $OUT; rm -f $OUT/*
@@ -102,23 +102,30 @@ PREV=$($K logs computer -c session --previous 2>&1); echo "$PREV" | grep -q 'SIG
 echo "$PREV" | grep -q '\[host-stub\] SIGTERM → teardown' || fail "row 4: the host was not signalled before exit"
 echo "$PREV" | grep -E 'SIGTERM|exit|teardown' | sed 's/^/    | prev: /'
 
-log "row 5: ten host kills inside 10 min (second life) → parked; restart delays 0.5,1,2,4,8,16,30,30,30 s ≈ 2 min"
+log "row 5: ten host kills inside 10 min (second life) → parked → the container ENDS (exit 3, supervisor SIGTERMed first) → kubelet restart → Ready again; restart delays 0.5,1,2,4,8,16,30,30,30 s ≈ 2 min"
 S2=$(suppid); t0=$(now); n=0
 for i in $(seq 1 10); do
   hp=""; for j in $(seq 1 400); do hp=$(hostpid); [ -n "$hp" ] && break; sleep 0.1; done
   [ -z "$hp" ] && { fail "row 5: no host to kill at iteration $i"; break; }
   X "kill -9 $hp"; n=$((n+1)); sleep 0.3
 done
-sleep 3
-PARK=$($K logs computer -c session 2>&1 | grep -c 'host: parked after 10 exits/10 min')
+# the third life: the parked host ended the second (exit 3 = HOST_PARKED_EXIT); the kubelet's backoff (10–20 s, the
+# second restart in this pod) and a restart over the same /run/atelier — Ready again, a new supervisor pid
+RC5=""; for i in $(seq 1 600); do RC5=$($K get pod computer -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null); [ "$RC5" = 2 ] && break; sleep 0.2; done
+EXIT5=$($K get pod computer -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null)
+R5=$(waitready 120)
+PREV5=$($K logs computer -c session --previous 2>&1)
+PARK=$(echo "$PREV5" | grep -c 'host: parked after 10 exits/10 min')
 LINES=$(X "$AS1000 sh -c 'wc -l < /control/.host-crash'" | tr -d ' \r\n')
-log "row 5: $n kills in $(el $t0) s; parked lines=$PARK; .host-crash lines=$LINES (1 from row 3 + 10); host pid now=[$(hostpid)]; $(readyq)"
-[ "$PARK" = 1 ] || fail "row 5: no park line after 10 exits"
+log "row 5: $n kills in $(el $t0) s; parked lines=$PARK; container exit=$EXIT5 rc=$RC5; Ready again in $R5 s; .host-crash lines=$LINES (1 from row 3 + 10); $(readyq)"
+[ "$PARK" = 1 ] || fail "row 5: no park line in the second life's log after 10 exits"
+[ "$EXIT5" = 3 ] || fail "row 5: the parked host's container exit is [$EXIT5] (want 3 = HOST_PARKED_EXIT)"
+echo "$PREV5" | grep -q 'exit 3 (host parked' || fail "row 5: the second life did not exit for the park"
+[ "$R5" != timeout ] || fail "row 5: not Ready again after the kubelet restart"
 [ "$LINES" = 11 ] || fail "row 5: .host-crash has $LINES lines (want 11)"
-[ -z "$(hostpid)" ] || fail "row 5: a host is still being restarted while parked"
-case "$(readyq)" in "False rc=1 phase=Running") ;; *) fail "row 5: pod state while parked: $(readyq) (want unready, rc=1, Running)";; esac
-[ "$(suppid)" = "$S2" ] || fail "row 5: supervisor pid changed during the storm"
-$K logs computer -c session 2>&1 | grep 'host: restart in' | sed 's/^/    | /'
+[ "$(suppid)" != "$S2" ] || fail "row 5: the supervisor pid did not change — the container did not restart"
+[ -n "$(hostpid)" ] || fail "row 5: no host in the third life"
+echo "$PREV5" | grep -E 'host: restart in|host: parked|session supervisor: (exited|SIGKILL)|^.*exit 3' | sed 's/^/    | prev: /'
 X "$AS1000 sh -c 'stat -c \"%u:%g %a\" /control/.host-crash; tail -2 /control/.host-crash'" | sed 's/^/    | /'
 
 log "row 6: pod delete with grace 40 → SIGTERM order, host teardown, termination time"
