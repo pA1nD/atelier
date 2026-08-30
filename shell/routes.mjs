@@ -16,8 +16,10 @@
 //   4c fetches      session-first: identity fails → 401 {} without Location → Host = path
 //                   company (fleet) → reserved company heads → 404                            both
 //   5  presence     registry.resolve → 404; registry.present → 404 (same as a stranger); the
-//                   chrome's /modules/global/<chrome>/* and /api/global/<chrome>/* are session-
-//                   gated only (no presence); the assertion carries the chrome row's instance   both
+//                   chrome's /modules/<chrome qid>/* and /api/<chrome qid>/* are session-gated
+//                   only (no presence) on EVERY origin, served by the host of the qid's company
+//                   (the fleet: `portal/catalyst-chrome` from the system host; locally the staged
+//                   `global/<chrome>`); the assertion carries the chrome row's instance          both
 //   6  Origin       gate.origin on writes + the WS upgrade, only when the credential is a cookie both
 //   7  authorize    the per-app hook — none in 2.0.0 (presence is the ACL); a visible no-op    both
 //   8  proxy        /api, /modules through hostLink; /_atelier/{ws,whoami,report,topics,rail,wake}  both
@@ -212,8 +214,13 @@ export async function laneFetch(ctx) {
     }
     return null
   }
-  // the chrome's /modules/global/<chrome>/* and /api/global/<chrome>/* (its backend) are not company
-  // paths: they are served on every company origin (§2.2; PLAN §4.1 — the chrome is not an app)
+  // the chrome's /modules/<qid>/* and /api/<qid>/* (its backend) are not company paths: the ONE chrome the
+  // Host company's registry names — the fleet answers the system host's `portal/catalyst-chrome` for every
+  // company, locally `global/<chrome>` — is served on every origin (§2.2; PLAN §4.1 — the chrome is not an
+  // app). The fleet registry learns a company's chrome when it reads the company's rows, so a cross-company
+  // fetch reads them first (cached per TTL — one spine call, never one per request) before the comparison:
+  // a fresh replica's first `kit.js` on a company origin must not be a 404.
+  if (ctx.hostCompany && ctx.route.company !== ctx.hostCompany) await ctx.providers.registry.apps(ctx.hostCompany)
   const isChrome = `${ctx.route.company}/${ctx.route.slug}` === chromeOf(ctx, ctx.hostCompany ?? ctx.route.company)
   if (ctx.hostCompany && ctx.route.company !== ctx.hostCompany && !isChrome) return jsonR('fetch', 404, {})
   ctx.company = isChrome ? (ctx.hostCompany ?? ctx.route.company) : ctx.route.company
@@ -227,16 +234,17 @@ export async function lanePresence(ctx) {
   const { company, slug } = ctx.route
   const registry = ctx.providers.registry
   const qid = `${company}/${slug}`
-  // the chrome (assets and its backend) is not an app: session-gated only, exempt from presence. It is
-  // served by the Host company's host, under that company's registry row (locally the staged
-  // `global/<chrome>` row; the host verifies the assertion's `app` against the row's instance, so a
-  // synthetic id would be a 401 there). No row → 404 with a log line: the fleet's chrome delivery
-  // (the shell serving the pinned digest, PLAN §10 item 6) is not built.
+  // the chrome (assets and its backend) is not an app: session-gated only, exempt from presence. Its row
+  // lives on the QID'S company — the fleet's `portal/catalyst-chrome` is the system host's row on company
+  // `portal`, named by every company's registry and served to every company origin (a chat's pod carries
+  // no chrome of its own); locally the staged `global/<chrome>` row. The proxy dials that company's host,
+  // and the host verifies the assertion's `app` against the row's instance (a synthetic id would be a 401
+  // there). No row → 404 with a log line: chrome delivery by digest per computer (PLAN §10 item 6) is step 7.
   const chromeCompany = ctx.hostCompany ?? (registry.companies?.() ?? []).find((c) => c.id === company)?.id ?? (registry.companies?.() ?? [])[0]?.id ?? company
   if (qid === chromeOf(ctx, chromeCompany)) {
-    const row = await registry.resolve(chromeCompany, slug)
-    if (!row) { ctx.log(`presence: 404 chrome ${qid} has no registry row on ${chromeCompany} (PLAN §10 item 6)`); return jsonR('presence', 404, {}) }
-    ctx.app = { ...row, chrome: true }; ctx.appCompany = chromeCompany
+    const row = await registry.resolve(company, slug)
+    if (!row) { ctx.log(`presence: 404 chrome ${qid} has no registry row on ${company} (PLAN §10 item 6)`); return jsonR('presence', 404, {}) }
+    ctx.app = { ...row, chrome: true }; ctx.appCompany = company
     return null
   }
   const row = await registry.resolve(company, slug)
@@ -264,7 +272,9 @@ export async function laneProxy(ctx) {
     const hostRow = await registry.host(ctx.appCompany)
     if (!hostRow || ctx.marks.isWaking(ctx.appCompany, ctx.now(), registry)) { ctx.req.resume(); return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' }) }
     const app = ctx.app.chrome ? { instance: ctx.app.instance, company: ctx.app.company, slug: ctx.app.slug } : ctx.app
-    const out = await proxyRequest({ req: ctx.req, res: ctx.res, hostLink, hostRow, app, person: ctx.person, credential: ctx.credential, companyOrigin: ctx.cfg.origin(ctx.appCompany), forwardPath: ctx.forward, log: ctx.log })
+    // the host is the app's company's (the chrome's: the system host); the origin the answer is served on is
+    // this request's (`ctx.company` = the Host company in the fleet) — an ACAO may match only that one
+    const out = await proxyRequest({ req: ctx.req, res: ctx.res, hostLink, hostRow, app, person: ctx.person, credential: ctx.credential, companyOrigin: ctx.cfg.origin(ctx.company ?? ctx.appCompany), forwardPath: ctx.forward, log: ctx.log })
     if (out.error === 'DIAL' || out.error === 'TIMEOUT') ctx.marks.mark(ctx.appCompany, ctx.now())
     return { lane: 'proxy', handled: true }
   }
