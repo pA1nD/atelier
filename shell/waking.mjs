@@ -4,13 +4,14 @@
 // `Cache-Control: no-store`, a 2 s JS poll of `/_atelier/wake?company=<c>[&app=<slug>]` that
 // reloads on `{ok:true}` — BOUNDED (review 2026-08-30, C13): nothing in the fleet wakes a chat pod
 // outside a turn (the wake verb is step 7's sleep/wake), so after WAKE_GIVE_UP_MS of `{ok:false}` the
-// page stops polling and says so honestly — the computer is asleep, a message in its chat wakes it.
+// page stops polling and says so honestly — the computer is asleep, this page no longer checks, a
+// message to Bayard in its chat wakes it and the person reloads by hand (nothing reloads for them).
 // No `<meta refresh>`: a reload would re-arm the poll forever. Fetch routes answer `503 {waking:true}`
 // (proxy.mjs) and the client shows its own fallback (client/waking.js — its own backoff is unbounded;
 // R3-12 keeps client/ closed in step 5, named in LANES-STEP5 Deferred).
 export const WAKE_POLL_MS = 2000
 export const WAKE_GIVE_UP_MS = 60_000
-export const ASLEEP_COPY = 'This computer is asleep — send a message in its chat to wake it (it comes back within a minute of your message).'
+export const ASLEEP_COPY = 'This computer is asleep and this page has stopped checking. Send Bayard a message in its chat, wait a minute, then reload this page.'
 export const HEARTBEAT_STALE_MS = 30_000
 export const WAKING_MARK_MS = 2000
 

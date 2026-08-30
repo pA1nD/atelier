@@ -193,6 +193,9 @@ test('local: the host is down → the waking page on documents (503, ≤ 1.2 s),
   assert.ok(doc.text.includes(`until=Date.now()+${WAKE_GIVE_UP_MS}`), 'the deadline is in the page')
   assert.ok(doc.text.includes('if(Date.now()>until){asleep();return}'), 'past the deadline the poll stops')
   assert.ok(doc.text.includes(JSON.stringify(ASLEEP_COPY)), 'the honest copy')
+  // the copy is true once the poll stopped: the page no longer checks, nothing reloads it — the person messages Bayard and reloads by hand
+  assert.match(ASLEEP_COPY, /asleep/); assert.match(ASLEEP_COPY, /stopped checking/); assert.match(ASLEEP_COPY, /Bayard/); assert.match(ASLEEP_COPY, /reload this page/)
+  assert.ok(!/comes back/.test(ASLEEP_COPY), 'no promise the page keeps for the person')
   const api = await r.go('/api/global/todo/x')
   assert.equal(api.status, 503); assert.deepEqual(api.json(), { waking: true }); assert.equal(api.headers.get('x-atelier-waking'), '1')
   assert.deepEqual((await r.go('/_atelier/wake?company=global')).json(), { ok: false, reason: 'DIAL' })
