@@ -496,7 +496,9 @@ the app folder as the current user and skips freeze (logged).
   swap atomically under one rev (a request captures `row.rev` and `row.sock` once); the old worker
   is stopped 500 ms after the swap (§2.3 step 2 shape). If READY fails with `load-failed`
   (`MOUNT-ERROR`) and the old worker exists, retry the mount ONCE after the old worker has exited
-  (the sqlite overlap rule; kill-old-then-mount is not offered in step 2 — §10 item 1 is open).
+  (the sqlite overlap rule; kill-old-then-mount is not offered, and no app declares exclusive data:
+  the single retry after the old worker exits SUFFICES — 10/10 saves LIVE, exactly one retry each, in
+  the rows drill's row 5, and PLAN §10 item 1 is ruled that way).
 - Old revisions: the previous rev dir is kept and addressable via `?rev=N` for 10 min after a swap,
   then pruned; `current` always names the live one.
 - Idle-stop (R14): only when the READY report's `resources` is empty (nothing but the IPC server) or
@@ -725,12 +727,14 @@ are sites (a) and (b).
    body is closed to `{slug, company, meta, computer}`).
 7. **`visibility` in module.json** — the agent-contract-2 skill mentions it; OR8/§12 and
    protocol/registry drop it. The registrar ignores it (dropped key); the skill is updated in step 3.
-8. **sqlite overlap (§10 item 1, gating)** — default in force: load-beside + one mount retry after
-   the old worker exits; no `exclusiveData` declaration in step 2.
+8. **sqlite overlap (PLAN §10 item 1, ruled)** — load-beside + one mount retry after the old worker
+   exits; no `exclusiveData` declaration. Measured in the rows drill's row 5 (10/10 LIVE, one retry
+   per save), so the retry is the answer and not a placeholder for one.
 9. **Host vs session supervisor naming** — "host supervisor" in the plan = `host/index.mjs` +
    `supervisor/`; "session supervisor" = the image's uid-1000 process, spawned but not built here.
-10. **Chrome source** — a folder (`ATELIER_CHROME_DIR`); the pinned-digest fetch of §10 item 6 is
-    step 5. No chrome → app-less documents and pass-through app CSS.
+10. **Chrome source** — a folder (`ATELIER_CHROME_DIR`); the pinned-digest fetch is step 7 (PLAN §4.9
+    step 7, where chrome delivery is ruled to land). No chrome → app-less documents and pass-through
+    app CSS.
 11. **Readiness probe** — the host writes `/run/atelier/host-ready`; the step-1 probe still reads
     `/control/.supervisor-ready` until the step-5 pod spec moves it (nothing in step 2 edits a spec).
 12. **HOST/PORT/BASE_URL for workers** — `BASE_URL = ctx.baseUrl`
@@ -1069,8 +1073,9 @@ root, caps `{SETUID,SETGID,CHOWN,KILL}` — **no DAC_OVERRIDE**, no fsGroup, `re
   `1000:1000 0600 {signal:SIGKILL, exits:1}`; `kill -TERM 1` → supervisor exit 1 mirrored as the
   container exit, in-place restart, dev token re-minted, the `session` dir reclaimed; ten kills →
   parked at 10/10 min → the container ends (exit 3, the supervisor SIGTERMed first) → the kubelet
-  restarts it → Ready again, 11 crash lines (row 5's expectation since 2026-08-30; its re-run on
-  fsn-01 is owed — the measured pass predates the rule); pod delete grace 40 → gone in ~1 s.
+  restarts it → Ready again, 11 crash lines (row 5's expectation since 2026-08-30, re-run on
+  fsn-01 2026-08-31 against image `0f4fb94c` and PASS: 10 kills in 111.02 s → park → container exit 3
+  → kubelet restart → Ready 0.65 s); pod delete grace 40 → gone in ~1 s.
 - **`drill/rows/`** (rows 5–8 on the INTEGRATED host, step-2's pod + fake spine): apps `probe`,
   `hello`, `locker`, `deps` copied in as uid 1000 after Ready; queried through the dev shell on
   loopback with the dev token.
