@@ -1,0 +1,82 @@
+== process tree
+       PID    PPID   UID   GID COMMAND         COMMAND
+         1       0     0     0 bash            bash /code/host/entrypoint.sh
+        11       1     0     0 MainThread      node /code/host/launcher.mjs
+        19      11     0     0 MainThread      node /code/host/index.mjs
+        20      11  1000  1000 MainThread      node /app/session-supervisor.mjs
+        51       0     0     0 bash            bash /tmp/inpod.sh
+        59      51     0     0 sed             sed s/^/   /
+PASS PID 1 is bash = bash
+PASS launcher pid 11 (ppid 1, uid 0)
+PASS host pid 19
+PASS session supervisor pid 20
+PASS host uid = 0
+PASS host fd 3 → /work/.atelier = /work/.atelier
+PASS launcher holds the dirfd too = 1
+PASS session supervisor uid = 1000
+PASS session supervisor gid = 1000
+PASS session supervisor supplementary groups = 19999
+PASS host supplementary groups (root's, empty) = 
+PASS host umask = 0077
+PASS session supervisor umask = 0022
+PASS host cwd = /
+PASS session supervisor cwd (as uid 1000: no DAC_OVERRIDE for root) = /work
+PASS host CapEff = 00000000000000e1
+PASS session supervisor CapEff = 0000000000000000
+== env rows (from /proc/<pid>/environ)
+PASS H: ATELIER_DIRFD = ATELIER_DIRFD=3
+PASS H: no ATELIER_BOOTSTRAP = 0
+PASS H: no CHANNEL_* = 0
+PASS H: HOME = HOME=/root
+PASS H: ATELIER_SPINE_URL = pod CHANNEL_URL = ATELIER_SPINE_URL=http://127.0.0.1:9
+PASS S: no ATELIER_BOOTSTRAP = 0
+PASS S: no ATELIER_* = 0
+PASS S: CHANNEL_TOKEN kept = CHANNEL_TOKEN=canary-channel-token
+PASS S: HOME = HOME=/work
+PASS S: PERSONA_TEXT kept = 1
+   H keys: ATELIER_CONTROL ATELIER_DIRFD ATELIER_RUN ATELIER_SPINE_URL ATELIER_WORK HOME LANG LC_ALL NODE_ENV PATH PWD TERM 
+   S keys: CHANNEL_CHAT CHANNEL_TOKEN CHANNEL_URL CHAT_ID DISABLE_AUTOUPDATER HOME HORSE_BROWSER_BIN HORSE_BROWSER_UNATTENDED LANG LC_ALL NPM_CONFIG_PREFIX PATH PERSONA PERSONA_TEXT PIP_USER PWD STORY_TEXT TERM 
+PASS /proc/1/environ unreadable by uid 1000 = 1
+== filesystem contract (DESIGN §3 rows the launcher owns)
+PASS /work = 1000:1000 755
+PASS /work/lost+found = 1000:1000 700
+PASS /work/apps = 1000:1000 755
+PASS /work/.atelier = 0:0 711
+PASS /work/.atelier/data = 0:0 711
+PASS /work/.atelier/last-good = 0:0 711
+PASS /work/.atelier/scratch = 0:0 711
+PASS /run/atelier = 0:0 711
+PASS /run/atelier/dev = 0:1000 710
+PASS /run/atelier/session = 1000:1000 700
+PASS /run/atelier/session/dev.token (as its owner) = 1000:1000 400
+PASS /run/atelier/dev.token = 0:0 400
+PASS /run/atelier/bootstrap.token = 0:0 400
+PASS /run/atelier/host-ready = 0:0 644
+PASS /tmp/tmux-1000 = 1000:1000 700
+PASS /tmp/.X11-unix = 0:0 1777
+PASS /control = 1000:1000 700
+== tokens
+PASS bootstrap.token content = canary-bootstrap-secret
+PASS dev.token is 64 hex
+PASS session copy equals the host copy (read as its owner) = 9946778495d4bb96ae619703ccca57b731ac6b4a7eb9390cb2837d4a676452f2
+PASS uid 1000 reads its copy = 9946778495d4bb96ae619703ccca57b731ac6b4a7eb9390cb2837d4a676452f2
+PASS uid 1000 cannot read the host copy = 1
+PASS uid 1000 cannot read bootstrap.token = 1
+PASS uid 20001 cannot read the session copy = 1
+PASS uid 20001 cannot list /run/atelier/dev = 1
+PASS uid 1000 can traverse /run/atelier/dev (0710 group x, no list) = ok
+== root-owned inodes in /work + /control as uid 1000 (.atelier excluded by design)
+PASS count outside .atelier = 0
+   .atelier tree (root by design): 711 root:root /work/.atelier|711 root:root /work/.atelier/last-good|711 root:root /work/.atelier/data|711 root:root /work/.atelier/scratch|
+PASS uid 1000 can rename .atelier (owner of /work; the host works through the dirfd) = renamed
+PASS host fd 3 still resolves after the rename round trip = /work/.atelier
+PASS root cannot create in 1000-owned /work (why markers come first) = 1
+== the tmux socket-dir rule and the X11 dir
+PASS tmux as uid 1000 through /tmp/tmux-1000 = rc=0
+PASS uid 1000 can create under /tmp/.X11-unix = ok
+== node --test host/test/launcher*.test.js inside the pod (Linux, root)
+   ℹ tests 31
+   ℹ pass 31
+   ℹ fail 0
+PASS node --test rc = 0
+INPOD: pass=61 fail=0
