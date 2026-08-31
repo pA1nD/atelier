@@ -69,7 +69,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       instance, slug, uid, company: co, dir, meta: null,
       dataDir: realPath(os.at(dirfd, `data/${instance}`)), tmpDir: realPath(os.at(dirfd, `tmp/${instance}`)),
       sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
-      state: 'unclaimed', claimed: false, rev: null, live: null, retiring: new Set(), kept: [], counter: 0, fingerprint: null,
+      state: 'unclaimed', claimed: false, rev: null, live: null, retiring: new Set(), kept: [], counter: 0, fingerprint: null, attempted: null,
       building: null, pending: false, broken: null, watcher: null, installing: null, git: Promise.resolve(),
       resources: null, suspendable: false, lastServedAt: 0, inflight: 0, idleTimer: null, restarts: 0, resuming: null,
       savedAt: null, tailwindWarm: false,
@@ -177,13 +177,21 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       verdict(row, savedAt, 'error')
       return null
     }
+    // `row.attempted` = the folder state this build is reading, recorded BEFORE the first failure
+    // path (§6.1: the sweep "rebuilds only folders whose fingerprint differs from what was last
+    // built"). A build that FAILED is this folder's answer, not work the next sweep owes: the rev
+    // counter bumps on LIVE and FAILED alike, so retrying an unchanged folder would mint a rev
+    // every 30 s, and a new rev reads downstream as a new SAVE — the app-error fold is per
+    // (instance, rev) so the save's verdict is never swallowed (protocol/app-errors). The agent
+    // would hear the identical `file:line` again and again for one broken save.
+    const fp = withGroupSync(row.uid, () => fingerprint(row.dir, fs).hash)
+    row.attempted = fp
     const mj = withGroupSync(row.uid, () => checkModuleJson(row.dir, fs))
     if (!mj.ok) return fail([mj.error])
     if (JSON.stringify(mj.meta) !== JSON.stringify(row.meta)) {
       row.meta = mj.meta
       try { await registrar?.claim?.({ slug: row.slug, meta: mj.json, dir: row.dir }) } catch (e) { emit(`[${row.slug}] meta update: ${e.message}`) }
     }
-    const fp = withGroupSync(row.uid, () => fingerprint(row.dir, fs).hash)
     let backend, frontend, sheet
     try {
       ;[backend, frontend, sheet] = await withGroup(row.uid, () => Promise.all([
@@ -327,6 +335,17 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
   // --- discovery / claim / watch ------------------------------------------------------------
   const rowBySlug = (slug) => [...rows.values()].find((r) => r.slug === slug && r.state !== 'unclaimed')
+  // needsBuild(row) — the question the 30 s sweep asks (§6.1, index.mjs RESCAN_MS): has the folder
+  // changed since the last state this supervisor built? That state is `row.attempted` — set by
+  // build() whatever the outcome was — falling back to the live rev's `fingerprint` from
+  // revision.json for a boot row that has not built in this host life. `null` = never built.
+  // The sweep is a NET under the per-app watcher (an inotify overflow, a watch that died), not a
+  // retry loop: a folder whose fingerprint is unchanged has already had its answer, LIVE or FAILED.
+  const needsBuild = (row) => {
+    const built = row.attempted ?? row.fingerprint
+    if (built == null) return true
+    return withGroupSync(row.uid, () => fingerprint(row.dir, fs).hash) !== built
+  }
   // claimFolder(app, existing) — registrar.claim for a new folder, or the re-claim (adopt) of a boot row
   // on the first scan; a refusal leaves no row (the registrar wrote CLAIM-REFUSED.txt as uid 1000).
   async function claimFolder(app, existing = null) {
@@ -374,7 +393,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     takeSave(row)
     if (row.watcher) { row.watcher.stop(); row.watcher = null }
     const live = row.live
-    row.live = null; row.state = 'unclaimed'; row.claimed = false
+    row.live = null; row.state = 'unclaimed'; row.claimed = false; row.attempted = null   // a folder that leaves and comes back is built again, whatever its mtimes say
     if (live) await stopLive(row, live, 'folder-gone')
     emit(`[${row.slug}] folder removed — unlinked (snapshot kept ${row.rev != null ? `at rev ${row.rev}` : ''})`)
     if (unlink) { try { await registrar?.unlink?.(row.instance) } catch (e) { emit(`[${row.slug}] unlink: ${e.message}`) } }
@@ -413,8 +432,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       }
       for (const p of d.problems) {
         const row = rowBySlug(p.slug)
-        if (row) rebuild(row)
-        else emit(`[${p.slug}] ${formatHint(p.error)}`)
+        if (!row) { emit(`[${p.slug}] ${formatHint(p.error)}`); continue }
+        if (needsBuild(row)) rebuild(row)   // a module.json that still does not parse is the same folder: one report, not one per sweep
       }
       for (const r of d.refused) {
         try { await registrar.claim({ slug: r.slug, meta: {}, dir: r.dir }) } catch {}
@@ -427,8 +446,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
           if (!row) continue
         }
         watchRow(row)
-        const fp = withGroupSync(row.uid, () => fingerprint(row.dir, fs).hash)
-        if (row.rev == null || fp !== row.fingerprint) rebuild(row)
+        if (needsBuild(row)) rebuild(row)
       }
       // boot reconcile (PLAN §4.3): the registrar tombstones rows with no folder on disk — the DISCOVERED
       // folders are its input (a boot row restored from last-good is not a folder); every row it
