@@ -44,7 +44,7 @@ createShell({ cfg, providers: { identity, registry, gate, bus, hostLink }, log }
 ```js
 identity.kind                                   // 'fleet' | 'local'
 identity.resolve(req) → Promise<
-    { ok: true,  person: {id, name, claims}, credential: 'cookie' | 'none', epoch: number|null }
+    { ok: true,  person: {id, name, claims}, credential: 'cookie' | 'none', epoch: number|null, op: boolean }
   | { ok: false, reason: 'no-session' | 'revoked' }>
 identity.session(req) → the raw session id or null      // fleet: the `__Host-session` cookie value; local: null
 ```
@@ -53,6 +53,7 @@ identity.session(req) → the raw session id or null      // fleet: the `__Host-
 |---|---|---|
 | source | `__Host-session` cookie → spine store `{person, epoch, aud}`; `aud` must equal the request's company; `membership.checkSession(session, currentEpochOf)` — a bumped person epoch is `revoked` (§4.1 Cookie, §4.5) | constant: `{ok:true, person:{id:'local', name:'local', claims:{}}, credential:'none', epoch:null}` — the host's dev-shell principal (`registrar.principal` in local mode is the same `{id:'local', name:'local'}`) |
 | `credential` | `'cookie'` — this is what turns the Origin lane on (§1.3) | `'none'` — the Origin lane evaluates to a no-op by the **same rule** ("Origin iff the credential is a cookie", OR12); nothing is skipped here |
+| `op` | `true` on an operator session — the spine marks the row its operator door mints (`op` on the row, and `op: true` in the person's claims through the portal); it admits `GET /_atelier/metrics` (§3.6) and nothing else: rows, presence and the proxy are unchanged by it | `false` — local mode admits the metrics route by mode instead: the shell IS the operator's process |
 | what the shell stamps into the assertion | `person` from the session | `person` = the constant |
 | SKIPPED locally | the session store, the person epoch, the `aud` check — there is no session at all (identity is the process's) | |
 
@@ -67,6 +68,7 @@ registry.present(personId, instance) → Promise<boolean>     // the ACL (§4.1 
 registry.host(company)          → Promise<HostRow | null>   // HostRow = {hostId, epoch, token, ip, port, tls, heartbeatAt, drainingAt}
 registry.chrome(company)        → {qid, dir|null, digest|null}
 registry.watch(company, fn)     → unsubscribe               // fn() when the app set / meta / primary changed → the shell mints a `company:<id>` frame (§3.4)
+registry.cacheAgeMs()           → ms | null                 // fleet only: the age of the oldest LIVE apps-cache entry (§3.6 cache staleness)
 ```
 
 | | fleet | local |
@@ -192,7 +194,7 @@ The chrome bundle and kit are the host's `/modules/global/<chrome>/{frontend,kit
 | 5 | presence | `registry.resolve(c, s)` → 404; `registry.present(person.id, row.instance)` → 404 (same status as a stranger, 42/42 [S:C3]); the chrome's two paths skip presence (session-gated only) but still need the chrome's registry row on the QID's company (`registry.resolve('portal', 'catalyst-chrome')` in the fleet — the proxy then dials that company's host, the system host; locally the staged `global/<chrome>` row): the assertion's `app` is that row's instance, the one the host verifies; no row → 404 + a log line (chrome delivery by digest per computer, PLAN §10 item 6, is step 7) | both |
 | 6 | Origin | `gate.origin(req, credential)` on `POST/PUT/PATCH/DELETE` and the WS upgrade — only when `credential === 'cookie'`; `Origin: null` → 403 | both (a no-op locally by evaluation) |
 | 7 | authorize | the optional per-app hook — none in 2.0.0 (§9: no read/write gate; presence is the ACL); the lane exists as a no-op function so the order is visible | both |
-| 8 | proxy | `/api` and `/modules` through `hostLink.request` (§3.2–3.3); `/_atelier/ws` upgrade → the events socket (§3.4); `/_atelier/whoami` → `{id, name, anonymous:false}`; `/_atelier/report` (POST, ≤ 64 KiB) → forwarded to the host signed with `app = body.instance` (presence-gated on that instance); `/_atelier/topics/<topic>` → `bus.snapshot(topic, {person})`; `/_atelier/rail` = `bus.snapshot('company:<c>', {person})` — the person's rows; `/api`/`/modules` dial `registry.hostOf(row)` (the app's computer) | both |
+| 8 | proxy | `/api` and `/modules` through `hostLink.request` (§3.2–3.3); `/_atelier/ws` upgrade → the events socket (§3.4); `/_atelier/whoami` → `{id, name, anonymous:false}`; `/_atelier/report` (POST, ≤ 64 KiB) → forwarded to the host signed with `app = body.instance` (presence-gated on that instance); `/_atelier/topics/<topic>` → `bus.snapshot(topic, {person})`; `/_atelier/rail` = `bus.snapshot('company:<c>', {person})` — the person's rows; `/api`/`/modules` dial `registry.hostOf(row)` (the app's computer); `/_atelier/metrics` (GET) → the exposition of §3.6, admitted to an operator session or local mode, 404 otherwise | both |
 
 Anything else → 404 `{}`; a non-GET/HEAD on a document route → 401 `{}` unauthenticated (no `Location`, no ticket mint — PLAN §4.1) and 405 with a session; an Upgrade anywhere but `/_atelier/ws` → 426. The 1.x-only surfaces (`/_atelier/inflight`, `/_atelier/client-errors`, the takeover bootstrap, `observe`) do not exist in 2.0 — they are not "skipped", they are gone (§4.8 N6).
 
@@ -234,6 +236,35 @@ One socket per document; the upgrade runs lanes 0–4c, 6 (Origin iff cookie); `
 ### 3.5 The waking page
 
 The app's host row (`registry.hostOf(row)`; `registry.host(c)` for an app-less document) says waking when `heartbeatAt` is older than 30 s or `drainingAt` is set (fleet), or when `hostLink.probe`/the dial fails within `dialMs` (both modes). The document route then serves the waking page (`shell/waking.mjs`: no chrome, plain, a 2 s JS poll of `/_atelier/wake?company=<c>[&app=<slug>]` that `location.reload()`s on `{ok:true}` — with `app`, that app's host is asked, and only when the person is present on it — and gives up after 60 s: the poll stops and the copy says so — "This computer is asleep and this page has stopped checking. Send Bayard a message in its chat, wait a minute, then reload this page." — because nothing wakes a chat pod outside a turn before step 7's sleep/wake and nothing reloads the page for the person once it stopped; no `<meta refresh>`), status 503, `Retry-After: 3`, `Cache-Control: no-store`. Fetch routes answer `503 {waking:true}` (§3.3) and the client shows its own waking fallback (§4). A dial is capped at **1 s** so a sleeping computer costs one second, never a hung request (§4.3 Network).
+
+### 3.6 Metrics — `GET /_atelier/metrics`
+
+`shell/metrics.mjs`: one collector per shell, read as **Prometheus text exposition** (`text/plain; version=0.0.4`, `no-store`) — no dependency, no scrape state, no push. It carries the rows of PLAN §4.5 the shell owns and no others; the host's worker resume, save→error e2e, Tailwind build time, volume size and container restarts belong to other planes.
+
+**Who may read it.** An **operator session** (`identity.resolve(req).op`, §1.1) or **local mode** (the shell is the operator's own process). To anyone else — a signed-in member included — it is **404**, the same answer lane 5 gives a stranger and the same answer an unknown `/_atelier/<name>` already gives, so the route is not an existence oracle. No session at all is the fetch lane's 401.
+
+| metric | type | labels | what it measures |
+|---|---|---|---|
+| `atelier_shell_proxy_headers_ms` | summary (p50, p99, `_sum`, `_count`) | `host` | ms from proxy dispatch to the host's response headers |
+| `atelier_shell_proxy_body_ms` | summary | `host` | ms from proxy dispatch to the last body byte |
+| `atelier_shell_proxy_requests_total` | counter | `host`, `outcome` | `ok` · `waking` (a refused dial, or a waking mark that skipped the dial) · `timeout` (host idle past `idleMs`) · `error` (502, or a response cut past the cap) |
+| `atelier_shell_events_frames_per_second` | gauge | `topic` | document-socket frames sent, averaged over the last 60 s |
+| `atelier_shell_events_frames_total` | counter | `topic` | the same frames, lifetime |
+| `atelier_shell_events_gaps_total` | counter | `topic` | `gap` frames — a cursor the ring rotated past; delivery on that (socket, topic) stops until the tab resumes |
+| `atelier_shell_events_resume_ms` | summary | — | ms from a client's `resume` to its replay and ack (a **denied** resume is a refusal, not a resume, and is not timed) |
+| `atelier_shell_events_sockets` | gauge | — | open document sockets (budget 8 per person per company, §4.5) |
+| `atelier_shell_events_sockets_total` | counter | `event` | `opened` · `denied` · `evicted` · `reaped` · `stalled` |
+| `atelier_shell_bus_events_total` | counter | `outcome` | events the ingest lane `appended` to the ring or `rejected` (envelope, unregistered epoch, non-monotonic seq) |
+| `atelier_shell_document_bootstrap_bytes` | summary | `company` | bytes of the `window.__ATELIER__` JSON composed into a document (§4.5's page budget is ≤ 500 KB gzip for the whole document; this is the part the shell writes) |
+| `atelier_shell_registry_cache_age_seconds` | gauge | — | the age of the **oldest live** registry cache entry — how stale a read can still be when a revocation lands. Fleet only: the local registry's 1 s host view is not a revocation cache |
+
+The `host` label is the address `registry.hostOf(row)` resolved to (`waking.mjs hostKey`) — the string lane 8 already built for the waking mark, so the proxy adds no per-request allocation of its own. A 400/413 the shell itself refused is not the host's row and is not counted.
+
+All latencies are milliseconds off the shell's own clock — the one `trace` stamps `ms` with — so a resume answered inside a millisecond reads 0.
+
+**Cost.** One Map lookup and one number into a preallocated ring per event; nothing is sorted, summed or formatted until someone reads. Latency series are a 512-sample ring (the quantiles are over what the ring holds; `_sum`/`_count` are lifetime), frames/s a ring of 60 one-second buckets. Every keyed map is bounded at 256 keys, oldest dropped, so a churn of host addresses or topics cannot grow the shell. A collector with nothing in it renders an empty body rather than a page of zeroes.
+
+**Not here, and why.** *Ingest batch size and the per-host share of ingest time* (§4.5): the shell's ingest is one event at a time — the spine stream's `onEvent` in the fleet, one mapped host frame per company socket locally. Batching and per-host attribution live where the batch does, in the host→spine push and the spine's per-host ingest limit; the shell can only count what it accepted and refused, which is the `bus_events_total` row. *Membership cache staleness*: `registry.present` delegates to the membership seam, whose cache is the portal's, not the shell's.
 
 ---
 
@@ -339,6 +370,7 @@ shell/
   minter.mjs               the Ed25519 key + header()
   events.mjs               /_atelier/ws: sub/resume/gap/ping, per-socket cursors, budget, server ping, fan-out
   waking.mjs               the waking page + /_atelier/wake
+  metrics.mjs              the §4.5 rows the shell owns + GET /_atelier/metrics (operator / local only)
   providers/
     identity-local.mjs   identity-fleet.mjs (step 5: interface + a fake for the shell tests)
     registry-local.mjs   registry-fleet.mjs (step 5)
@@ -358,7 +390,7 @@ client/
   test/                    node --test client/test/*.test.js (pure modules; the DOM parts are the drill's)
 ```
 
-Lane A (shell core + local providers): `shell/{index,config,routes,document,assets,proxy,minter,events,waking}.mjs`, `providers/*-local.mjs`, the fleet interfaces as fakes. Lane B (local wiring): `shell/local/*`, `shell/cli-local.mjs`, the one `cli.js` line, `shell/README.md`. Lane C (client): `client/*`. No new runtime dependency: `react`/`react-dom` UMDs, `esbuild`, `ws` are in `package.json`; Tailwind is the host's.
+Lane A (shell core + local providers): `shell/{index,config,routes,document,assets,proxy,minter,events,waking,metrics}.mjs`, `providers/*-local.mjs`, the fleet interfaces as fakes. Lane B (local wiring): `shell/local/*`, `shell/cli-local.mjs`, the one `cli.js` line, `shell/README.md`. Lane C (client): `client/*`. No new runtime dependency: `react`/`react-dom` UMDs, `esbuild`, `ws` are in `package.json`; Tailwind is the host's.
 
 ---
 
@@ -373,6 +405,7 @@ Lane A (shell core + local providers): `shell/{index,config,routes,document,asse
 - `events.test.js` — the C4/mobile-safari rows with an in-process ring and a `ws` client: `sub` → `subscribed` at head; 300 events on a paused socket → exactly one `gap`, delivery stopped until `resume`, then contiguous; `resume` with a stale stream → `gap` (streamChange); `denied` for a foreign instance and for `shell`; server ping 2 misses → terminate; budget 9th socket → the oldest non-live closed 4001.
 - `bus-local.test.js` — a fake dev-shell WS server: `reload {moduleId, rev}` → one invalidate per topic with monotonic seq; `backend-error` → invalidate; a broadcast → invalidate; a new healthz epoch → `registerEpoch` → `since()` is `streamChange` for every old cursor.
 - `registry-local.test.js` — discovery over a fixture instance (`global/a`, `$ws/b`, a chrome, `_skip`, a config with a deny and a path entry) → the mount table; `module.json` generated from a literal meta and not rewritten when present; a non-slug id refused with the message; `present()` true.
+- `metrics.test.js` — the ring math with an injected clock (p50/p99 over the last samples while `_sum`/`_count` stay lifetime, the 60 s rate window emptying, the key cap dropping the oldest host), every exposition line against the text grammar with an escaped label, `registry-fleet cacheAgeMs` (the oldest live entry, `null` once every entry expired), the gate (local 200, a fleet member 404, no session 401, an op session 200, non-GET refused) and the live rows through a running shell: one proxied request per host address, a stopped host counted `waking` twice (the second answer is the mark's), the document's bootstrap bytes, socket frames, one gap and one timed resume.
 - `cli-local.test.js` — the port plan, the env of each spawned host (a fake `spawn`), the dev token minted 0600 before the spawn, `ATELIER_GIT_COMMIT=0`, SIGTERM order and the ≤ 5 s bound, the ignored-settings log lines.
 
 ### 7.2 `node --test client/test/*.test.js`
@@ -411,8 +444,8 @@ Screenshots per row into `shell/drill/out/`; the run script `shell/drill/run.sh`
 
 ## A1. Lane A (shell core + providers) — current state (append-only)
 
-Built: `index, routes, document, assets, proxy, minter, events, waking, config` and all ten
-providers (`providers/*-{local,fleet}.mjs` + `hostlink-base.mjs`); 54 tests in `shell/test/`;
+Built: `index, routes, document, assets, proxy, minter, events, waking, config, metrics` and all
+ten providers (`providers/*-{local,fleet}.mjs` + `hostlink-base.mjs`); 65 tests in `shell/test/`;
 `shell/drill/smoke.mjs` runs the shell with local providers in front of the real host. Deviations
 from §1–§3 as built, each a stated choice:
 

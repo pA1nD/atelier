@@ -9,6 +9,7 @@ import { dispatch } from './routes.mjs'
 import { createAssets } from './assets.mjs'
 import { createEventsSocket } from './events.mjs'
 import { createWakingMarks } from './waking.mjs'
+import { createMetrics } from './metrics.mjs'
 
 export const LISTENER_DRAIN_MS = 25_000
 
@@ -32,13 +33,14 @@ function socketResponse(socket) {
 
 /**
  * createShell({ cfg, providers: {identity, registry, gate, bus, hostLink}, log, trace, assets, now })
- *   → { listen(), close(drainMs), handle(req, res), upgrade(req, socket, head), events, assets, start(), stop() }
+ *   → { listen(), close(drainMs), handle(req, res), upgrade(req, socket, head), events, assets, metrics, start(), stop() }
  */
 export function createShell({ cfg, providers, log = () => {}, trace = null, assets = null, now = Date.now, repoRoot, clientDir }) {
   const { identity, registry, gate, bus, hostLink } = providers
   for (const [k, v] of Object.entries({ identity, registry, gate, bus, hostLink })) if (!v) throw new Error(`createShell: provider ${k} is missing`)
   assets ??= createAssets({ repoRoot, clientDir, nodeEnv: cfg.nodeEnv, log })
-  const events = createEventsSocket({ bus, registry, log, now })
+  const metrics = createMetrics({ now })
+  const events = createEventsSocket({ bus, registry, log, now, metrics })
   const entryCache = new Map()
   const marks = createWakingMarks()
   const watches = new Map()
@@ -50,7 +52,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   server.on('upgrade', (req, socket, head) => upgrade(req, socket, head))
   server.keepAliveTimeout = 65_000
 
-  const base = (req) => ({ req, cfg, providers, gate, assets, events, log, now, entryCache, marks, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, upgrade: false })
+  const base = (req) => ({ req, cfg, providers, gate, assets, events, metrics, log, now, entryCache, marks, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, op: false, upgrade: false })
 
   function finish(ctx, out, t0) {
     const res = ctx.res
@@ -96,7 +98,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
 
   let started = false
   return {
-    server, events, assets, entryCache, marks,
+    server, events, assets, metrics, entryCache, marks,
     start() { if (started) return; started = true; bus.start?.(); registry.start?.(); for (const c of registry.companies?.() ?? []) ensureWatch(c.id) },
     stop() { started = false; for (const off of watches.values()) { try { off() } catch {} } watches.clear(); registry.stop?.(); bus.stop?.() },
     handle, upgrade,

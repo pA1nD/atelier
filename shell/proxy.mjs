@@ -13,6 +13,10 @@
 //   dial:     DIAL/TIMEOUT before headers → 503 {waking:true} + Retry-After: 2 + x-atelier-waking: 1
 //             (a fetch cannot follow a gate redirect; the client shows its waking fallback);
 //             after headers → the response is cut.
+//   metrics:  every request that reached the dial is timed twice from entry — to the host's headers
+//             and to the last body byte — under `hostKey` (the caller's, already built for the
+//             waking mark: no second string per request), and ends in one outcome. A 400/413 the
+//             shell refused before or during the dial is not the host's row and is not counted.
 import { Transform } from 'node:stream'
 import { filterRequestHeaders, filterResponseHeaders, rejectFraming, BODY_CAP_DEFAULT } from '../protocol/index.js'
 
@@ -39,12 +43,14 @@ export function json(res, status, body, extra = {}) {
 }
 
 /**
- * proxyRequest({ req, res, hostLink, hostRow, app, person, credential, companyOrigin, forwardPath, capIn, capOut, log })
+ * proxyRequest({ req, res, hostLink, hostRow, app, person, credential, companyOrigin, forwardPath, capIn, capOut, log, metrics, hostKey })
  *   → Promise<{ status, bytesIn, bytesOut, stripped }>
  *   forwardPath: the normalised path + the original query — what is signed and what is sent
+ *   hostKey:     the metrics label for this host (waking.mjs `hostKey`), the caller's string
  */
-export async function proxyRequest({ req, res, hostLink, hostRow, app, person, credential = 'none', companyOrigin = null, forwardPath, capIn = BODY_CAP_DEFAULT, capOut = BODY_CAP_DEFAULT, log = () => {} }) {
+export async function proxyRequest({ req, res, hostLink, hostRow, app, person, credential = 'none', companyOrigin = null, forwardPath, capIn = BODY_CAP_DEFAULT, capOut = BODY_CAP_DEFAULT, log = () => {}, metrics = null, hostKey = null }) {
   const raw = req.headers ?? {}
+  const t0 = metrics ? metrics.now() : 0
   if (rejectFraming(raw)) { req.resume(); json(res, 400, {}); return { status: 400 } }
   const cl = raw['content-length'] !== undefined ? Number(raw['content-length']) : null
   if (cl !== null && cl > capIn) { req.resume(); json(res, 413, {}); return { status: 413 } }
@@ -59,28 +65,33 @@ export async function proxyRequest({ req, res, hostLink, hostRow, app, person, c
   try {
     up = await hostLink.request({ hostRow, app, person, method: req.method, path, headers: f.headers, body: noBody ? null : req.pipe(cin) })
   } catch (e) {
-    if (res.headersSent) { res.destroy(); return { status: 0, error: e.code } }
+    if (res.headersSent) { metrics?.proxyOutcome(hostKey, 'error'); res.destroy(); return { status: 0, error: e.code } }
     if (e.code === 'BODY_CAP') { json(res, 413, {}); return { status: 413 } }
     if (e.code === 'DIAL' || e.code === 'TIMEOUT') {
+      metrics?.proxyOutcome(hostKey, e.code === 'TIMEOUT' ? 'timeout' : 'waking')
       log(`proxy: ${e.code} ${hostRow.ip}:${hostRow.port} ${req.method} ${path}`)
       res.writeHead(503, { ...WAKING_HEADERS, 'content-length': Buffer.byteLength(WAKING_BODY) }); res.end(WAKING_BODY)
       return { status: 503, error: e.code }
     }
+    metrics?.proxyOutcome(hostKey, 'error')
     log(`proxy: upstream ${e.code ?? ''} ${e.message} ${req.method} ${path}`)
     json(res, 502, {}); return { status: 502, error: e.code }
   }
+  metrics?.proxyHeaders(hostKey, metrics.now() - t0)
   const out = filterResponseHeaders(up.headers, { cookieCredentialed: credential === 'cookie', companyOrigin })
   const cout = countedBody({ cap: capOut })
   res.writeHead(up.status, out.headers)
   res.flushHeaders?.()
-  if (req.method === 'HEAD') { up.body.resume(); res.end(); return { status: up.status, bytesIn: cin.bytes, bytesOut: 0, stripped: out.stripped } }
+  if (req.method === 'HEAD') { up.body.resume(); res.end(); metrics?.proxyDone(hostKey, metrics.now() - t0, 'ok'); return { status: up.status, bytesIn: cin.bytes, bytesOut: 0, stripped: out.stripped } }
+  let cut = false
   await new Promise((resolve) => {
     const done = () => resolve()
-    cout.on('error', (e) => { log(`proxy: response cut (${e.code ?? e.message}) ${req.method} ${path}`); res.destroy(); done() })
-    up.body.on('error', (e) => { log(`proxy: upstream body ${e.code ?? e.message}`); res.destroy(); done() })
+    cout.on('error', (e) => { cut = true; log(`proxy: response cut (${e.code ?? e.message}) ${req.method} ${path}`); res.destroy(); done() })
+    up.body.on('error', (e) => { cut = true; log(`proxy: upstream body ${e.code ?? e.message}`); res.destroy(); done() })
     res.on('close', done)
     res.on('finish', done)
     up.body.pipe(cout).pipe(res)
   })
+  metrics?.proxyDone(hostKey, metrics.now() - t0, cut ? 'error' : 'ok')
   return { status: up.status, bytesIn: cin.bytes, bytesOut: cout.bytes, stripped: out.stripped }
 }
