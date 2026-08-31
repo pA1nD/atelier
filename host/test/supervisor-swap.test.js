@@ -193,3 +193,54 @@ test('the ?rev= window: the previous rev is served for keepMs, then pruned; `cur
     assert.equal(sup.store.current(row.instance).rev, 2)
   } finally { await w.done(sup) }
 })
+
+test('the 30 s sweep does not rebuild an unchanged broken folder: one rev, one report, and a real change is still caught', async () => {
+  const w = world()
+  const dir = w.app('zeta', { 'module.json': APP_JSON('Zeta'), 'backend.js': BACKEND(1), 'frontend.jsx': FRONTEND(1), 'card.jsx': CARD })
+  const sup = w.make()
+  try {
+    await sup.scan()
+    const row = await waitFor(() => { const r = sup.resolve('acme', 'zeta'); return r?.state === 'live' ? r : null })
+    const revJson = () => JSON.parse(fs.readFileSync(path.join(w.work, '.atelier', row.instance, 'revision.json'), 'utf8'))
+    // ONE broken save — the stray `}` of the 2026-08-31 drill
+    fs.appendFileSync(path.join(dir, 'backend.js'), '}\n')
+    await waitFor(() => w.reports.length === 1)
+    assert.equal(w.reports[0].kind, 'build'); assert.equal(w.reports[0].rev, 2)
+    assert.equal(revJson().rev, 2)
+    // three sweeps over the unchanged folder: no rebuild, no rev minted, nothing re-reported
+    for (let i = 0; i < 3; i++) await sup.scan()
+    await sleep(150)
+    assert.equal(w.reports.length, 1, 'a failed build is the folder\'s answer — the sweep does not ask again')
+    assert.equal(revJson().rev, 2, 'no rev for a retry of an unchanged folder')
+    assert.equal(sup.resolve('acme', 'zeta').rev, 1)
+    assert.equal(w.lines.filter((l) => /^\[zeta\] rev \d+ FAILED/.test(l)).length, 1)
+    // the sweep is still the net under the watcher: with the watcher dead, a real change is built
+    sup.rows.get(row.instance).watcher.stop()
+    fs.writeFileSync(path.join(dir, 'backend.js'), BACKEND(2))
+    await sup.scan()
+    await waitFor(() => sup.resolve('acme', 'zeta').rev === 3)
+    assert.equal(w.reports.length, 1)
+    assert.equal(revJson().rev, 3)
+    assert.equal(JSON.parse((await api(sup, row, '/rev')).body).rev, 2)
+  } finally { await w.done(sup) }
+})
+
+test('a module.json that does not parse is reported once, not once per sweep', async () => {
+  const w = world()
+  const dir = w.app('eta', { 'module.json': APP_JSON('Eta'), 'backend.js': BACKEND(1), 'frontend.jsx': FRONTEND(1), 'card.jsx': CARD })
+  const sup = w.make()
+  try {
+    await sup.scan()
+    await waitFor(() => sup.resolve('acme', 'eta')?.state === 'live')
+    fs.writeFileSync(path.join(dir, 'module.json'), '{"name": }')
+    await waitFor(() => w.reports.length === 1)
+    assert.equal(w.reports[0].file, 'module.json'); assert.equal(w.reports[0].rev, 2)
+    // discovery calls the folder a `problem` on every sweep; the folder has not changed since rev 2
+    for (let i = 0; i < 3; i++) await sup.scan()
+    await sleep(150)
+    assert.equal(w.reports.length, 1)
+    fs.writeFileSync(path.join(dir, 'module.json'), APP_JSON('Eta'))
+    await waitFor(() => sup.resolve('acme', 'eta').rev === 3)
+    assert.equal(w.reports.length, 1)
+  } finally { await w.done(sup) }
+})
