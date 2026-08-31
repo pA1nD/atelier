@@ -27,6 +27,7 @@ import { createAuth } from './protocol/auth.mjs'
 import { createServer, HOST_TLS_PLAIN } from './protocol/server.mjs'
 import { createEvents } from './protocol/events.mjs'
 import { createDevShell } from './protocol/devshell.mjs'
+import { createMetrics } from './metrics.mjs'
 
 export const TEARDOWN_CAP_MS = 30_000
 export const LISTENER_DRAIN_MS = 20_000      // §4.7's 25 s long-poll minus the rest of the teardown inside the 30 s cap
@@ -177,6 +178,10 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   // reach agent.log through the collector sink — one line per failure, DESIGN §L1)
   const supLog = (line) => { say(line); if (/ rev \d+ (LIVE in|STOPPED|RESUMED)/.test(line)) log.line(line) }
 
+  // ---- metrics (PLAN §4.5): one recorder, fed by the supervisor, the watchdog and the events lane,
+  // served by the protocol port at /_host/metrics
+  const metrics = createMetrics()
+
   // ---- errors
   const collector = createCollector({ log })
   collector.sink(log.appError)
@@ -187,7 +192,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const rcfg = { ...cfg, podIp: ip, hostBind: local ? '127.0.0.1' : (ip ?? '0.0.0.0') }   // the protocol port: the pod IP alone in the fleet (no loopback path for a worker), loopback on a laptop
   if (!local && !ip) hostLog('no pod IP found — the protocol port binds 0.0.0.0')
   const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().map((w) => w.instance) ?? [] })
-  const events = createEvents({ transport: registrar.lane, hostId: () => registrar.hostId, epoch: () => registrar.epoch, log: hostLog })
+  const events = createEvents({ transport: registrar.lane, hostId: () => registrar.hostId, epoch: () => registrar.epoch, log: hostLog, metrics })
   const pusher = local ? null : push({ transport: registrar.lane, running: collector.running, log: hostLog })
   if (pusher) collector.sink(pusher)
 
@@ -209,7 +214,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
 
   // ---- supervisor ⇄ workers
   const supervisor = createSupervisor({
-    os, dirfd, cfg, log: supLog, registrar, treeOk: () => fault === null && treeOk(),
+    os, dirfd, cfg, log: supLog, registrar, treeOk: () => fault === null && treeOk(), metrics,
     // every report → the collector; a failed save (the `build`/`css`/`load` classes, DESIGN §6.3) also
     // reaches the dev shell's page as the 1.x `backend-error` frame — the agent's browser shows
     // `file:line:col message — fix` while users stay on the previous rev; the next swap clears it
@@ -231,10 +236,10 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
     onBroadcast: (row, event) => dev?.broadcast(row.instance, event),
   })
   supervisorRef.current = supervisor
-  const watchdog = createWatchdog({ os, workers: supervisor.workers, report: collector.report, kill: supervisor.kill, dataRoot: os.at(dirfd, 'data'), log: hostLog })
+  const watchdog = createWatchdog({ os, workers: supervisor.workers, report: collector.report, kill: supervisor.kill, dataRoot: os.at(dirfd, 'data'), log: hostLog, metrics })
 
   const refuse = () => fault
-  server = createServer({ cfg: rcfg, auth, supervisor, collector, registrar, log: hostLog, frontendReport: report, refuse })
+  server = createServer({ cfg: rcfg, auth, supervisor, collector, registrar, log: hostLog, frontendReport: report, refuse, metrics })
   const chromeSheet = cfg.chromeDir ? async () => { const r = await buildSheet({ chromeDir: cfg.chromeDir, appDir: null }); return { body: Buffer.from(r.css), type: 'text/css; charset=utf-8' } } : undefined
   dev = createDevShell({ cfg, os, supervisor, collector, registrar, auth, log: hostLog, frontendReport: report, chromeSheet, refuse })
 
@@ -332,7 +337,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   }
   signals.on('SIGTERM', () => teardown('SIGTERM'))
   signals.on('SIGINT', () => teardown('SIGINT'))
-  return { cfg, os, dirfd, supervisor, registrar, server, dev, events, collector, watchdog, teardown, fault: () => fault, enterFault }
+  return { cfg, os, dirfd, supervisor, registrar, server, dev, events, collector, watchdog, metrics, teardown, fault: () => fault, enterFault }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

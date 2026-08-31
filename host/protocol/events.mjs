@@ -18,17 +18,18 @@
 //     delivered: its instance goes back to pending and is re-minted under the current stream.
 //     Other rejections (`seq-gap`, `bad-frame`) are logged and dropped — a host bug, not a retry.
 import { validEvent } from '../../protocol/index.js'
+import { createMetrics } from '../metrics.mjs'
 
 export const MAX_BATCH = 128
 export const RETRY_MS = [50, 200, 1000, 5000]
 export const REQUEUE_REASONS = new Set(['stale-epoch', 'unregistered'])
 
 /**
- * createEvents({ transport, hostId, epoch, flushMs, maxBatch, log, setTimer, clearTimer })
+ * createEvents({ transport, hostId, epoch, flushMs, maxBatch, log, setTimer, clearTimer, metrics })
  *   hostId / epoch: a value or a function (the registrar knows them only after register()).
  *   transport.events(batch) → Promise<{accepted, rejected}> (throws on network/5xx).
  */
-export function createEvents({ transport, hostId, epoch, flushMs = 10, maxBatch = MAX_BATCH, log = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function createEvents({ transport, hostId, epoch, flushMs = 10, maxBatch = MAX_BATCH, log = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, metrics = createMetrics() }) {
   const id = () => (typeof hostId === 'function' ? hostId() : hostId)
   const ep = () => (typeof epoch === 'function' ? epoch() : epoch)
   const pending = new Set()           // instances awaiting a frame
@@ -69,6 +70,7 @@ export function createEvents({ transport, hostId, epoch, flushMs = 10, maxBatch 
     for (const i of instances) pending.delete(i)
     const batch = instances.map((i) => mint(s, i))
     stats.batches++; if (batch.length > stats.maxBatch) stats.maxBatch = batch.length
+    metrics.eventsBatch(batch.length)   // §4.5 ingest row: the batch size the host produces (the SHARE of shell ingest time is the shell's to measure)
     inflight = Promise.resolve()
       .then(() => transport.events(batch))
       .then((r) => {

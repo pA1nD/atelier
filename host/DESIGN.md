@@ -29,6 +29,7 @@ host/
   entrypoint.sh                  launcher   PID-1 reaper (bash), execs nothing else
   launcher.mjs                   launcher   root, ~60 lines, steps §2.1
   hygiene.mjs                    launcher   env scrub, token files, marker mkdirs, group constants
+  metrics.mjs                    integrator the PLAN §4.5 rows: bounded rings + counters, Prometheus exposition (§6.6)
   supervisor/index.mjs           supervisor Supervisor class: apps table, revisions, swap, idle/resume
   supervisor/discovery.mjs       supervisor /work/apps scan by module.json (pure over a readdir fn)
   supervisor/watcher.mjs         supervisor exclusion list + 100 ms fingerprint quiescence + overflow rescan
@@ -354,7 +355,7 @@ export function createSupervisor({ os, dirfd, cfg, log, report, registrar, onSwa
   // .boot()                → Promise<void>   resume table from last-good + markers; no folder read
   // .scan()                → Promise<void>   discovery → registrar.claim per new folder → build
   // .apps()                → AppRow[]
-  // .workers()             → [{instance, pid, uid, dataDir, sock}]   (the watchdog's input)
+  // .workers()             → [{instance, slug, pid, uid, dataDir, sock, rev, rlimits}]   (the watchdog's input; `slug` labels its metrics rows)
   // .resolve(company, slug)→ AppRow | null
   // .handle(row, req, res, user)  → Promise<void>   proxy to the live worker; resume if stopped (requests held, never 502)
   // .asset(row, rel)       → Promise<{body:Buffer, type:string, rev:number} | null>   frontend js / styles.css / static file of the CURRENT rev
@@ -408,6 +409,7 @@ export function createServer({ cfg, auth, supervisor, collector, registrar })   
   //   POST   /_atelier/report                 → errors/report (body.instance must resolve to a row of this host)
   //   GET    /_atelier/apps                   → [{instance, slug, company, rev, state}]      (the shell's debug view; bearer only)
   //   GET    /_host/healthz                   → {api:'atelier/2', hostId, epoch, uptime, apps:n}   (bearer only)
+  //   GET    /_host/metrics                   → the PLAN §4.5 rows, Prometheus text exposition          (bearer only, §6.6)
   //   anything else → 404; Upgrade → 426
 // protocol/events.mjs (protocol-server)
 export function createEvents({ transport, hostId, epoch, flushMs = 10, maxBatch = 128 })
@@ -579,6 +581,36 @@ Budget: ≤ 50 ms cold in-process for the median corpus app (b5: 4.9 ms), ≤ 20
   `supervisor.handle` (the rest of the query kept).
 - `refuse()`: while the host is in the fault state (§I1 item 17) every request on both listeners
   is answered 503 `{error:'host fault', reason}` before auth or any route.
+
+### 6.6 Metrics (`metrics.mjs`)
+`GET /_host/metrics` on the protocol port, behind the same bearer as `/_host/healthz` (401 without it,
+503 under the host fault, 404 for any method but GET), `text/plain; version=0.0.4` — the PLAN §4.5 rows
+this host owns. Every name is prefixed `atelier_host_` and carries its alarm line in its HELP text.
+
+| family | type | labels | fed by |
+|---|---|---|---|
+| `atelier_host_save_verdict_ms` (+ `_last_ms`) | summary | `app` | supervisor: the watcher's quiescence firing → the swap (LIVE) or the app-error emitted — alarm 1 s |
+| `atelier_host_save_verdicts_total` | counter | `app`, `outcome=live\|error` | the same clock's outcome |
+| `atelier_host_tailwind_build_ms` (+ `_last_ms`) | summary | `app`, `phase=cold\|warm` | `buildSheet`'s own ms; `cold` = this app's first compiled sheet of this host life — alarm 50 ms cold |
+| `atelier_host_worker_resume_ms` (+ `_last_ms`) | summary | `app` | the last-good snapshot resume → the worker's READY — alarm 100 ms |
+| `atelier_host_worker_restarts_total` | counter | `app` | one per rung of the crash ladder (`restartLater`) |
+| `atelier_host_watchdog_trips_total` | counter | `app`, `kind=rss\|cpu\|disk\|shm` | the RSS kill, each CPU throttle cycle, the disk stop, the shm stop |
+| `atelier_host_events_batch` (+ `_last`) | summary | — | frames per push to the spine (`_count` = pushes, `_sum` = frames) |
+| `atelier_host_metrics_series_dropped_total` | counter | — | samples not recorded because a family already holds `MAX_APPS` (128) series |
+
+- `app` is the slug. The save clock starts at the quiescence firing — the save DETECTED, not the build
+  started, so a save that queues behind a running build carries that wait — and is consumed by that
+  save's verdict; a save that reaches none (the folder vanished, the host entered fault) is dropped,
+  never carried into the next save. A build the SCAN triggered is not a save and records no verdict.
+- No chrome dir = no Tailwind compile (the app's own `styles.css` passes through) and no sample.
+- Bounded by construction: `RING` (128) samples per series — p50/p99 are nearest-rank over that window,
+  `_sum`/`_count` count the whole host life — and `MAX_APPS` (128) series per family.
+- The host DOES batch its invalidations (coalesced per instance, ≤ 128 per push), so the batch size is
+  the host's to report; the other half of that PLAN row — the per-host SHARE of shell ingest time — is
+  the shell's: a host cannot see what its batch cost the ring.
+- One recorder per host process, created in `index.mjs` and handed to the supervisor, the watchdog, the
+  events lane and the protocol server. A lane built without it records into its own — no null checks on
+  a hot path, and nothing scrapes it.
 
 ## 7. The spine transport (fleet) and its local twin
 
