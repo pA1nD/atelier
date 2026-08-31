@@ -10,6 +10,7 @@
 //   POST  /_atelier/report                → the kit's frontend report (body.instance must be a row of this host)
 //   GET   /_atelier/apps                  → [{instance, slug, company, rev, state}]  bearer only
 //   GET   /_host/healthz                  → {api, hostId, epoch, uptime, apps}       bearer only
+//   GET   /_host/metrics                  → the PLAN §4.5 rows, Prometheus text      bearer only
 //   anything else → 404 `{}`; an Upgrade → 426 (no WS lane in 2.0.0, B6)
 //
 // `req.url` reaches the supervisor untouched: the mount prefix `/api/<company>/<slug>` is
@@ -26,6 +27,7 @@ import http from 'node:http'
 import https from 'node:https'
 import fs from 'node:fs'
 import { SLUG_RE, PROTOCOL, fromFrontendReport } from '../../protocol/index.js'
+import { createMetrics, PROM_CONTENT_TYPE } from '../metrics.mjs'
 
 export const REPORT_BODY_CAP = 64 * 1024
 export const DEFAULT_HOST_PORT = 1845
@@ -101,8 +103,9 @@ export function tlsOptions(spec) {
 }
 
 /**
- * createServer({ cfg, auth, supervisor, collector, registrar, log, frontendReport, listen })
+ * createServer({ cfg, auth, supervisor, collector, registrar, log, frontendReport, listen, metrics })
  *   listen: {path} for a Unix socket (tests) or {port, host}; default cfg.hostPort on 0.0.0.0.
+ *   metrics: the host's metrics.mjs recorder — `/_host/metrics` renders whatever it holds.
  */
 export const LISTENER_DRAIN_MS = 25_000
 export const HOST_TLS_PLAIN = 'plain'
@@ -117,7 +120,7 @@ export function closeDraining(server, drainMs = LISTENER_DRAIN_MS) {
   })
 }
 
-export function createServer({ cfg = {}, auth, supervisor, collector, registrar, log = () => {}, frontendReport, listen: listenOpts, refuse = () => null }) {
+export function createServer({ cfg = {}, auth, supervisor, collector, registrar, log = () => {}, frontendReport, listen: listenOpts, refuse = () => null, metrics = createMetrics() }) {
   const report = frontendReport ?? frontendReportHandler({ collector })
   const startedAt = Date.now()
   const where = listenOpts ?? { port: cfg.hostPort ?? DEFAULT_HOST_PORT, host: cfg.hostBind ?? '0.0.0.0' }
@@ -132,6 +135,12 @@ export function createServer({ cfg = {}, auth, supervisor, collector, registrar,
     if (p === '/_host/healthz' && req.method === 'GET') {
       if (!auth.bearer(req).ok) return json(res, 401, {})
       return json(res, 200, { api: PROTOCOL, hostId: registrar.hostId, epoch: registrar.epoch, uptime: Math.round((Date.now() - startedAt) / 1000), apps: supervisor.apps().length })
+    }
+    if (p === '/_host/metrics' && req.method === 'GET') {
+      if (!auth.bearer(req).ok) return json(res, 401, {})
+      const buf = Buffer.from(metrics.exposition())
+      res.writeHead(200, { 'content-type': PROM_CONTENT_TYPE, 'content-length': buf.length, 'cache-control': 'no-store' })
+      return res.end(buf)
     }
     if (p === '/_atelier/apps' && req.method === 'GET') {
       if (!auth.bearer(req).ok) return json(res, 401, {})

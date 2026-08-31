@@ -17,6 +17,7 @@ host/
                        restarts either in place (0.5→30 s, parked after 10 exits/10 min); a parked host ends the container (exit 3),
                        so does a supervisor boot storm (10 lives in a row dead within 30 s of the spawn: exit 4)
   hygiene.mjs          env rows, constants, the boot plan as data
+  metrics.mjs          the PLAN §4.5 rows (save→verdict, tailwind, resume, restarts, watchdog trips, event batches) → /_host/metrics
   adapters/os.mjs      linuxRoot() | unprivileged() | memory() — every privileged/Linux-only call
   supervisor/          discovery, watcher, bundle, tailwind, last-good store, serve, the Supervisor
   worker/              spawn (row W), jail (ownership plans), runtime (the worker process), proxy, install + freeze.py
@@ -86,6 +87,23 @@ A save = one revision: syntax error → the previous revision keeps serving, one
 rev N) <file:line:col> <message> — <fix>` line; good save → bundle + css + worker swap under the new rev
 (`ETag: "rev-N"` on `/modules/*`); a worker that dies is relaunched with backoff and requests are held
 (never a 502) while it resumes from `current`.
+
+## Metrics
+
+`GET /_host/metrics` on the protocol port answers the PLAN §4.5 rows as Prometheus text, behind the
+same bearer as `/_host/healthz`:
+
+```
+curl -s --cacert ca.pem --cert client.pem --key client-key.pem \
+  -H "authorization: Bearer $EPOCH.$TOKEN" https://<pod IP>:1845/_host/metrics
+```
+
+`atelier_host_save_verdict_ms` (the watcher's quiescence firing → LIVE or the app-error, alarm 1 s),
+`atelier_host_tailwind_build_ms{phase=cold|warm}` (alarm 50 ms cold), `atelier_host_worker_resume_ms`
+(snapshot → READY, alarm 100 ms), `atelier_host_worker_restarts_total`,
+`atelier_host_watchdog_trips_total{kind=rss|cpu|disk|shm}` and `atelier_host_events_batch` (frames per
+push to the spine). Everything is labelled `app=<slug>`, every alarm line rides in the HELP text, and
+each series is a bounded ring — DESIGN §6.6.
 
 ## Tests
 
