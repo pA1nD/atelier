@@ -8,12 +8,14 @@
 // Nothing here grows without bound: a latency lives in a ring of the last `ring` samples (p50/p99
 // are nearest-rank over that window; `_sum`/`_count` count the whole host life), and a family
 // holds at most `maxApps` series — an app past the cap is counted in
-// `atelier_host_metrics_series_dropped_total` and never remembered.
+// `atelier_host_metrics_series_dropped_total` and never remembered. The cap counts LIVE apps only:
+// the supervisor calls `forget(slug)` when a folder goes (`gone()`), so a host that creates and
+// deletes 200 apps over its life is not blind to the 129th — only a host serving 128 at once is.
 //
 // The rows and who feeds them:
 //   save→verdict     supervisor/index.mjs   the watcher's quiescence firing → LIVE or the app-error   alarm 1 s
 //   tailwind build   supervisor/index.mjs   buildSheet's own ms; cold = this app's first sheet of this host life   alarm 50 ms cold
-//   worker resume    supervisor/index.mjs   the snapshot resume → the worker's READY               alarm 100 ms
+//   worker resume    supervisor/index.mjs   the snapshot resume → READY: the idle wake AND the ladder's respawn   alarm 100 ms
 //   worker restarts  supervisor/index.mjs   the respawn counter (restartLater, one per backoff)
 //   watchdog trips   errors/watchdog.mjs    rss (kill) | cpu (throttle) | disk (stop) | shm (stop)
 //   events batch     protocol/events.mjs    frames per push to the spine — the host DOES batch (≤ 128, coalesced per instance)
@@ -66,13 +68,13 @@ export function createMetrics({ ring = RING, maxApps = MAX_APPS } = {}) {
   const counter = (name, help) => ({ name, help, series: new Map() })
 
   const saveMs = summary(
-    'atelier_host_save_verdict_ms', 'save → verdict per app: the exclusion-list watcher\'s quiescence firing to LIVE or the app-error emitted (alarm 1 s)',
-    'atelier_host_save_verdict_last_ms', 'the last save→verdict of this app, in ms')
+    'atelier_host_save_verdict_ms', 'save → verdict per app and outcome: the exclusion-list watcher\'s quiescence firing to LIVE, or to the app-error emitted (alarm 1 s). The outcome is a LABEL because the alarm is about the error path — a slow live build must not fire it, and a slow error must not be diluted by fast live saves in one ring',
+    'atelier_host_save_verdict_last_ms', 'the last save→verdict of this app, by outcome, in ms')
   const tailwindMs = summary(
     'atelier_host_tailwind_build_ms', 'one Tailwind sheet for this app, in ms; phase="cold" is the app\'s first sheet of this host life (alarm 50 ms cold)',
     'atelier_host_tailwind_build_last_ms', 'the last Tailwind sheet of this app, in ms')
   const resumeMs = summary(
-    'atelier_host_worker_resume_ms', 'idle-stopped worker resumed from the last-good snapshot to READY, in ms (alarm 100 ms)',
+    'atelier_host_worker_resume_ms', 'a worker resumed from the last-good snapshot to READY, in ms — BOTH roads into resume(): the request that wakes an idle-stopped worker and the crash ladder\'s respawn, one series (alarm 100 ms is the wake\'s; the ladder\'s own backoff is outside the clock)',
     'atelier_host_worker_resume_last_ms', 'the last resume of this app, in ms')
   const batchSize = summary(
     'atelier_host_events_batch', 'invalidation frames per push to the spine (_count = pushes, _sum = frames; coalesced per instance, batches <= 128)',
@@ -121,13 +123,21 @@ export function createMetrics({ ring = RING, maxApps = MAX_APPS } = {}) {
     for (const s of c.series.values()) out.push(`${c.name}${labelStr(s.labels)} ${s.n}`)
   }
 
+  // forget(app): every series of one slug, dropped. The supervisor calls it when a folder goes — a
+  // deleted app holding a slot for the rest of the host life is how a first-come cap latches shut.
+  function forget(app) {
+    const mine = (s) => s.labels.some(([k, v]) => k === 'app' && v === app)   // the labels, not the key string: a slug is a folder name
+    for (const f of [saveMs, tailwindMs, resumeMs, verdicts, restarts, trips]) for (const [k, s] of [...f.series]) if (mine(s)) f.series.delete(k)
+  }
+
   return {
-    save(app, ms, outcome) { record(saveMs, [['app', app]], ms); bump(verdicts, [['app', app], ['outcome', outcome === 'live' ? 'live' : 'error']]) },
+    save(app, ms, outcome) { const o = outcome === 'live' ? 'live' : 'error'; record(saveMs, [['app', app], ['outcome', o]], ms); bump(verdicts, [['app', app], ['outcome', o]]) },
     tailwind(app, ms, { cold = false } = {}) { record(tailwindMs, [['app', app], ['phase', cold ? 'cold' : 'warm']], ms) },
     resume(app, ms) { record(resumeMs, [['app', app]], ms) },
     restart(app) { bump(restarts, [['app', app]]) },
     watchdogTrip(app, kind) { bump(trips, [['app', app], ['kind', kind]]) },
     eventsBatch(frames) { record(batchSize, [], frames) },
+    forget,
     exposition() {
       const out = []
       for (const f of [saveMs, tailwindMs, resumeMs, batchSize]) renderSummary(out, f)

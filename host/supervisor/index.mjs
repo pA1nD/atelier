@@ -297,7 +297,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         later(T.stableMs, () => { if (row.live === next.live) row.restarts = 0 })
         onResume(row.instance, cur.rev)   // the running rev is a registration fact for the collector too (a resumed snapshot never swaps)
         const ms = os.now() - t0
-        metrics.resume(row.slug, ms)          // §4.5 resume row: snapshot → READY (alarm 100 ms)
+        metrics.resume(row.slug, ms)          // §4.5 resume row: snapshot → READY (the wake and the ladder's respawn, one series — the HELP says so)
         emit(`[${row.slug}] rev ${cur.rev} RESUMED ${Math.round(ms)} ms`)
         armIdle(row)
         return row.live
@@ -378,6 +378,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     if (live) await stopLive(row, live, 'folder-gone')
     emit(`[${row.slug}] folder removed — unlinked (snapshot kept ${row.rev != null ? `at rev ${row.rev}` : ''})`)
     if (unlink) { try { await registrar?.unlink?.(row.instance) } catch (e) { emit(`[${row.slug}] unlink: ${e.message}`) } }
+    metrics.forget(row.slug)   // the slug's series leave with the folder: a first-come cap that is never freed latches shut
   }
 
   // --- the public surface (§4.1) --------------------------------------------------------------

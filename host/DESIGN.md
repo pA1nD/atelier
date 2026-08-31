@@ -589,10 +589,10 @@ this host owns. Every name is prefixed `atelier_host_` and carries its alarm lin
 
 | family | type | labels | fed by |
 |---|---|---|---|
-| `atelier_host_save_verdict_ms` (+ `_last_ms`) | summary | `app` | supervisor: the watcher's quiescence firing → the swap (LIVE) or the app-error emitted — alarm 1 s |
+| `atelier_host_save_verdict_ms` (+ `_last_ms`) | summary | `app`, `outcome=live\|error` | supervisor: the watcher's quiescence firing → the swap (LIVE) or the app-error emitted — alarm 1 s |
 | `atelier_host_save_verdicts_total` | counter | `app`, `outcome=live\|error` | the same clock's outcome |
 | `atelier_host_tailwind_build_ms` (+ `_last_ms`) | summary | `app`, `phase=cold\|warm` | `buildSheet`'s own ms; `cold` = this app's first compiled sheet of this host life — alarm 50 ms cold |
-| `atelier_host_worker_resume_ms` (+ `_last_ms`) | summary | `app` | the last-good snapshot resume → the worker's READY — alarm 100 ms |
+| `atelier_host_worker_resume_ms` (+ `_last_ms`) | summary | `app` | the last-good snapshot resume → the worker's READY, BOTH roads into `resume()`: the request that wakes an idle-stopped worker and the crash ladder's respawn — alarm 100 ms is the wake's (the ladder's backoff is outside the clock) |
 | `atelier_host_worker_restarts_total` | counter | `app` | one per rung of the crash ladder (`restartLater`) |
 | `atelier_host_watchdog_trips_total` | counter | `app`, `kind=rss\|cpu\|disk\|shm` | the RSS kill, each CPU throttle cycle, the disk stop, the shm stop |
 | `atelier_host_events_batch` (+ `_last`) | summary | — | frames per push to the spine (`_count` = pushes, `_sum` = frames) |
@@ -602,9 +602,15 @@ this host owns. Every name is prefixed `atelier_host_` and carries its alarm lin
   started, so a save that queues behind a running build carries that wait — and is consumed by that
   save's verdict; a save that reaches none (the folder vanished, the host entered fault) is dropped,
   never carried into the next save. A build the SCAN triggered is not a save and records no verdict.
+- The save `outcome` is a LABEL on the latency, not only on the counter: the 1 s alarm is written for the
+  error path, so a slow LIVE build must not fire it and a slow error must not be diluted by fast live
+  saves sharing one 128-sample ring. Two series per app instead of one.
 - No chrome dir = no Tailwind compile (the app's own `styles.css` passes through) and no sample.
 - Bounded by construction: `RING` (128) samples per series — p50/p99 are nearest-rank over that window,
-  `_sum`/`_count` count the whole host life — and `MAX_APPS` (128) series per family.
+  `_sum`/`_count` count the whole host life — and `MAX_APPS` (128) series per family. The cap counts
+  LIVE apps: `gone()` calls `metrics.forget(slug)`, so a host that creates and deletes apps all day is
+  not blind to the 129th — only a host serving 128 at once is, and it says so in
+  `atelier_host_metrics_series_dropped_total`.
 - The host DOES batch its invalidations (coalesced per instance, ≤ 128 per push), so the batch size is
   the host's to report; the other half of that PLAN row — the per-host SHARE of shell ingest time — is
   the shell's: a host cannot see what its batch cost the ring.

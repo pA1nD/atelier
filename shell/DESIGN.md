@@ -260,6 +260,12 @@ The app's host row (`registry.hostOf(row)`; `registry.host(c)` for an app-less d
 
 The `host` label is the address `registry.hostOf(row)` resolved to (`waking.mjs hostKey`) — the string lane 8 already built for the waking mark, so the proxy adds no per-request allocation of its own. A 400/413 the shell itself refused is not the host's row and is not counted.
 
+Two shapes ride that one label, because `hostKey` has two: `<ip>:<port>` for a company with a live host row, and `company:<id>` for one with none — the `waking` refusal a stopped chat pod earns before any dial. Only an address ever carries `_headers_ms`/`_body_ms`, so `sum by (host)` over `atelier_shell_proxy_requests_total` mixes an address with a company id and a per-host panel grows rows that are not hosts. A reader wanting hosts alone selects `host=~".+:.+"`.
+
+**Unknown reads `NaN`**, as the spine's and the host's expositions render it — never `0`, which is a reading. A sample that is not a finite number never enters a ring (`push()` refuses it), so no `_sum` can be poisoned into reading as a healthy nothing.
+
+The `topic` label holds only topics the bus **allowed**: a `denied` frame carries the client's own string back, and counting it would let any member fill the bounded topic map — whose cap drops the OLDEST key — with strings of their choosing and evict every real row. `events.mjs` skips `denied` in `send()`, the same law the ring keeps when it refuses to create a ring for an unregistered topic.
+
 All latencies are milliseconds off the shell's own clock — the one `trace` stamps `ms` with — so a resume answered inside a millisecond reads 0.
 
 **Cost.** One Map lookup and one number into a preallocated ring per event; nothing is sorted, summed or formatted until someone reads. Latency series are a 512-sample ring (the quantiles are over what the ring holds; `_sum`/`_count` are lifetime), frames/s a ring of 60 one-second buckets. Every keyed map is bounded at 256 keys, oldest dropped, so a churn of host addresses or topics cannot grow the shell. A collector with nothing in it renders an empty body rather than a page of zeroes.

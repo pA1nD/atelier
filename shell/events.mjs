@@ -27,6 +27,10 @@ import { WebSocketServer } from 'ws'
 import { frames, isFrame, isClientMessage, isReservedTopic, companyTopic, SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED } from '../protocol/index.js'
 
 export const HIGH_WATER = 64 * 1024
+// The biggest client message the socket accepts. A `sub` carries a person's topics — dozens of
+// short ids — so 64 KiB is orders above anything real, and `ws`'s own 100 MiB default is orders
+// below nothing: a member could push a hundred megabytes through one frame before it is parsed.
+export const MAX_MESSAGE_BYTES = 64 * 1024
 export const RETRY_MS = 20
 export { SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED }
 
@@ -38,7 +42,7 @@ export { SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED }
  *   metrics:  the shell's collector (shell/metrics.mjs) or null
  */
 export function createEventsSocket({ bus, registry, log = () => {}, now = Date.now, pingMs = SERVER_PING_MS, misses: maxMisses = SERVER_PING_MISSES, budget = SOCKET_BUDGET, highWater = HIGH_WATER, buffered = (ws) => ws.bufferedAmount, setTimer = setTimeout, clearTimer = clearTimeout, metrics = null }) {
-  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false })
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_MESSAGE_BYTES })
   const conns = new Set()
   const byTopic = new Map()     // topic → Set<conn>
   const byKey = new Map()       // `${person}\n${company}` → Set<conn>
@@ -48,7 +52,12 @@ export function createEventsSocket({ bus, registry, log = () => {}, now = Date.n
   const send = (conn, frame) => {
     if (!isFrame(frame)) throw new Error('events: refusing to send a non-frame ' + JSON.stringify(frame))
     if (conn.ws.readyState !== 1) return false
-    try { conn.ws.send(JSON.stringify(frame)); stats.sent++; if (frame.topic) metrics?.frame(frame.topic); return true } catch { return false }
+    // The frames/s row counts only topics the bus HOLDS. A `denied` carries the client's own string
+    // back — `allowed()` said no precisely because no ring answers to it — and counting it would put
+    // an unvetted, member-chosen key in the metrics map, whose cap drops the OLDEST: 256 refusals and
+    // every real topic is evicted and the operator reads the attacker's strings instead. Same law the
+    // ring already keeps (protocol/events.js append: an unregistered topic leaves no ring behind).
+    try { conn.ws.send(JSON.stringify(frame)); stats.sent++; if (frame.topic && frame.type !== 'denied') metrics?.frame(frame.topic); return true } catch { return false }
   }
   const keyOf = (conn) => `${conn.person.id}\n${conn.company ?? ''}`
   const liveOf = (set) => [...set].filter((c) => c.misses === 0)

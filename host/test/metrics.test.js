@@ -62,17 +62,24 @@ test('exposition: one HELP/TYPE per family, quantiles + _sum/_count + _last per 
   assert.match(text, /# HELP atelier_host_tailwind_build_ms .*alarm 50 ms cold/)
   assert.match(text, /# HELP atelier_host_worker_resume_ms .*alarm 100 ms/)
 
+  // the OUTCOME is on the latency too, not only on the counter: the 1 s alarm is about the error path,
+  // and a live save and an error save in one ring make it unwritable (a slow build fires it, a slow
+  // error is diluted by fast live saves)
   assert.deepEqual(samples(text, 'atelier_host_save_verdict_ms'), [
-    'atelier_host_save_verdict_ms{app="notes",quantile="0.5"} 100',
-    'atelier_host_save_verdict_ms{app="notes",quantile="0.99"} 300',
-    'atelier_host_save_verdict_ms_sum{app="notes"} 400',
-    'atelier_host_save_verdict_ms_count{app="notes"} 2',
-    'atelier_host_save_verdict_ms{app="flights",quantile="0.5"} 900',
-    'atelier_host_save_verdict_ms{app="flights",quantile="0.99"} 900',
-    'atelier_host_save_verdict_ms_sum{app="flights"} 900',
-    'atelier_host_save_verdict_ms_count{app="flights"} 1',
+    'atelier_host_save_verdict_ms{app="notes",outcome="live",quantile="0.5"} 100',
+    'atelier_host_save_verdict_ms{app="notes",outcome="live",quantile="0.99"} 100',
+    'atelier_host_save_verdict_ms_sum{app="notes",outcome="live"} 100',
+    'atelier_host_save_verdict_ms_count{app="notes",outcome="live"} 1',
+    'atelier_host_save_verdict_ms{app="notes",outcome="error",quantile="0.5"} 300',
+    'atelier_host_save_verdict_ms{app="notes",outcome="error",quantile="0.99"} 300',
+    'atelier_host_save_verdict_ms_sum{app="notes",outcome="error"} 300',
+    'atelier_host_save_verdict_ms_count{app="notes",outcome="error"} 1',
+    'atelier_host_save_verdict_ms{app="flights",outcome="live",quantile="0.5"} 900',
+    'atelier_host_save_verdict_ms{app="flights",outcome="live",quantile="0.99"} 900',
+    'atelier_host_save_verdict_ms_sum{app="flights",outcome="live"} 900',
+    'atelier_host_save_verdict_ms_count{app="flights",outcome="live"} 1',
   ])
-  assert.equal(value(text, 'atelier_host_save_verdict_last_ms{app="notes"}'), 300)
+  assert.equal(value(text, 'atelier_host_save_verdict_last_ms{app="notes",outcome="error"}'), 300)
   assert.deepEqual(samples(text, 'atelier_host_save_verdicts_total'), [
     'atelier_host_save_verdicts_total{app="notes",outcome="live"} 1',
     'atelier_host_save_verdicts_total{app="notes",outcome="error"} 1',
@@ -102,10 +109,28 @@ test('the series cap: past maxApps a new app is dropped and counted, the known o
   const m = createMetrics({ maxApps: 2 })
   m.save('a', 1, 'live'); m.save('b', 2, 'live'); m.save('c', 3, 'live'); m.save('a', 4, 'live')
   const text = m.exposition()
-  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="a"}'), 2)
-  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="c"}'), null, 'the third app is not remembered')
+  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="a",outcome="live"}'), 2)
+  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="c",outcome="live"}'), null, 'the third app is not remembered')
   assert.equal(value(text, 'atelier_host_save_verdicts_total{app="c",outcome="live"}'), null)
   assert.equal(value(text, 'atelier_host_metrics_series_dropped_total'), 2, 'one dropped sample per family the save would have opened a series in')
+})
+
+test('forget(app): a deleted app frees its slots — the cap counts what is LIVE, not what ever existed', () => {
+  const m = createMetrics({ maxApps: 2 })
+  m.save('a', 1, 'live'); m.tailwind('a', 5, { cold: true }); m.restart('a')
+  m.save('b', 2, 'live')
+  m.forget('a')                                   // the folder went: gone() calls this
+  let text = m.exposition()
+  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="a",outcome="live"}'), null, 'every family of that slug, not just one')
+  assert.equal(value(text, 'atelier_host_tailwind_build_ms_count{app="a",phase="cold"}'), null)
+  assert.equal(value(text, 'atelier_host_worker_restarts_total{app="a"}'), null)
+  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="b",outcome="live"}'), 1, 'the other app is untouched')
+
+  m.save('c', 3, 'live'); m.save('d', 4, 'live')  // a's slot is free, d is one past the cap
+  text = m.exposition()
+  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="c",outcome="live"}'), 1, 'the freed slot is usable — the cap no longer latches on a dead app')
+  assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="d",outcome="live"}'), null)
+  assert.equal(value(text, 'atelier_host_metrics_series_dropped_total'), 2, 'the cap still holds at maxApps LIVE series')
 })
 
 function serverRig({ metrics, refuse } = {}) {
@@ -185,19 +210,19 @@ test('save→verdict: the clock runs from the watcher quiescence to LIVE and to 
   try {
     await sup.scan()
     const row = await waitFor(() => { const r = sup.resolve('acme', 'alpha'); return r?.state === 'live' ? r : null })
-    assert.equal(value(metrics.exposition(), 'atelier_host_save_verdict_ms_count{app="alpha"}'), null, 'the first build comes from the scan, not from a save')
+    assert.equal(value(metrics.exposition(), 'atelier_host_save_verdict_ms_count{app="alpha",outcome="live"}'), null, 'the first build comes from the scan, not from a save')
 
     fs.writeFileSync(path.join(dir, 'backend.js'), BACKEND(2))
     await waitFor(() => sup.resolve('acme', 'alpha').rev === 2)
     let text = metrics.exposition()
     assert.equal(value(text, 'atelier_host_save_verdicts_total{app="alpha",outcome="live"}'), 1)
-    assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="alpha"}'), 1)
-    assert.ok(value(text, 'atelier_host_save_verdict_last_ms{app="alpha"}') >= 0, 'a real duration')
+    assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="alpha",outcome="live"}'), 1)
+    assert.ok(value(text, 'atelier_host_save_verdict_last_ms{app="alpha",outcome="live"}') >= 0, 'a real duration')
 
     fs.writeFileSync(path.join(dir, 'backend.js'), 'export default { mountRoutes( {{{\n')
     await waitFor(() => value(metrics.exposition(), 'atelier_host_save_verdicts_total{app="alpha",outcome="error"}') === 1)
     text = metrics.exposition()
-    assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="alpha"}'), 2, 'a failed save reaches a verdict too')
+    assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="alpha",outcome="error"}'), 1, 'a failed save reaches a verdict too, and lands in its OWN series')
     assert.ok(w.reports.some((r) => r.kind === 'build'))
     assert.equal(sup.resolve('acme', 'alpha').rev, 2, 'users stay on the last good rev')
 

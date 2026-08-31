@@ -23,7 +23,7 @@ const apps = (company) => [
   { instance: WIKI, slug: 'wiki', company, rev: 1, state: 'stopped', meta: { name: 'Wiki' } },
 ]
 // every exposition line is either a comment or `name[{labels}] <number>`
-const EXPO_LINE = /^(#\s(HELP|TYPE)\s\S+\s.+|[a-zA-Z_][a-zA-Z0-9_]*(\{[^}]*\})?\s-?(\d+(\.\d+)?|\d+e[+-]\d+))$/
+const EXPO_LINE = /^(#\s(HELP|TYPE)\s\S+\s.+|[a-zA-Z_][a-zA-Z0-9_]*(\{[^}]*\})?\s(NaN|-?(\d+(\.\d+)?|\d+e[+-]\d+)))$/
 const lines = (text) => text.split('\n').filter(Boolean)
 const value = (text, name) => { const l = lines(text).find((x) => x.startsWith(name + ' ')); return l === undefined ? null : Number(l.slice(name.length + 1)) }
 
@@ -55,6 +55,15 @@ test('the rings: p50/p99 over the last samples, the rate window, bounded keys', 
   text = m.render()
   assert.ok(!text.includes('host="h1",quantile'))
   assert.ok(text.includes('host="h2",quantile') && text.includes('host="h3",quantile'))
+
+  // a non-finite is not a sample: it never enters the ring, so one NaN cannot poison `_sum` for the
+  // life of the process — and what the exposition has no number for reads NaN, never a hard zero
+  m.proxyHeaders('h4', NaN); m.proxyHeaders('h4', undefined); m.proxyHeaders('h4', 10)
+  text = m.render({ registry: { cacheAgeMs: () => NaN } })
+  assert.equal(value(text, 'atelier_shell_proxy_headers_ms_sum{host="h4"}'), 10)
+  assert.equal(value(text, 'atelier_shell_proxy_headers_ms_count{host="h4"}'), 1)
+  assert.ok(lines(text).includes('atelier_shell_registry_cache_age_seconds NaN'), 'unknown is NaN, not 0')
+  for (const l of lines(text)) assert.match(l, EXPO_LINE, l)
 
   // the pure helpers on an empty series
   assert.equal(quantile({ v: new Float64Array(4), n: 0 }, 0.5), 0)
@@ -183,6 +192,11 @@ test('the live rows: a proxied request per host, a waking host, the bootstrap by
   await until((f) => f.type === 'invalidate')
   ws.send(JSON.stringify({ op: 'resume', topic: TODO, stream: 'local:gone', seq: 1 }))
   await until((f) => f.type === 'gap')
+  // a topic the registry does not know is DENIED — and a refusal is the client's own string coming back,
+  // so it must not become a series: the topic map's cap drops the OLDEST key, and counting refusals would
+  // let any member evict every real row and read their own strings out of the operator's scrape
+  ws.send(JSON.stringify({ op: 'sub', topics: ['i-ffffffffffffffff'] }))
+  await until((f) => f.type === 'denied')
   ws.terminate()
 
   const text = (await r.go('/_atelier/metrics')).text
@@ -194,6 +208,7 @@ test('the live rows: a proxied request per host, a waking host, the bootstrap by
   assert.equal(value(text, 'atelier_shell_document_bootstrap_bytes_count{company="global"}'), 1)
   assert.ok(value(text, `atelier_shell_events_frames_total{topic="${TODO}"}`) >= 3)      // subscribed + invalidate + gap
   assert.equal(value(text, `atelier_shell_events_gaps_total{topic="${TODO}"}`), 1)
+  assert.ok(!text.includes('i-ffffffffffffffff'), 'the denied topic left no series behind')
   assert.equal(value(text, 'atelier_shell_events_resume_ms_count'), 1)
   assert.ok(text.includes('atelier_shell_events_sockets '))
   // no registry cache age locally: the local registry's 1 s host view is not a revocation cache

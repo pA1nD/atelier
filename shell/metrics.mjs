@@ -6,7 +6,10 @@
 //
 //   proxy p50/p99 per host    every proxied request is timed twice from dispatch: to the host's
 //                             response HEADERS and to the last BODY byte, keyed by the host address
-//                             `registry.hostOf(row)` resolved to (`waking.mjs hostKey`) — plus the
+//                             `registry.hostOf(row)` resolved to (`waking.mjs hostKey`) — which is
+//                             `<ip>:<port>`, or `company:<id>` for a company with no live host row
+//                             (the `waking` refusals of a stopped chat pod); `sum by (host)` therefore
+//                             mixes the two, and only an address ever carries timings — plus the
 //                             per-host outcome counter ok | waking (a DIAL, or a waking mark that
 //                             skipped the dial) | timeout (an idle TIMEOUT) | error (a 502, a cut
 //                             response). A 400/413 the shell itself refused is not the host's row.
@@ -22,7 +25,14 @@
 //
 // Cost: a Map lookup and one number into a preallocated ring per event; nothing is sorted, summed
 // or formatted until someone reads. Every keyed map is bounded (`MAX_KEYS`, oldest key dropped) so
-// a churn of host addresses or topics cannot grow the shell.
+// a churn of host addresses or topics cannot grow the shell — and a topic reaches the map only after
+// the bus has ALLOWED it (events.mjs does not count a `denied` frame), so a member cannot evict the
+// real rows by asking for strings that do not exist.
+//
+// WHAT UNKNOWN LOOKS LIKE: `NaN`, as the spine's and the host's expositions render it — never `0`. A
+// zero is a reading; a sample that is not a number is not one, and a poisoned `_sum` must not read as
+// a healthy nothing. `push()` refuses a non-finite outright, so no series can be poisoned in the
+// first place.
 export const RING = 512              // latency samples kept per series
 export const MAX_KEYS = 256          // hosts / topics / companies kept per map
 export const RATE_WINDOW_S = 60      // the frames/s ring
@@ -32,6 +42,7 @@ export const CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8'
 // ---- the two ring shapes
 const samples = (cap) => ({ v: new Float64Array(cap), n: 0, i: 0, sum: 0, count: 0 })
 function push(s, x) {
+  if (!Number.isFinite(x)) return    // the host's observe() rule: a non-number is not a sample, and one NaN poisons `sum` for the process's life
   s.v[s.i] = x
   s.i = (s.i + 1) % s.v.length
   if (s.n < s.v.length) s.n++
@@ -66,7 +77,7 @@ function bounded(map, key, make, cap) {
 
 // ---- exposition
 const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
-const num = (v) => (Number.isFinite(v) ? (Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000)) : '0')
+const num = (v) => (Number.isFinite(v) ? (Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000)) : 'NaN')
 
 function counter(out, name, help, rows) {
   if (!rows.length) return

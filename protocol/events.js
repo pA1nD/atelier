@@ -160,7 +160,11 @@ export const messages = {
   resume: ({ topic, stream, seq }) => ({ op: 'resume', topic, stream, seq }),
   pong: ({ at }) => ({ op: 'pong', at }),
 }
-const isTopic = (t) => typeof t === 'string' && t.length > 0
+// A topic is an instance id (`i-<16 hex>`) or `company:<id>` — both far inside the cap. The cap is
+// there because a topic reaches the shell from a CLIENT and, refused or not, is echoed back and
+// (before this) kept: an unbounded string is a place to park bytes in someone else's process.
+export const MAX_TOPIC_LEN = 128
+const isTopic = (t) => typeof t === 'string' && t.length > 0 && t.length <= MAX_TOPIC_LEN
 const isStreamOrNull = (s) => s === null || !!splitStream(s)
 export function isFrame(f) {
   if (!f || typeof f !== 'object') return false
