@@ -25,7 +25,9 @@
 //   7  authorize    the per-app hook — none in 2.0.0 (presence is the ACL); a visible no-op    both
 //   8  proxy        /api, /modules through hostLink to the APP's host (`registry.hostOf(row)` — a
 //                   company owns one host per chat it owns; waking marks are per host);
-//                   /_atelier/{ws,whoami,report,topics,rail,wake} (rail/topics: the person's rows)    both
+//                   /_atelier/{ws,whoami,report,topics,rail,wake} (rail/topics: the person's rows);
+//                   /_atelier/metrics — the operator's exposition (shell/metrics.mjs), admitted to
+//                   an operator session or in local mode, 404 to anyone else                    both
 //   anything else → 404 {}; a non-GET/HEAD on a document route → 401 unauthenticated (no Location,
 //   no ticket mint), 405 with a session; an Upgrade anywhere but
 //   /_atelier/ws → 426. The 1.x-only surfaces (/_atelier/inflight, client-errors, takeover, observe)
@@ -35,6 +37,7 @@ import path from 'node:path'
 import { SLUG_RE, companyTopic, isReservedTopic } from '../protocol/index.js'
 import { renderDocument, relativeImports, appAsset } from './document.mjs'
 import { proxyRequest, json as sendJson } from './proxy.mjs'
+import { CONTENT_TYPE as METRICS_CONTENT_TYPE } from './metrics.mjs'
 import { wakingHtml, wakingHeaders, hostState, hostKey } from './waking.mjs'
 import { newNonce } from './document.mjs'
 import { visibleRows } from './presence.mjs'
@@ -172,6 +175,7 @@ export async function laneDocument(ctx) {
     return r('document', 503, { body: wakingHtml({ company, slug: app ? app.slug : null, nonce }), headers: wakingHeaders({ nonce }) })
   }
   const doc = await composeFor(ctx, { company, slug: ctx.route.slug, person: id.person, epoch: id.epoch, nonce })
+  ctx.metrics?.bootstrap(company, doc.bootstrapBytes)
   ctx.ensureWatch?.(company)
   return r('document', 200, { body: doc.html, headers: doc.headers })
 }
@@ -217,7 +221,7 @@ export async function laneFetch(ctx) {
   if (k !== 'api' && k !== 'modules' && k !== 'atelier') return null
   const id = await resolvePerson(ctx)
   if (!id.ok) return jsonR('fetch', 401, {})
-  ctx.person = id.person; ctx.credential = id.credential
+  ctx.person = id.person; ctx.credential = id.credential; ctx.op = id.op === true
   if (k === 'atelier') {
     ctx.company = ctx.hostCompany ?? null
     if (!ctx.company) {
@@ -286,11 +290,11 @@ export async function laneProxy(ctx) {
     // chat's pod half the time (review 2026-08-30); the waking mark is that host's, not the company's
     const hostRow = await registry.hostOf(ctx.app)
     const key = hostKey(hostRow, ctx.appCompany)
-    if (!hostRow || ctx.marks.isWaking(key, ctx.now(), registry, ctx.appCompany)) { ctx.req.resume(); return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' }) }
+    if (!hostRow || ctx.marks.isWaking(key, ctx.now(), registry, ctx.appCompany)) { ctx.metrics?.proxyOutcome(key, 'waking'); ctx.req.resume(); return jsonR('proxy', 503, { waking: true }, { 'retry-after': '2', 'x-atelier-waking': '1' }) }
     const app = ctx.app.chrome ? { instance: ctx.app.instance, company: ctx.app.company, slug: ctx.app.slug } : ctx.app
     // the origin the answer is served on is this request's (`ctx.company` = the Host company in the fleet) — an ACAO
     // may match only that one
-    const out = await proxyRequest({ req: ctx.req, res: ctx.res, hostLink, hostRow, app, person: ctx.person, credential: ctx.credential, companyOrigin: ctx.cfg.origin(ctx.company ?? ctx.appCompany), forwardPath: ctx.forward, log: ctx.log })
+    const out = await proxyRequest({ req: ctx.req, res: ctx.res, hostLink, hostRow, app, person: ctx.person, credential: ctx.credential, companyOrigin: ctx.cfg.origin(ctx.company ?? ctx.appCompany), forwardPath: ctx.forward, log: ctx.log, metrics: ctx.metrics, hostKey: key })
     if (out.error === 'DIAL' || out.error === 'TIMEOUT') ctx.marks.mark(key, ctx.now())
     return { lane: 'proxy', handled: true }
   }
@@ -302,6 +306,16 @@ export async function laneProxy(ctx) {
     return { lane: 'ws', handled: true }
   }
   if (ctx.upgrade) return jsonR('proxy', 426, {})
+  // the operator's exposition (shell/metrics.mjs, PLAN §4.5). Admitted to an operator session
+  // (`op: true` on the spine's session row, carried by the identity provider) and to local mode —
+  // where the shell IS the operator's process. To anyone else it is 404, not 403: the shell's law
+  // for a surface that is none of your business is the same 404 a stranger gets (lane 5), and an
+  // unknown `/_atelier/<name>` is 404 already, so the route is not even an existence oracle.
+  if (name === 'metrics' && ctx.method === 'GET') {
+    if (!ctx.metrics || !(ctx.cfg.mode === 'local' || ctx.op)) return jsonR('proxy', 404, {})
+    const body = ctx.metrics.render({ events: ctx.events, bus, registry })
+    return r('proxy', 200, { body, headers: { 'content-type': METRICS_CONTENT_TYPE, 'cache-control': 'no-store' } })
+  }
   if (name === 'whoami' && ctx.method === 'GET') return jsonR('proxy', 200, { id: ctx.person.id, name: ctx.person.name, anonymous: false })
   if (name === 'topics' && ctx.method === 'GET') {
     const topic = ctx.route.rest

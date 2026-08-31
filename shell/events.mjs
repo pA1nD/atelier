@@ -19,6 +19,10 @@
 // ACL: an instance topic needs a registry row the person is present on (and, when the socket has
 // a company, the row's company); `company:<c>` is the socket's own company only; `shell` and any
 // other reserved topic → denied.
+// Metrics (PLAN §4.5, shell/metrics.mjs): every frame that names a topic is counted into that
+// topic's 60 s rate ring, a `gap` also into the gap counter, and a `resume` is timed from the
+// message to its replay + ack (`resumed`, or the `gap` that answers instead) — a DENIED resume is a
+// refusal, not a resume, and is not timed.
 import { WebSocketServer } from 'ws'
 import { frames, isFrame, isClientMessage, isReservedTopic, companyTopic, SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED } from '../protocol/index.js'
 
@@ -27,12 +31,13 @@ export const RETRY_MS = 20
 export { SERVER_PING_MS, SERVER_PING_MISSES, SOCKET_BUDGET, CLOSE_EVICTED }
 
 /**
- * createEventsSocket({ bus, registry, log, now, pingMs, misses, budget, highWater, buffered, setTimer, clearTimer })
+ * createEventsSocket({ bus, registry, log, now, pingMs, misses, budget, highWater, buffered, setTimer, clearTimer, metrics })
  *   bus:      { ring, onAppend(fn) → unsubscribe }
  *   registry: { byInstance(instance) → Promise<AppRow|null>, present(personId, instance) → Promise<boolean> }
  *   buffered: (ws) → bytes queued (tests inject a stall)
+ *   metrics:  the shell's collector (shell/metrics.mjs) or null
  */
-export function createEventsSocket({ bus, registry, log = () => {}, now = Date.now, pingMs = SERVER_PING_MS, misses: maxMisses = SERVER_PING_MISSES, budget = SOCKET_BUDGET, highWater = HIGH_WATER, buffered = (ws) => ws.bufferedAmount, setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function createEventsSocket({ bus, registry, log = () => {}, now = Date.now, pingMs = SERVER_PING_MS, misses: maxMisses = SERVER_PING_MISSES, budget = SOCKET_BUDGET, highWater = HIGH_WATER, buffered = (ws) => ws.bufferedAmount, setTimer = setTimeout, clearTimer = clearTimeout, metrics = null }) {
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false })
   const conns = new Set()
   const byTopic = new Map()     // topic → Set<conn>
@@ -43,7 +48,7 @@ export function createEventsSocket({ bus, registry, log = () => {}, now = Date.n
   const send = (conn, frame) => {
     if (!isFrame(frame)) throw new Error('events: refusing to send a non-frame ' + JSON.stringify(frame))
     if (conn.ws.readyState !== 1) return false
-    try { conn.ws.send(JSON.stringify(frame)); stats.sent++; return true } catch { return false }
+    try { conn.ws.send(JSON.stringify(frame)); stats.sent++; if (frame.topic) metrics?.frame(frame.topic); return true } catch { return false }
   }
   const keyOf = (conn) => `${conn.person.id}\n${conn.company ?? ''}`
   const liveOf = (set) => [...set].filter((c) => c.misses === 0)
@@ -75,7 +80,7 @@ export function createEventsSocket({ bus, registry, log = () => {}, now = Date.n
     const cursor = sub.stream ? { stream: sub.stream, seq: sub.seq } : null
     const r = bus.ring.since(topic, cursor)
     const gap = r.gap || (cursor ? r.streamChange : r.events.length > 0 && r.events[0].seq !== 1)
-    if (gap) { sub.gapped = true; stats.gaps++; send(conn, frames.gap({ topic, stream: sub.stream })); return }
+    if (gap) { sub.gapped = true; stats.gaps++; metrics?.gap(topic); send(conn, frames.gap({ topic, stream: sub.stream })); return }
     for (const ev of r.events) {
       if (buffered(conn.ws) > highWater) { stats.stalls++; if (!conn.retry) conn.retry = setTimer(() => { conn.retry = null; for (const t of conn.subs.keys()) pump(conn, t) }, RETRY_MS); return }
       if (!send(conn, frames.invalidate(ev))) return
@@ -99,10 +104,12 @@ export function createEventsSocket({ bus, registry, log = () => {}, now = Date.n
       return
     }
     if (m.op === 'resume') {
+      const t0 = metrics ? now() : 0
       if (!(await allowed(conn, m.topic))) { stats.denied++; send(conn, frames.denied({ topic: m.topic })); return }
       if (conn.ws.readyState !== 1) return
       subscribe(conn, m.topic, { stream: m.stream, seq: m.seq, gapped: false })
       pump(conn, m.topic, 'resumed')
+      metrics?.resumed(now() - t0)
     }
   }
 

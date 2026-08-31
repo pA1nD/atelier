@@ -65,6 +65,14 @@ export function createRegistryFleet({ spine, membership, domain = 'portal.pa1nd.
     async hostOf(row) { return row?.host ?? null },
     chrome(company) { const c = spine.chrome?.(company) ?? null; return { qid: c?.qid ?? null, dir: null, digest: c?.digest ?? null } },
     watch(company, fn) { let s = watchers.get(company); if (!s) { s = new Set(); watchers.set(company, s) } s.add(fn); return () => s.delete(fn) },
+    // cacheAgeMs(): the age of the OLDEST live per-company apps entry — how stale a read can still
+    // be when a revocation lands (PLAN §4.5 "cache staleness at revocation"; shell/metrics.mjs
+    // reads it). An expired entry is not staleness: the next read refetches. null = nothing cached.
+    cacheAgeMs() {
+      let oldest = null
+      for (const hit of cache.values()) { const age = now() - hit.at; if (age < ttlMs && (oldest === null || age > oldest)) oldest = age }
+      return oldest
+    },
     invalidate,
     stale: (hostRow) => hostRow.drainingAt != null || hostRow.heartbeatAt == null || now() - hostRow.heartbeatAt > HEARTBEAT_STALE_MS,
     stop() { unsub?.() },

@@ -119,28 +119,32 @@ export function preloadsFor({ company, slug, modules, chrome, entryImports = [] 
 const attr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
 
 /**
- * composeDocument({template, nonce, bootstrap, sheet, importMap, preloads}) → html
- *   importMap: {imports} | null
+ * composeDocument({template, nonce, bootstrap, bootstrapJson, sheet, importMap, preloads}) → html
+ *   importMap:     {imports} | null
+ *   bootstrapJson: the escaped bootstrap, when the caller already has it (renderDocument measures
+ *                  its bytes for the metrics row and does not pay a second escape)
  */
-export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap, sheet, importMap, preloads = [] }) {
+export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap, bootstrapJson = escapeBootstrap(bootstrap), sheet, importMap, preloads = [] }) {
   if (!hasSlots(template)) throw new Error('document: the template lacks a slot (' + Object.values(SLOTS).join(' ') + ')')
   const pre = preloads.map((u) => `<link rel="modulepreload" href="${attr(u)}">`).join('\n  ')
   return template
     .replace(SLOTS.styles, sheet ? `<link id="${SHEET_ID}" rel="stylesheet" href="${attr(sheet)}">` : '')
-    .replace(SLOTS.bootstrap, `<script nonce="${attr(nonce)}">window.__ATELIER__ = ${escapeBootstrap(bootstrap)};</script>`)
+    .replace(SLOTS.bootstrap, `<script nonce="${attr(nonce)}">window.__ATELIER__ = ${bootstrapJson};</script>`)
     .replace(SLOTS.importmap, importMap ? `<script type="importmap" nonce="${attr(nonce)}">${escapeBootstrap(importMap)}</script>` : '')
     .replace(SLOTS.preloads, pre)
     .replace(SLOTS.client, `<script type="module" src="${CLIENT_JS}"></script>`)
 }
 
-// renderDocument(): the whole thing for one route — what routes.mjs calls
+// renderDocument(): the whole thing for one route — what routes.mjs calls. `bootstrapBytes` is
+// PLAN §4.5's bootstrap-bytes row (shell/metrics.mjs): what the shell composed into the page.
 export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce() }) {
   const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal })
+  const bootstrapJson = escapeBootstrap(bootstrap)
   const sheet = sheetFor({ company, slug, modules, chrome })
   const importMap = chrome?.qid && chrome.hasKit ? { imports: { '@atelier/kit': chromeAsset(chrome, 'kit.js') } } : null
   const preloads = preloadsFor({ company, slug, modules, chrome, entryImports })
-  const html = composeDocument({ template, nonce, bootstrap, sheet, importMap, preloads })
-  return { html, nonce, bootstrap, sheet, preloads, headers: documentHeaders({ cfg, nonce, portal }) }
+  const html = composeDocument({ template, nonce, bootstrap, bootstrapJson, sheet, importMap, preloads })
+  return { html, nonce, bootstrap, bootstrapBytes: Buffer.byteLength(bootstrapJson), sheet, preloads, headers: documentHeaders({ cfg, nonce, portal }) }
 }
 
 // csp({nonce, fontHosts, portalOrigin}) — §2.3

@@ -114,9 +114,10 @@ shell/
   minter.mjs         one Ed25519 pair per process; header() = protocol/identity mint (30 s, fresh nonce, closed person set)
   events.mjs         /_atelier/ws: sub/resume/gap on cursor lag, pong{at} → ping{at} echo, ws.ping 10 s × 2 misses, budget 8 → 4001
   waking.mjs         the 503 waking page, /_atelier/wake, hostState() (heartbeat/draining in the fleet, a 1 s probe in both modes)
+  metrics.mjs        GET /_atelier/metrics: proxy p50/p99 per host, frames/s + gaps, resume ms, bootstrap bytes, cache age — operator or local only
   config.mjs         cfg from atelier.config.json + env (local) / env (fleet); the ignored-settings lines
   providers/         identity- gate- registry- bus- hostlink- ×{local,fleet}.mjs (+ hostlink-base.mjs)
-  test/              node --test shell/test/*.test.js   (56 tests, ~3 s, no host process; fixtures.mjs = the fakes)
+  test/              node --test shell/test/*.test.js   (65 tests, ~16 s, no host process; fixtures.mjs = the fakes)
   drill/smoke.mjs    the shell with local providers in front of the REAL host on this Mac (one background task, VERDICT)
 ```
 
@@ -132,7 +133,8 @@ bash shell/drill/smoke.sh > /tmp/shell-smoke.log        # + the real host: docum
 
 ## The provider interfaces as built (deltas to DESIGN §1 are marked ⊕)
 
-- `identity.resolve(req)` → `{ok, person:{id,name,claims}, credential:'cookie'|'none', epoch}` | `{ok:false, reason}`; `identity.session(req)`.
+- `identity.resolve(req)` → `{ok, person:{id,name,claims}, credential:'cookie'|'none', epoch, op}` | `{ok:false, reason}`; `identity.session(req)`.
+  `op` ⊕ — `true` on an operator session (the spine's `op` on the row, or `op: true` in the person's claims through the portal); it admits `/_atelier/metrics` and nothing else.
 - `registry`: `company(host)`, `companies()` ⊕ (`[{id,name,href}]` — the picker rows; fleet `[]`), `apps(c)`, `resolve(c,s)`,
   `byInstance(instance)` ⊕ (the socket and `/_atelier/topics` name topics by instance, not by company), `present(personId, instance)`,
   `hostOf(row)` → `HostRow {hostId, epoch, token, ip, port, tls, heartbeatAt, drainingAt}` ⊕ (the computer the APP lives on — what `/api`, `/modules`,
@@ -140,6 +142,7 @@ bash shell/drill/smoke.sh > /tmp/shell-smoke.log        # + the real host: docum
   `host(c)` → the company's freshest `HostRow` (an app-less document's "is anything up" probe only), `chrome(c)` → `{qid, dir, digest}`, `watch(c, fn)`,
   `noteProbe(c, probe)` ⊕ (the document probe feeds `heartbeatAt`/`epoch` locally), `refresh(c?)` ⊕ (lane B's fs.watch and the bus's
   unknown-qid frame call it), `unreachableAt(c)` ⊕ (the last failed `/_atelier/apps` fetch — the last rows the host answered are served stale meanwhile, across `refresh()` and the poll too),
+  `cacheAgeMs()` ⊕ (fleet only — the age of the oldest live apps-cache entry, the metrics route's cache-staleness row),
   `start()/stop()` (the 5 s unref'd safety poll, local). An `AppRow` carries `primary` (applied locally from
   module.json, the registry's applied value in the fleet) and `isChrome` for the chrome staged as an app (hidden from the rail).
 - `gate`: `https(req)`, `hsts(req)` ⊕ (the HSTS value; `null` locally), `hostAllowed(req)`, `ticket(req,res)`, `unauthDocument(req, {company, path})`, `origin(req, credential)`.
@@ -157,6 +160,10 @@ bash shell/drill/smoke.sh > /tmp/shell-smoke.log        # + the real host: docum
 - `GET /_atelier/topics/<instance>` → `{stream, seq, rev, error}` (`error` is `{message, hint, file, line, col, rev, kind}` locally, always `null`
   in the fleet); `GET /_atelier/rail?company=<c>` (fleet: no query) → `{stream, seq, modules:[bootstrap rows], chrome:{qid,digest}, chromeRev}`;
   `GET /_atelier/wake?company=<c>` → `{ok}`; `POST /_atelier/report` ≤ 64 KiB, signed with `app = body.instance`.
+- `GET /_atelier/metrics` is not the client's: Prometheus text exposition of the PLAN §4.5 rows the shell owns (proxy p50/p99 and
+  outcomes per host, document-socket frames/s + gaps per topic, resume ms, open sockets, bus ingest, bootstrap bytes per company,
+  registry cache age). Admitted to an **operator session** or to **local mode**; to anyone else it is 404, the same answer a
+  stranger gets from lane 5. Read it with `curl -s localhost:1844/_atelier/metrics` locally. Rows and costs: DESIGN §3.6.
 - A fetch that meets a waking host gets `503 {"waking":true}` + `x-atelier-waking: 1` + `Retry-After: 2`; a document gets the waking page.
   A host that just failed a probe or a dial stays "waking" for 2 s per shell (no dial on fetches in that window), then the next request dials.
 - `client/index.html` must carry the five slots `<!--__STYLES__-->`, `<!--__BOOTSTRAP__-->`, `<!--__IMPORTMAP__-->`, `<!--__PRELOADS__-->`,
