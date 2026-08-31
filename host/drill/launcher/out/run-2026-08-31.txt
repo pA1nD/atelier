@@ -1,0 +1,186 @@
+== host launcher drill 2026-08-30T23:51:03Z — repo /Users/pa1nd/pro/001-atelier/atelier/.claude/worktrees/launcher-rows (launcher-rows @ 08bbddc), target fsn-01, ns spike-host-launcher
+== image: ghcr.io/pa1nd/agent-image@sha256:0f4fb94cf13abe60219a3d88318b5235dc987a07b79d517a34b525cacc61e866
+== shipping: host (index.mjs = host-stub.mjs) protocol package.json
+[01:51:05.659] other spike namespaces on the node (untouched): 
+[01:51:05.914] image (metal/clusters/prod/spine.yaml AGENT_IMAGE): ghcr.io/pa1nd/agent-image@sha256:0f4fb94cf13abe60219a3d88318b5235dc987a07b79d517a34b525cacc61e866
+[01:51:06.032] waiting for the stage init container
+[01:51:08.564] staged; waiting for Ready (≤ 60 s incl. container creation)
+[01:51:10.607] row 1: Ready 1.88 s after staging, ≤ 1.5 s after the container start (startedAt has 1 s grain) — True rc=0 phase=Running
+[01:51:10.744] launcher log of the first life:
+    | [drill] host entry: // The host stand-in for the launcher drill (the real host is host/index.mjs, the integrat
+    | [launcher] boot pid=11 uid=0 os=linux-root host=/code/host/index.mjs
+    | [launcher] +0.00s umask 000: ok
+    | [launcher] +0.00s chownIf /work 0:0: ok (already 0:0 — untouched)
+    | [launcher] +0.00s mkdir /work/.atelier 0711: ok
+    | [launcher] +0.00s mkdir /work/.atelier/data 0711: ok
+    | [launcher] +0.00s mkdir /work/.atelier/last-good 0711: ok
+    | [launcher] +0.00s mkdir /work/.atelier/scratch 0711: ok
+    | [launcher] +0.00s mkdir /run/atelier 0711: ok (exists 0:0 1777 — wrong (want 0:0 0711), left)
+    | [launcher] +0.00s chmodIfRootOwned /run/atelier 0711: ok (1777 → 0711)
+    | [launcher] +0.00s mkdir /run/atelier/dev 0710: ok
+    | [launcher] +0.00s chown /run/atelier/dev 0:1000: ok
+    | [launcher] +0.00s mkdir /run/atelier/session 0700: ok
+    | [launcher] +0.00s openDir /work/.atelier: ok (fd 18)
+    | [launcher] +0.00s unlink /run/atelier/host-ready: ok
+    | [launcher] +0.00s chownIf /work/lost+found 1000:1000: ok (0:0 → 1000:1000)
+    | [launcher] +0.00s mkdirIfMissing /work/apps 0755 1000:1000: ok (created 1000:1000)
+    | [launcher] +0.00s chown /work 1000:1000: ok
+    | [launcher] +0.00s mkdir /tmp/tmux-1000 0700: ok
+    | [launcher] +0.00s chown /tmp/tmux-1000 1000:1000: ok
+    | [launcher] +0.00s mkdir /tmp/.X11-unix 1777: ok
+    | [launcher] +0.00s unlink /run/atelier/bootstrap.token: ok
+    | [launcher] +0.00s write /run/atelier/bootstrap.token 0400: ok
+    | [launcher] +0.00s unlink /run/atelier/dev.token: ok
+    | [launcher] +0.00s write /run/atelier/dev.token 0400: ok
+    | [launcher] +0.00s unlink /run/atelier/session/dev.token: ok
+    | [launcher] +0.00s write /run/atelier/session/dev.token 0400: ok
+    | [launcher] +0.00s chown /run/atelier/session/dev.token 1000:1000: ok
+    | [launcher] +0.00s chown /run/atelier/session 1000:1000: ok
+    | [launcher] +0.00s umask 077: ok
+    | [launcher] +0.01s host: spawned pid 19 (fd 3 = .atelier dirfd 18)
+    | [launcher] +0.01s session supervisor: spawned pid 20 uid 1000:1000 groups [19999]
+    | [session-stub] pid=20 uid=1000 gid=1000 groups=19999,1000 cwd=/work umask=0022 HOME=/work
+    | [session-stub] env keys: CHANNEL_CHAT,CHANNEL_TOKEN,CHANNEL_URL,CHAT_ID,DISABLE_AUTOUPDATER,HOME,HORSE_BROWSER_BIN,HORSE_BROWSER_UNATTENDED,LANG,LC_ALL,NPM_CONFIG_PREFIX,PATH,PERSONA,PERSONA_TEXT,PIP_USER,PWD,STORY_TEXT,TERM
+    | [host-stub] pid=19 uid=0 umask=0077 fd3=/work/.atelier cwd=/
+    | [host-stub] env keys: ATELIER_CONTROL,ATELIER_DIRFD,ATELIER_RUN,ATELIER_SPINE_URL,ATELIER_WORK,HOME,LANG,LC_ALL,NODE_ENV,PATH,PWD,TERM
+    | [host-stub] ready: listening :1845, /run/atelier/host-ready written
+[01:51:10.814] row 2: inpod.sh
+    | == process tree
+    |        PID    PPID   UID   GID COMMAND         COMMAND
+    |          1       0     0     0 bash            bash /code/host/entrypoint.sh
+    |         11       1     0     0 MainThread      node /code/host/launcher.mjs
+    |         19      11     0     0 MainThread      node /code/host/index.mjs
+    |         20      11  1000  1000 MainThread      node /app/session-supervisor.mjs
+    |         51       0     0     0 bash            bash /tmp/inpod.sh
+    |         59      51     0     0 sed             sed s/^/   /
+    | PASS PID 1 is bash = bash
+    | PASS launcher pid 11 (ppid 1, uid 0)
+    | PASS host pid 19
+    | PASS session supervisor pid 20
+    | PASS host uid = 0
+    | PASS host fd 3 → /work/.atelier = /work/.atelier
+    | PASS launcher holds the dirfd too = 1
+    | PASS session supervisor uid = 1000
+    | PASS session supervisor gid = 1000
+    | PASS session supervisor supplementary groups = 19999
+    | PASS host supplementary groups (root's, empty) = 
+    | PASS host umask = 0077
+    | PASS session supervisor umask = 0022
+    | PASS host cwd = /
+    | PASS session supervisor cwd (as uid 1000: no DAC_OVERRIDE for root) = /work
+    | PASS host CapEff = 00000000000000e1
+    | PASS session supervisor CapEff = 0000000000000000
+    | == env rows (from /proc/<pid>/environ)
+    | PASS H: ATELIER_DIRFD = ATELIER_DIRFD=3
+    | PASS H: no ATELIER_BOOTSTRAP = 0
+    | PASS H: no CHANNEL_* = 0
+    | PASS H: HOME = HOME=/root
+    | PASS H: ATELIER_SPINE_URL = pod CHANNEL_URL = ATELIER_SPINE_URL=http://127.0.0.1:9
+    | PASS S: no ATELIER_BOOTSTRAP = 0
+    | PASS S: no ATELIER_* = 0
+    | PASS S: CHANNEL_TOKEN kept = CHANNEL_TOKEN=canary-channel-token
+    | PASS S: HOME = HOME=/work
+    | PASS S: PERSONA_TEXT kept = 1
+    |    H keys: ATELIER_CONTROL ATELIER_DIRFD ATELIER_RUN ATELIER_SPINE_URL ATELIER_WORK HOME LANG LC_ALL NODE_ENV PATH PWD TERM 
+    |    S keys: CHANNEL_CHAT CHANNEL_TOKEN CHANNEL_URL CHAT_ID DISABLE_AUTOUPDATER HOME HORSE_BROWSER_BIN HORSE_BROWSER_UNATTENDED LANG LC_ALL NPM_CONFIG_PREFIX PATH PERSONA PERSONA_TEXT PIP_USER PWD STORY_TEXT TERM 
+    | PASS /proc/1/environ unreadable by uid 1000 = 1
+    | == filesystem contract (DESIGN §3 rows the launcher owns)
+    | PASS /work = 1000:1000 755
+    | PASS /work/lost+found = 1000:1000 700
+    | PASS /work/apps = 1000:1000 755
+    | PASS /work/.atelier = 0:0 711
+    | PASS /work/.atelier/data = 0:0 711
+    | PASS /work/.atelier/last-good = 0:0 711
+    | PASS /work/.atelier/scratch = 0:0 711
+    | PASS /run/atelier = 0:0 711
+    | PASS /run/atelier/dev = 0:1000 710
+    | PASS /run/atelier/session = 1000:1000 700
+    | PASS /run/atelier/session/dev.token (as its owner) = 1000:1000 400
+    | PASS /run/atelier/dev.token = 0:0 400
+    | PASS /run/atelier/bootstrap.token = 0:0 400
+    | PASS /run/atelier/host-ready = 0:0 644
+    | PASS /tmp/tmux-1000 = 1000:1000 700
+    | PASS /tmp/.X11-unix = 0:0 1777
+    | PASS /control = 1000:1000 700
+    | == tokens
+    | PASS bootstrap.token content = canary-bootstrap-secret
+    | PASS dev.token is 64 hex
+    | PASS session copy equals the host copy (read as its owner) = 9946778495d4bb96ae619703ccca57b731ac6b4a7eb9390cb2837d4a676452f2
+    | PASS uid 1000 reads its copy = 9946778495d4bb96ae619703ccca57b731ac6b4a7eb9390cb2837d4a676452f2
+    | PASS uid 1000 cannot read the host copy = 1
+    | PASS uid 1000 cannot read bootstrap.token = 1
+    | PASS uid 20001 cannot read the session copy = 1
+    | PASS uid 20001 cannot list /run/atelier/dev = 1
+    | PASS uid 1000 can traverse /run/atelier/dev (0710 group x, no list) = ok
+    | == root-owned inodes in /work + /control as uid 1000 (.atelier excluded by design)
+    | PASS count outside .atelier = 0
+    |    .atelier tree (root by design): 711 root:root /work/.atelier|711 root:root /work/.atelier/last-good|711 root:root /work/.atelier/data|711 root:root /work/.atelier/scratch|
+    | PASS uid 1000 can rename .atelier (owner of /work; the host works through the dirfd) = renamed
+    | PASS host fd 3 still resolves after the rename round trip = /work/.atelier
+    | PASS root cannot create in 1000-owned /work (why markers come first) = 1
+    | == the tmux socket-dir rule and the X11 dir
+    | PASS tmux as uid 1000 through /tmp/tmux-1000 = rc=0
+    | PASS uid 1000 can create under /tmp/.X11-unix = ok
+    | == node --test host/test/launcher*.test.js inside the pod (Linux, root)
+    |    ℹ tests 31
+    |    ℹ pass 31
+    |    ℹ fail 0
+    | PASS node --test rc = 0
+    | INPOD: pass=61 fail=0
+[01:51:12.336] row 3: kill -9 the host; peer curl loop at 50 ms across the blink
+[01:51:14.207] row 3: host-ready back with a new host pid 0.38 s after the kill — True rc=0 phase=Running
+[01:51:24.549] row 3: host pid 19 → 364
+[01:51:24.549] row 3: launcher 11 and supervisor 20 unchanged
+[01:51:24.729] row 3: peer loop: 1 non-200 of 172
+[01:51:24.838] row 3: .host-crash: 1000:1000 600 {"at":1788133873906,"code":null,"signal":"SIGKILL","exits":1} 
+[01:51:24.965] row 4: kill -TERM 1 → supervisor exit 1 mirrored → in-place container restart over the same /run/atelier
+[01:51:25.609] row 4: restartCount=1 after 0.53 s; previous container exit code=1
+[01:51:26.390] row 4: Ready again 0.69 s later (1.24 s after the TERM) — True rc=1 phase=Running
+[01:51:26.495] row 4: dev token re-minted
+[01:51:26.496] row 4: second life plan lines:
+    | [launcher] +0.00s mkdir /work/.atelier 0711: ok (exists)
+    | [launcher] +0.00s mkdir /work/.atelier/data 0711: ok (exists)
+    | [launcher] +0.00s mkdir /work/.atelier/last-good 0711: ok (exists)
+    | [launcher] +0.00s mkdir /work/.atelier/scratch 0711: ok (exists)
+    | [launcher] +0.00s mkdir /run/atelier 0711: ok (exists)
+    | [launcher] +0.00s mkdir /run/atelier/dev 0710: ok (exists)
+    | [launcher] +0.00s mkdir /run/atelier/session 0700: ok (exists 1000:1000 0700 — reclaimed 0:0)
+    | [launcher] +0.00s unlink /run/atelier/host-ready: ok
+    | [launcher] +0.00s unlink /run/atelier/bootstrap.token: ok
+    | [launcher] +0.00s unlink /run/atelier/dev.token: ok
+    | [launcher] +0.00s unlink /run/atelier/session/dev.token: ok
+    | [host-stub] ready: listening :1845, /run/atelier/host-ready written
+[01:51:26.742] row 4: stats after restart: 1000:1000 700 /run/atelier/session|1000:1000 400 /run/atelier/session/dev.token|0:0 400 /run/atelier/dev.token|0:0 644 /run/atelier/host-ready|1000:1000 755 /work|0:0 711 /work/.atelier|
+    | prev: [launcher] +4.60s host: exited code=null signal=SIGKILL
+    | prev: [launcher] +4.61s host: restart in 0 ms (exit 1 in window)
+    | prev: [launcher] +15.87s SIGTERM: host first, session supervisor next, 35000 ms for the teardown
+    | prev: [session-stub] SIGTERM → exit 1
+    | prev: [host-stub] SIGTERM → teardown
+    | prev: [launcher] +15.88s session supervisor: exited code=1 signal=null
+    | prev: [launcher] +15.88s host: exited code=0 signal=null
+    | prev: [launcher] +15.88s exit 1 (session supervisor code=1 signal=null)
+[01:51:26.918] row 5: ten host kills inside 10 min (second life) → parked → the container ENDS (exit 3, supervisor SIGTERMed first) → kubelet restart → Ready again; restart delays 0.5,1,2,4,8,16,30,30,30 s ≈ 2 min
+[01:53:18.123] row 5: 10 kills in 111.02 s; parked lines=1; container exit=3 rc=2; Ready again in 0.65 s; .host-crash lines=11 (1 from row 3 + 10); True rc=2 phase=Running
+    | prev: [launcher] +1.79s host: restart in 0 ms (exit 1 in window)
+    | prev: [launcher] +2.35s host: restart in 500 ms (exit 2 in window)
+    | prev: [launcher] +3.17s host: restart in 1000 ms (exit 3 in window)
+    | prev: [launcher] +4.53s host: restart in 2000 ms (exit 4 in window)
+    | prev: [launcher] +6.75s host: restart in 4000 ms (exit 5 in window)
+    | prev: [launcher] +10.96s host: restart in 8000 ms (exit 6 in window)
+    | prev: [launcher] +19.26s host: restart in 16000 ms (exit 7 in window)
+    | prev: [launcher] +35.58s host: restart in 30000 ms (exit 8 in window)
+    | prev: [launcher] +65.75s host: restart in 30000 ms (exit 9 in window)
+    | prev: [launcher] +96.03s host: parked after 10 exits/10 min — ending the container (exit 3) for the kubelet's backoff; session supervisor SIGTERM first
+    | prev: [launcher] +96.03s session supervisor: exited code=1 signal=null
+    | prev: [launcher] +96.03s exit 3 (host parked; session supervisor code=1 signal=null)
+    | 1000:1000 600
+    | {"at":1788133951206,"code":null,"signal":"SIGKILL","exits":9}
+    | {"at":1788133981487,"code":null,"signal":"SIGKILL","exits":10}
+[01:53:18.467] row 6: pod delete with grace 40 → SIGTERM order, host teardown, termination time
+[01:53:21.015] row 6: pod gone after 2.54 s
+[01:53:21.024] == VERDICT
+VERDICT: PASS — Ready 1.5s after start; kill -9 → Ready back in 0.38s, 1/172 non-200 across the blink; parked after 10 exits; restart mirrored exit 1, tokens re-minted; delete in 2.54s; inpod INPOD: pass=61 fail=0
+[01:53:21.025] cleanup: deleting ns spike-host-launcher
+namespace "spike-host-launcher" deleted
+== remote exit=0; ns after run: spike-host-launcher   Terminating   2m17s
+VERDICT: PASS — Ready 1.5s after start; kill -9 → Ready back in 0.38s, 1/172 non-200 across the blink; parked after 10 exits; restart mirrored exit 1, tokens re-minted; delete in 2.54s; inpod INPOD: pass=61 fail=0

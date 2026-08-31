@@ -1,7 +1,8 @@
 # The launcher lane — `host/entrypoint.sh`, `host/launcher.mjs`, `host/hygiene.mjs`
 
-The root process tree of PLAN §4.3 (R1) as built in step 2, DESIGN §2.1–2.2. State: code and
-laptop tests complete; the Linux drill (`run.sh`) is written and has not been run yet.
+The root process tree of PLAN §4.3 (R1) as built in step 2, DESIGN §2.1–2.2. State: code, laptop
+tests and the Linux drill (`run.sh`) all green — rows 1–6 PASS on fsn-01 against the live agent
+image, 2026-08-31 (the table below).
 
 ## What runs where
 
@@ -59,7 +60,7 @@ spawn-error events. `launcher-process.test.js` — the real launcher as a child 
 mkdtemp with `unprivileged()` + `realIo()`: modes on disk, fd 3 seen by the host, the helper's line
 in `.host-crash`, the restart, SIGTERM/exit mirroring end to end (no uid drop on the laptop).
 
-## The Linux drill (`run.sh` → fsn-01, one backgrounded task, ≤ 20 min, ends in `VERDICT:`)
+## The Linux drill (`run.sh` → fsn-01, one backgrounded task, ≤ 20 min, ends in `VERDICT:`) — PASS
 
 `run.sh` pins the image digest from `metal/clusters/prod/spine.yaml`, tars `host/`, `protocol/`,
 `package.json` and the assets that exist in the repo, ships them with `remote.sh`/`inpod.sh`/
@@ -74,25 +75,19 @@ on SIGTERM; the real one is g3's drill) and, when the shipped tree has no `host/
 `host-stub.mjs` stands in for the host (fd 3 check, `host-ready`, HTTP 200 on the pod IP :1845,
 teardown on SIGTERM).
 
-What it must still prove (nothing below has run yet):
+Rows, measured 2026-08-31 on fsn-01 (ns `spike-host-launcher`, trap-deleted) against
+`ghcr.io/pa1nd/agent-image@sha256:0f4fb94c…` — the live `AGENT_IMAGE` of
+`metal/clusters/prod/spine.yaml` — from `launcher-rows @ 08bbddc`; whole run 2 min 18 s,
+log `run.log`:
 
-1. Ready ≤ 4 s after the container start.
-2. `inpod.sh`: PID 1 bash; launcher/host root, host fd 3 → `/work/.atelier`; session supervisor
-   uid 1000 gid 1000 supplementary `19999`, CapEff 0, umask 022, cwd `/work`; host umask 077, cwd `/`;
-   env rows from `/proc/<pid>/environ`; every §3 path the launcher owns at its `uid:gid mode`
-   (incl. `/tmp/.X11-unix` 1777 — mkdir(2) honours the sticky bit on Linux, not on macOS);
-   tokens 0400 with the right readers (1000 reads its copy, not the host's; 20001 neither);
-   zero non-1000-owned inodes in `/work` + `/control` as uid 1000 outside `.atelier`; the agent can
-   rename `.atelier` and fd 3 still resolves; root cannot create in `/work`; tmux as uid 1000 through
-   `/tmp/tmux-1000`; `node --test host/test/launcher*.test.js` inside the pod.
-3. `kill -9` the host: new host pid, launcher and supervisor pids unchanged, Ready back ≤ 3 s,
-   ≤ 2 non-200 in the peer's 50 ms curl loop, one `.host-crash` line `1000:1000 0600` with
-   `signal:"SIGKILL", exits:1`.
-4. `kill -TERM 1`: host torn down first (previous logs), supervisor exit 1 mirrored as the container
-   exit code, in-place restart, Ready again, dev token re-minted, `session` dir reclaimed and chowned back.
-5. Ten host kills in the second life → parked; pod stays Running (unready), supervisor pid unchanged,
-   11 crash lines.
-6. Pod delete with grace 40 → gone in < 40 s.
+| # | what it proves | the line | measured |
+|---|---|---|---|
+| 1 | Ready ≤ 4 s after the container start | `test -f /run/atelier/host-ready` | **1.5 s** (1.88 s after staging) |
+| 2 | `inpod.sh`: PID 1 bash; launcher/host root, host fd 3 → `/work/.atelier`; supervisor uid 1000 gid 1000 supplementary `19999`, CapEff 0, umask 022, cwd `/work`; host umask 077, cwd `/`; env rows from `/proc/<pid>/environ`; every §3 path at its `uid:gid mode` (incl. `/tmp/.X11-unix` 1777 — mkdir(2) honours the sticky bit on Linux, not on macOS); tokens 0400 with the right readers (1000 reads its copy, not the host's; 20001 neither); zero non-1000-owned inodes in `/work` + `/control` as uid 1000 outside `.atelier`; the agent renames `.atelier` and fd 3 still resolves; root cannot create in `/work`; tmux as uid 1000 through `/tmp/tmux-1000`; `node --test host/test/launcher*.test.js` in the pod | `INPOD: pass=N fail=0` | **61 pass, 0 fail** |
+| 3 | `kill -9` the host: new host pid, launcher + supervisor pids unchanged, Ready back ≤ 3 s, ≤ 2 non-200 in the peer's 50 ms curl loop, one `.host-crash` line `1000:1000 0600` `signal:"SIGKILL", exits:1` | `host: restart in 0 ms (exit 1 in window)` | **host-ready back with a new host pid 0.38 s** after the kill (pid 19 → 364; launcher 11 and supervisor 20 untouched), **1 non-200 of 172**, `1000:1000 600` + `{"at":…,"code":null,"signal":"SIGKILL","exits":1}` |
+| 4 | `kill -TERM 1`: host torn down first, supervisor exit 1 mirrored as the container exit code, in-place restart, Ready again, dev token re-minted, `session` dir reclaimed and chowned back | `SIGTERM: host first` → `[host-stub] SIGTERM → teardown` | **restartCount 1 after 0.53 s, exit code 1**, Ready again 1.24 s after the TERM, token re-minted, `mkdir /run/atelier/session 0700: ok (exists 1000:1000 0700 — reclaimed 0:0)`, stats `session 1000:1000 700`, `session/dev.token 1000:1000 400`, `dev.token 0:0 400`, `host-ready 0:0 644`, `/work 1000:1000 755`, `/work/.atelier 0:0 711` |
+| 5 | Ten host kills in 10 min → parked → **the container ends (exit 3 = `HOST_PARKED_EXIT`), supervisor SIGTERMed first** → kubelet restart → Ready again, 11 crash lines (the rule of 2026-08-30; the 2026-08-28 pass predates it) | `host: parked after 10 exits/10 min — ending the container (exit 3) …` | **10 kills in 111.02 s**, backoff ladder as designed (`0, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000 ms`), park line ×1, **container exit 3**, restartCount 2, Ready again 0.65 s later, **`.host-crash` 11 lines** (1 from row 3 + 10), new supervisor pid |
+| 6 | Pod delete with grace 40 → gone in < 40 s | — | **2.54 s** |
 
 Rows 4–9 of DESIGN §8.2 (worker jail, watchdogs, install, corpus apps, sqlite teardown) belong to
 the other lanes and run in this same harness once their code exists: `run.sh` already ships the tree
