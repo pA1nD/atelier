@@ -14,7 +14,9 @@ export const HEARTBEAT_STALE_MS = 30_000
  *                          `host` = the dial row of the app's OWN computer (spine v36) — the routing seam: a company owns
  *                          one host per chat it owns, so an app is proxied to the host on its row, never to host(company)
  *   spine.host(company)  → Promise<{host_id, chat, epoch, token, pod_ip, port, tls, heartbeat_at, draining_at} | null>
- *                          the company's freshest — the app-less document's "is anything up" probe only
+ *                          the company's freshest — the app-less document's "is anything up" probe only. `chat` MUST
+ *                          ride this row (the spine sends it; the portal's row shaping passes it through): it is the
+ *                          only wake target an app-less poll has — a row without one wakes nothing (waking.mjs says so)
  *   spine.instance(instance) → Promise<{company} | null>   the instance's company when this replica has not seen it (a fresh replica, a socket before any document)
  *   spine.wake(chat)     → Promise<any>            POST /v1/computers/<chat>/wake — the sleep/wake door (step 7); optional: without it the
  *                          registry has no `wake` and the shell's poll only probes (an older portal in front of a newer shell)

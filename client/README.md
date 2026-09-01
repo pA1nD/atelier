@@ -4,7 +4,7 @@ The fork of the 1.x `client.jsx` + `index.html`, built by the shell and served a
 `/assets/client.js`. The 1.x files at the repo root are untouched (`atelier <id>` still runs them).
 
 ```
-node --test client/test/*.test.js        # 79 tests, no browser, no host process
+node --test client/test/*.test.js        # 84 tests, no browser, no host process
 ```
 
 ## Files

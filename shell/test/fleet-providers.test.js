@@ -49,6 +49,10 @@ test('registry-fleet: Host parse, TTL cache + company-frame invalidation, presen
   spine.rows.acme[1].host = { host_id: 'c-2', epoch: 'e2', token: 'tok2', pod_ip: '10.0.0.6' }
   clock += 6000; assert.equal((await reg.hostOf((await reg.apps('acme'))[1])).chat, 'chat-b')
   assert.equal(createRegistryFleet({ spine: { ...spine, wake: undefined }, membership: { present: () => true } }).wake, undefined, 'no door on the spine → no verb (the poll only probes)')
+  // host(company)'s `chat` comes from the spine row and nowhere else: a portal whose row shaping drops it leaves the
+  // app-less poll with no wake target (the shell says so in its log; the contract is in the header of registry-fleet.mjs)
+  const chatless = createRegistryFleet({ spine: { ...spine, async host() { return { host_id: 'c-1', epoch: 'e1', token: 'tok', pod_ip: '10.0.0.5', port: 1845 } } }, membership: { present: () => true } })
+  assert.equal((await chatless.host('acme')).chat, null, 'no chat on the row → none on the host: the dependency is the row')
   assert.equal(await reg.host('beta'), null)
   assert.equal(reg.stale({ heartbeatAt: clock - 31_000, drainingAt: null }), true); assert.equal(reg.stale({ heartbeatAt: clock - 1000, drainingAt: null }), false); assert.equal(reg.stale({ heartbeatAt: clock, drainingAt: clock }), true)
   assert.deepEqual(reg.chrome('acme'), { qid: 'global/catalyst-chrome', dir: null, digest: 'sha256:abc' })

@@ -117,7 +117,7 @@ shell/
   metrics.mjs        GET /_atelier/metrics: proxy p50/p99 per host, frames/s + gaps, resume ms, bootstrap bytes, cache age — operator or local only
   config.mjs         cfg from atelier.config.json + env (local) / env (fleet); the ignored-settings lines
   providers/         identity- gate- registry- bus- hostlink- ×{local,fleet}.mjs (+ hostlink-base.mjs)
-  test/              node --test shell/test/*.test.js   (65 tests, ~16 s, no host process; fixtures.mjs = the fakes)
+  test/              node --test shell/test/*.test.js   (70 tests, ~16 s, no host process; fixtures.mjs = the fakes)
   drill/smoke.mjs    the shell with local providers in front of the REAL host on this Mac (one background task, VERDICT)
 ```
 

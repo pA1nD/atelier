@@ -49,16 +49,32 @@ export function createWakingMarks({ ms = WAKING_MARK_MS } = {}) {
 // 'no-target' (nothing names a chat: an app-less document of a company the spine knows no
 // computer for) | 'no-verb' (the provider has none — local mode). Keyed by the CHAT because that
 // is what the spine's door takes and a chat owns exactly one computer, so chat = host. The route
-// awaits the call (the spine is one hop away, its client bounded) but its answer never depends on it:
-// `ok` is the probe's.
+// FIRES the call and does not await it (the door is a pod birth, up to 30 s; the portal's client
+// puts no clock on it) — its answer never depends on it: `ok` is the probe's; every throw is
+// caught here, so a fired call is never an unhandled rejection. THE FLEET'S SILENT GAPS ARE SAID
+// (review 2026-09-02): a fleet registry without the verb (a portal whose spine client has no
+// `wake` — an older portal in front of this shell) is logged once per process, and a fleet dial
+// row that names no chat is logged once per company per window — the spine puts `chat` on every
+// row, so a row without one is a contract break (the portal's row shaping dropped it), not a
+// state; 'no-host' is not logged here (the spine itself said there is no computer). Local mode has
+// no verb by design and stays silent.
 export function createWaker({ registry, ms = WAKE_CALL_MS, now = Date.now, log = () => {} }) {
-  const sent = new Map()   // chat → until
+  const sent = new Map()   // chat (or `no-target:<company>`) → until
+  const fleet = registry.kind === 'fleet'
+  let saidNoVerb = false
   return {
     async wake({ chat, company = null, reason = null }) {
-      if (typeof registry.wake !== 'function') return 'no-verb'
-      if (!chat) return 'no-target'
+      if (typeof registry.wake !== 'function') {
+        if (fleet && !saidNoVerb) { saidNoVerb = true; log('wake: the fleet registry has no wake verb (a portal without spine.wake?) — the poll only probes, nothing wakes') }
+        return 'no-verb'
+      }
       const t = now()
       for (const [k, until] of sent) if (until <= t) sent.delete(k)
+      if (!chat) {
+        const k = `no-target:${company ?? '?'}`
+        if (fleet && reason !== 'no-host' && !sent.has(k)) { sent.set(k, t + ms); log(`wake: ${company ?? '?'} host row names no chat (${reason ?? 'waking'}) — nothing to wake; the portal's dial row must carry the spine's \`chat\``) }
+        return 'no-target'
+      }
       if (sent.has(chat)) return 'held'
       sent.set(chat, t + ms)
       try { await registry.wake(chat); log(`wake: ${company ?? '?'} ${chat} (${reason ?? 'waking'})`); return 'sent' }

@@ -346,8 +346,11 @@ export async function laneProxy(ctx) {
     const state = await hostState({ registry, hostLink, bus, company, app, marks: ctx.marks, now: ctx.now })
     // A computer that is not serving is WOKEN, not only probed (step 7): the chat is the app row's, else the host row's
     // (the company's freshest — an app-less document, or a non-member's poll above). The waker holds it to one call per
-    // chat per 30 s and never changes the answer: `ok` is the probe's, and the page keeps polling until the host answers
-    if (state.waking) await ctx.waker?.wake({ chat: app?.chat ?? state.hostRow?.chat ?? null, company, reason: state.reason })
+    // chat per 30 s and never changes the answer: `ok` is the probe's, and the page keeps polling until the host answers.
+    // FIRED, NOT AWAITED (review 2026-09-02): the spine's door is a pod birth that can hold for 30 s and the portal's
+    // client puts no clock on it — awaiting would sit the 2 s poll (and the page's 60 s budget) on that hop, and a hung
+    // door would hold the request open for good. createWaker catches every throw, so nothing is unhandled here
+    if (state.waking) void ctx.waker?.wake({ chat: app?.chat ?? state.hostRow?.chat ?? null, company, reason: state.reason })
     return jsonR('proxy', 200, { ok: !state.waking, ...(state.waking ? { reason: state.reason } : {}) })
   }
   if (name === 'report' && ctx.method === 'POST') {

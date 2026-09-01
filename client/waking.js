@@ -2,8 +2,9 @@
 // answers `503 {waking:true}` (+ `x-atelier-waking: 1`) means the company's computer is asleep
 // or restarting. The client shows a plain fallback and polls `/_atelier/wake?company=<c>[&app=<slug>]`
 // with a 2 s → 10 s backoff; `{ok:true}` → full reload. The poll is BOUNDED like the shell's own
-// waking page: after WAKE_GIVE_UP_MS (60 s — the shell's `WAKE_GIVE_UP_MS`, kept equal by hand;
-// the bundle cannot import shell/) it stops and calls `onGiveUp` so the fallback says so — the
+// waking page and on the same clock: WAKE_GIVE_UP_MS (60 s — the shell's `WAKE_GIVE_UP_MS`, kept
+// equal by hand; the bundle cannot import shell/) of WALL-CLOCK time from the first miss, a slow
+// probe counted, then it stops and calls `onGiveUp` so the fallback says so — the
 // shell sent the wake on the first `{ok:false}`, the computer is taking unusually long, the
 // person reloads by hand. App fetches are the app's own; this covers the shell's (`/_atelier/*`
 // snapshots, the bundle imports).
@@ -28,16 +29,17 @@ export function wakeUrl(company, app = null) {
   return `/_atelier/wake?company=${encodeURIComponent(company || '')}${app ? `&app=${encodeURIComponent(app)}` : ''}`
 }
 
-// startWakePoll({fetch, setTimeout, clearTimeout, company, app?, reload, onTick, onGiveUp, giveUpMs}) → stop()
-// The deadline is counted in scheduled delay (the sum of the backoff steps, the last one clipped to land on it), not
-// wall-clock: no clock to inject, and the fake clock of the tests drives it exactly. A tick on the deadline still probes.
-export function startWakePoll({ fetch, setTimeout, clearTimeout, company, app = null, reload, onTick = () => {}, onGiveUp = () => {}, giveUpMs = WAKE_GIVE_UP_MS }) {
-  let timer = null, delay = null, elapsed = 0, stopped = false
+// startWakePoll({fetch, setTimeout, clearTimeout, now?, company, app?, reload, onTick, onGiveUp, giveUpMs}) → stop()
+// The deadline is wall-clock from the start (`now`, Date.now by default; the tests inject their fake clock's), the same
+// bound the shell's page keeps: the time a probe itself takes counts, so a slow shell cannot stretch the 60 s into
+// minutes (review 2026-09-02). The last backoff step is clipped to land on the deadline, and that tick still probes.
+export function startWakePoll({ fetch, setTimeout, clearTimeout, now = Date.now, company, app = null, reload, onTick = () => {}, onGiveUp = () => {}, giveUpMs = WAKE_GIVE_UP_MS }) {
+  let timer = null, delay = null, stopped = false
+  const startedAt = now()
   const schedule = () => {
-    const left = giveUpMs - elapsed
+    const left = giveUpMs - (now() - startedAt)
     if (left <= 0) { onGiveUp(); return }
     delay = Math.min(nextWakeDelay(delay), left)
-    elapsed += delay
     timer = setTimeout(tick, delay)
   }
   const tick = async () => {

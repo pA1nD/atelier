@@ -28,7 +28,7 @@ test('the poll backs off, reloads on {ok:true}, stops cleanly', async () => {
   const fetch = fakeFetch([{ match: (u) => u.startsWith('/_atelier/wake'), respond: () => answers.shift() }])
   const ticks = []
   let reloaded = 0
-  startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, company: 'acme', reload: () => reloaded++, onTick: (t) => ticks.push(t) })
+  startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, company: 'acme', reload: () => reloaded++, onTick: (t) => ticks.push(t) })
   await clock.advance(1999); assert.equal(fetch.calls.length, 0)
   await clock.advance(1);    assert.equal(fetch.calls.length, 1)
   await clock.advance(4000); assert.equal(fetch.calls.length, 2)
@@ -37,7 +37,7 @@ test('the poll backs off, reloads on {ok:true}, stops cleanly', async () => {
   assert.deepEqual(ticks.map((t) => t.ok), [false, false, true])
   await clock.advance(30000); assert.equal(fetch.calls.length, 3)          // reload ends the poll
 
-  const stop = startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, company: 'acme', reload: () => reloaded++ })
+  const stop = startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, company: 'acme', reload: () => reloaded++ })
   stop()
   await clock.advance(30000); assert.equal(fetch.calls.length, 3)
 })
@@ -48,7 +48,7 @@ test('the poll gives up after WAKE_GIVE_UP_MS (the shell page\'s 60 s): the last
   const fetch = fakeFetch([{ match: (u) => u.startsWith('/_atelier/wake'), respond: () => ({ status: 200, body: { ok: false } }) }])
   let gaveUp = 0, reloaded = 0
   const ticks = []
-  startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, company: 'acme', app: 'todo', reload: () => reloaded++, onTick: (t) => ticks.push(t.delay), onGiveUp: () => gaveUp++ })
+  startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, company: 'acme', app: 'todo', reload: () => reloaded++, onTick: (t) => ticks.push(t.delay), onGiveUp: () => gaveUp++ })
   assert.equal(fetch.calls.length, 0)
   await clock.advance(59_999)
   assert.equal(gaveUp, 0); assert.equal(fetch.calls.length, 7)                 // 2, 6, 14, 24, 34, 44, 54 s
@@ -61,11 +61,24 @@ test('the poll gives up after WAKE_GIVE_UP_MS (the shell page\'s 60 s): the last
   // a shorter deadline; stop() before it → no give-up callback either
   const f2 = fakeFetch([{ match: () => true, respond: () => ({ status: 200, body: { ok: false } }) }])
   let g2 = 0
-  const stop = startWakePoll({ fetch: f2, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, company: 'acme', reload: () => {}, onGiveUp: () => g2++, giveUpMs: 5000 })
+  const stop = startWakePoll({ fetch: f2, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, company: 'acme', reload: () => {}, onGiveUp: () => g2++, giveUpMs: 5000 })
   await clock.advance(5000); assert.equal(f2.calls.length, 2); assert.equal(g2, 1)      // 2 s, then 4 s clipped to 3 s
   const f3 = fakeFetch([{ match: () => true, respond: () => ({ status: 200, body: { ok: false } }) }])
   let g3 = 0
-  const stop3 = startWakePoll({ fetch: f3, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, company: 'acme', reload: () => {}, onGiveUp: () => g3++, giveUpMs: 5000 })
+  const stop3 = startWakePoll({ fetch: f3, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, company: 'acme', reload: () => {}, onGiveUp: () => g3++, giveUpMs: 5000 })
   await clock.advance(2000); stop3(); stop()
   await clock.advance(10_000); assert.equal(f3.calls.length, 1); assert.equal(g3, 0)
+})
+
+test('the deadline is wall-clock, like the shell page\'s: a probe that takes 30 s counts against the 60 s, so a slow shell gives up after ~66 s and two probes, not minutes and eight', async () => {
+  const clock = fakeClock()
+  const slow = (body) => new Promise((r) => clock.setTimeout(() => r(body), 30_000))
+  const fetch = fakeFetch([{ match: (u) => u.startsWith('/_atelier/wake'), respond: () => slow({ status: 200, body: { ok: false } }) }])
+  let gaveUp = 0
+  startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, company: 'acme', reload: () => {}, onGiveUp: () => gaveUp++ })
+  await clock.advance(2000);  assert.equal(fetch.calls.length, 1)            // the first probe leaves at 2 s …
+  await clock.advance(30_000); assert.equal(fetch.calls.length, 1); assert.equal(gaveUp, 0)   // … answers at 32 s; the next is due at 36 s
+  await clock.advance(4000);  assert.equal(fetch.calls.length, 2)
+  await clock.advance(30_000); assert.equal(gaveUp, 1); assert.equal(fetch.calls.length, 2)   // 66 s: past the deadline when it answers → give up, no third
+  await clock.advance(120_000); assert.equal(fetch.calls.length, 2); assert.equal(gaveUp, 1); assert.equal(clock.pending(), 0)
 })
