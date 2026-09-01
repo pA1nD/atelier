@@ -45,9 +45,12 @@ export function fakeRegistry({ mode = 'local', companies, chrome = { qid: 'globa
   const watchers = new Map()
   const probes = new Map()
   const all = () => Object.entries(companies).flatMap(([id, c]) => (c.apps ?? []).map((a) => ({ company: id, hasFrontend: true, primary: false, meta: {}, ...a, host: a.host === undefined ? (c.host ?? null) : a.host })))
-  const shape = (h, p) => ({ hostId: h.hostId ?? 'local', epoch: p?.epoch ?? h.epoch ?? null, token: h.token ?? 'dev', ip: '127.0.0.1', port: h.port, tls: null, heartbeatAt: h.heartbeatAt !== undefined ? h.heartbeatAt : (p?.heartbeatAt ?? now()), drainingAt: h.drainingAt ?? null })
+  const shape = (h, p) => ({ hostId: h.hostId ?? 'local', chat: h.chat ?? null, epoch: p?.epoch ?? h.epoch ?? null, token: h.token ?? 'dev', ip: '127.0.0.1', port: h.port, tls: null, heartbeatAt: h.heartbeatAt !== undefined ? h.heartbeatAt : (p?.heartbeatAt ?? now()), drainingAt: h.drainingAt ?? null })
+  const wakes = []
   return {
     kind: mode,
+    // the wake verb as the providers have it: the fleet's (the spine door, recorded here), none locally
+    ...(mode === 'fleet' ? { wakes, async wake(chat) { wakes.push(chat) } } : {}),
     company(host) { const h = String(host ?? '').replace(/:\d+$/, ''); return mode === 'fleet' && h.endsWith('.' + domain) ? h.slice(0, -(domain.length + 1)) : null },
     companies() { return mode === 'fleet' ? [] : Object.keys(companies).map((id) => ({ id, name: id, href: `/${id}/` })) },
     async apps(company) { return all().filter((a) => a.company === company) },

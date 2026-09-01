@@ -19,7 +19,7 @@ node --test client/test/*.test.js        # 79 tests, no browser, no host process
 | `route.js` | `parseUrl` / `buildUrl`, one DNS label per segment (`SLUG_RE` = protocol/registry's) |
 | `sheet.js` | `sheetHref(app, chrome)` and `swapSheet(doc, href)` — the FOUC-free link swap |
 | `picker.js` | `pickTarget(boot, id)` → portal POST (fleet) or `location.assign` (local); `performPick` |
-| `waking.js` | `isWakingResponse`, `startWakePoll` (2 s → 10 s → `location.reload()`) |
+| `waking.js` | `isWakingResponse`, `wakeUrl(company, app?)`, `startWakePoll` (2 s → 10 s → `location.reload()`; gives up after 60 s → `onGiveUp`) |
 | `reporter.js` | the always-on error reporter → `POST /_atelier/report`, ≤ 10/min, active app only |
 | `test/` | `node --test`; `fakes.js` = virtual clock, scriptable WebSocket/fetch, a tiny DOM |
 
@@ -31,7 +31,7 @@ node --test client/test/*.test.js        # 79 tests, no browser, no host process
 - Assets at their revision: `/modules/<c>/<s>/frontend.js?rev=N`, `styles.css?rev=N`, the chrome at `?rev=<chromeRev>`. No `?v=` anywhere.
 - `GET /_atelier/topics/<topic>` → `{stream, seq, rev|null, error:{message, hint}|null}` for an instance topic (the overlay prints `hint` — `file:line:col message — fix` — when present, else `message`);
   `/_atelier/rail` and `/_atelier/topics/company:<c>` → `{stream, seq, modules:[rows], chrome:{qid, digest}}` (`chromeRev` also accepted).
-- `GET /_atelier/wake?company=<c>` → `{ok:true}` when the host answers; a `503 {waking:true}` (+ `x-atelier-waking: 1`) anywhere on `/_atelier/*` or a failed bundle import that the wake probe confirms → the waking fallback.
+- `GET /_atelier/wake?company=<c>[&app=<slug>]` → `{ok:true}` when the host answers (a miss makes the shell wake the computer — the fleet's step-7 door; the client only polls, bounded at 60 s); a `503 {waking:true}` (+ `x-atelier-waking: 1`) anywhere on `/_atelier/*` or a failed bundle import that the wake probe confirms → the waking fallback.
 - `GET /_atelier/whoami` (200 / 401) for the banner's offline-vs-unauthed probe; `POST /_atelier/report` for the reporter.
 - The socket `/_atelier/ws?company=<c>` per protocol/events (the query names the document's company locally; the fleet derives it from the Host and ignores it — `/_atelier/rail` and `/_atelier/topics/<t>` carry the same query). **Liveness probe** (the loopback pair of `shell/events.mjs`): a silent socket is probed with `pong {at}` every `PING_MS` (1 s) while visible and the shell echoes `ping {at}`; any frame back is the answer (a `ping` is never answered — no loop); none within 1 s → kill + reconnect. A `sub` unacked for 2 s on an open socket is the same verdict.
 

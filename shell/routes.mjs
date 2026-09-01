@@ -344,6 +344,10 @@ export async function laneProxy(ctx) {
     const row = slug && SLUG_RE.test(slug) ? await registry.resolve(company, slug) : null
     const app = row && (await registry.present(ctx.person.id, row.instance)) ? row : null
     const state = await hostState({ registry, hostLink, bus, company, app, marks: ctx.marks, now: ctx.now })
+    // A computer that is not serving is WOKEN, not only probed (step 7): the chat is the app row's, else the host row's
+    // (the company's freshest — an app-less document, or a non-member's poll above). The waker holds it to one call per
+    // chat per 30 s and never changes the answer: `ok` is the probe's, and the page keeps polling until the host answers
+    if (state.waking) await ctx.waker?.wake({ chat: app?.chat ?? state.hostRow?.chat ?? null, company, reason: state.reason })
     return jsonR('proxy', 200, { ok: !state.waking, ...(state.waking ? { reason: state.reason } : {}) })
   }
   if (name === 'report' && ctx.method === 'POST') {

@@ -1,17 +1,21 @@
-// shell/waking.mjs — the waking page and `/_atelier/wake` (DESIGN §3.5; PLAN §4.3 Network).
+// shell/waking.mjs — the waking page, `/_atelier/wake` and the wake call (DESIGN §3.5; PLAN §4.3 Network).
 // A document route whose host is waking (fleet: heartbeat older than 30 s or draining; both modes:
 // the 1 s probe failed) serves this page: no chrome, plain, status 503, `Retry-After: 3`,
 // `Cache-Control: no-store`, a 2 s JS poll of `/_atelier/wake?company=<c>[&app=<slug>]` that
-// reloads on `{ok:true}` — BOUNDED (review 2026-08-30, C13): nothing in the fleet wakes a chat pod
-// outside a turn (the wake verb is step 7's sleep/wake), so after WAKE_GIVE_UP_MS of `{ok:false}` the
-// page stops polling and says so honestly — the computer is asleep, this page no longer checks, a
-// message to Bayard in its chat wakes it and the person reloads by hand (nothing reloads for them).
-// No `<meta refresh>`: a reload would re-arm the poll forever. Fetch routes answer `503 {waking:true}`
-// (proxy.mjs) and the client shows its own fallback (client/waking.js — its own backoff is unbounded;
-// R3-12 keeps client/ closed in step 5, named in LANES-STEP5 Deferred).
+// reloads on `{ok:true}`. The poll PROBES and, when the host is not serving, WAKES it (step 7):
+// the route calls `registry.wake(chat)` — the fleet provider's verb, the spine's
+// `POST /v1/computers/<chat>/wake` door — at most once per chat per WAKE_CALL_MS (`createWaker`;
+// the spine rate-bounds too, and a 2 s poll must not hammer it). Local mode has no verb (the CLI
+// restarts a dead host by itself, README §4), so the poll only probes there. `{ok:true}` still means
+// exactly "the host answered a probe". BOUNDED (review 2026-08-30, C13): after WAKE_GIVE_UP_MS of
+// `{ok:false}` the page stops polling and says so — the wake was sent, the computer is taking
+// unusually long, the person reloads by hand (nothing reloads for them). No `<meta refresh>`: a
+// reload would re-arm the poll forever. Fetch routes answer `503 {waking:true}` (proxy.mjs) and
+// the client shows its own fallback (client/waking.js — the same poll, the same 60 s bound).
 export const WAKE_POLL_MS = 2000
 export const WAKE_GIVE_UP_MS = 60_000
-export const ASLEEP_COPY = 'This computer is asleep and this page has stopped checking. Send Bayard a message in its chat, wait a minute, then reload this page.'
+export const WAKE_CALL_MS = 30_000
+export const ASLEEP_COPY = 'This computer is taking unusually long to wake, and this page has stopped checking. Wait a minute, then reload this page.'
 export const HEARTBEAT_STALE_MS = 30_000
 export const WAKING_MARK_MS = 2000
 
@@ -39,6 +43,30 @@ export function createWakingMarks({ ms = WAKING_MARK_MS } = {}) {
   }
 }
 
+// The wake call (one per shell): `wake({chat, company, reason})` sends the registry's `wake(chat)`
+// once per chat per WAKE_CALL_MS and answers what it did — 'sent' | 'failed' (the call threw; the
+// window is kept so a broken spine is not hammered either) | 'held' (inside the window) |
+// 'no-target' (nothing names a chat: an app-less document of a company the spine knows no
+// computer for) | 'no-verb' (the provider has none — local mode). Keyed by the CHAT because that
+// is what the spine's door takes and a chat owns exactly one computer, so chat = host. The route
+// awaits the call (the spine is one hop away, its client bounded) but its answer never depends on it:
+// `ok` is the probe's.
+export function createWaker({ registry, ms = WAKE_CALL_MS, now = Date.now, log = () => {} }) {
+  const sent = new Map()   // chat → until
+  return {
+    async wake({ chat, company = null, reason = null }) {
+      if (typeof registry.wake !== 'function') return 'no-verb'
+      if (!chat) return 'no-target'
+      const t = now()
+      for (const [k, until] of sent) if (until <= t) sent.delete(k)
+      if (sent.has(chat)) return 'held'
+      sent.set(chat, t + ms)
+      try { await registry.wake(chat); log(`wake: ${company ?? '?'} ${chat} (${reason ?? 'waking'})`); return 'sent' }
+      catch (e) { log(`wake: ${company ?? '?'} ${chat} (${reason ?? 'waking'}) failed: ${e?.code ?? e?.message ?? e}`); return 'failed' }
+    },
+  }
+}
+
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
 export function wakingHtml({ company, slug = null, nonce }) {
@@ -48,7 +76,7 @@ export function wakingHtml({ company, slug = null, nonce }) {
 <title>Waking up…</title>
 <style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif}main{max-width:32rem;padding:1rem}p{opacity:.7}</style>
 </head><body><main><h1 id="h">Waking up ${esc(company ?? '')}…</h1><p id="p">The computer behind this app is starting. This page reloads by itself.</p></main>
-<script nonce="${esc(nonce)}">(function(){var t=${WAKE_POLL_MS},until=Date.now()+${WAKE_GIVE_UP_MS};function asleep(){document.title='Asleep';document.getElementById('h').textContent='Asleep';document.getElementById('p').textContent=${JSON.stringify(ASLEEP_COPY)}}function poll(){if(Date.now()>until){asleep();return}fetch(${JSON.stringify(url)},{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){if(j&&j.ok)location.reload();else setTimeout(poll,t)}).catch(function(){setTimeout(poll,t)})}setTimeout(poll,t)})();</script>
+<script nonce="${esc(nonce)}">(function(){var t=${WAKE_POLL_MS},until=Date.now()+${WAKE_GIVE_UP_MS};function asleep(){document.title='Still waking…';document.getElementById('h').textContent='Still waking…';document.getElementById('p').textContent=${JSON.stringify(ASLEEP_COPY)}}function poll(){if(Date.now()>until){asleep();return}fetch(${JSON.stringify(url)},{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){if(j&&j.ok)location.reload();else setTimeout(poll,t)}).catch(function(){setTimeout(poll,t)})}setTimeout(poll,t)})();</script>
 </body></html>
 `
 }

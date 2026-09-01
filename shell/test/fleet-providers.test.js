@@ -10,14 +10,15 @@ import { MembershipModel } from '../../protocol/index.js'
 const TODO = 'i-0123456789abcdef', WIKI = 'i-fedcba9876543210'
 
 function fakeSpine() {
-  const calls = { apps: 0, host: 0 }
+  const calls = { apps: 0, host: 0, wake: [] }
   const listeners = new Set()
   const rows = { acme: [{ instance: TODO, slug: 'todo', meta: { name: 'Todo' }, requested_primary: true, primary: false, rev: 3, state: 'live', computer: 'c-1', chat: 'chat-a' }, { instance: WIKI, slug: 'wiki', meta: {}, rev: 1, state: 'stopped', computer: 'c-1', chat: 'chat-b' }] }
   return {
     calls, rows,
     async apps(company) { calls.apps++; return rows[company] ?? [] },
     async instance(instance) { const c = Object.keys(rows).find((k) => rows[k].some((r) => r.instance === instance)); return c ? { company: c } : null },
-    async host(company) { calls.host++; return company === 'acme' ? { host_id: 'c-1', epoch: 'e1', token: 'tok', pod_ip: '10.0.0.5', port: 1845, tls: null, heartbeat_at: 1000, draining_at: null } : null },
+    async host(company) { calls.host++; return company === 'acme' ? { host_id: 'c-1', chat: 'chat-a', epoch: 'e1', token: 'tok', pod_ip: '10.0.0.5', port: 1845, tls: null, heartbeat_at: 1000, draining_at: null } : null },
+    async wake(chat) { calls.wake.push(chat); return { ok: true } },
     chrome() { return { qid: 'global/catalyst-chrome', digest: 'sha256:abc' } },
     onCompany(fn) { listeners.add(fn); return () => listeners.delete(fn) },
     fire(company) { for (const fn of listeners) fn(company) },
@@ -42,7 +43,12 @@ test('registry-fleet: Host parse, TTL cache + company-frame invalidation, presen
   assert.equal(await reg.present('p1', TODO), true); assert.equal(await reg.present('p2', TODO), false); assert.equal(await reg.present('p2', WIKI), true)
   assert.equal(await reg.present('stranger', TODO), false); assert.equal(await reg.present('p1', 'i-0000000000000000'), false)
   const h = await reg.host('acme')
-  assert.deepEqual(h, { hostId: 'c-1', epoch: 'e1', token: 'tok', ip: '10.0.0.5', port: 1845, tls: null, heartbeatAt: 1000, drainingAt: null })
+  assert.deepEqual(h, { hostId: 'c-1', chat: 'chat-a', epoch: 'e1', token: 'tok', ip: '10.0.0.5', port: 1845, tls: null, heartbeatAt: 1000, drainingAt: null })
+  // the wake verb (step 7) is the spine's door; the dial row on an app row carries the row's chat when the spine's `host` has none
+  await reg.wake('chat-b'); assert.deepEqual(spine.calls.wake, ['chat-b'])
+  spine.rows.acme[1].host = { host_id: 'c-2', epoch: 'e2', token: 'tok2', pod_ip: '10.0.0.6' }
+  clock += 6000; assert.equal((await reg.hostOf((await reg.apps('acme'))[1])).chat, 'chat-b')
+  assert.equal(createRegistryFleet({ spine: { ...spine, wake: undefined }, membership: { present: () => true } }).wake, undefined, 'no door on the spine → no verb (the poll only probes)')
   assert.equal(await reg.host('beta'), null)
   assert.equal(reg.stale({ heartbeatAt: clock - 31_000, drainingAt: null }), true); assert.equal(reg.stale({ heartbeatAt: clock - 1000, drainingAt: null }), false); assert.equal(reg.stale({ heartbeatAt: clock, drainingAt: clock }), true)
   assert.deepEqual(reg.chrome('acme'), { qid: 'global/catalyst-chrome', dir: null, digest: 'sha256:abc' })

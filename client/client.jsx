@@ -203,16 +203,20 @@ function ChromeMissingFallback({ qid, err }) {
   return React.createElement('pre', { style: PRE_STYLE }, body);
 }
 
-// The company's computer is asleep or restarting: poll /_atelier/wake (2 s → 10 s) and reload on ok.
-function WakingFallback({ company }) {
+// The company's computer is asleep or restarting: poll /_atelier/wake (2 s → 10 s; the shell wakes it on the first
+// miss) and reload on ok. `app` = the active app's slug, so a multi-pod company's poll names the computer that is
+// asleep. Bounded at 60 s like the shell's page: past it the copy says the wake is taking unusually long.
+function WakingFallback({ company, app }) {
   const [tries, setTries] = useState(0);
+  const [gaveUp, setGaveUp] = useState(false);
   useEffect(() => startWakePoll({
     fetch: (u, o) => window.fetch(withDevToken(u), o),
     setTimeout: (f, ms) => window.setTimeout(f, ms), clearTimeout: (t) => window.clearTimeout(t),
-    company, reload: () => window.location.reload(), onTick: () => setTries((n) => n + 1),
-  }), [company]);
-  return React.createElement('pre', { style: PRE_STYLE },
-    `atelier — the computer for '${company}' is waking up.\n\nThis page reloads itself when it answers${tries ? ` (checked ${tries}×)` : ''}.`);
+    company, app, reload: () => window.location.reload(), onTick: () => setTries((n) => n + 1), onGiveUp: () => setGaveUp(true),
+  }), [company, app]);
+  return React.createElement('pre', { style: PRE_STYLE }, gaveUp
+    ? `atelier — the computer for '${company}' is taking unusually long to wake.\n\nThis page has stopped checking. Wait a minute, then reload it.`
+    : `atelier — the computer for '${company}' is waking up.\n\nThis page reloads itself when it answers${tries ? ` (checked ${tries}×)` : ''}.`);
 }
 
 // Dev overlay for a backend that failed to (re)load, scoped to the ACTIVE app. Fed by the app's
@@ -491,7 +495,7 @@ function App() {
     performPick(document, pickTarget(boot, ws));
   }
 
-  if (waking) return React.createElement(WakingFallback, { company: COMPANY || '' });
+  if (waking) return React.createElement(WakingFallback, { company: COMPANY || '', app: activeQid ? activeQid.split('/')[1] : null });
   if (!chromeQid) return React.createElement(ChromeMissingFallback, { qid: null });
   if (!chromeEntry) return null;                          // still loading — empty body, no flash
   if (chromeEntry.status !== 'ok' || typeof chromeEntry.chrome !== 'function') {
