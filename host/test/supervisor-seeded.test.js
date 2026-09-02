@@ -45,7 +45,7 @@ test('treeId: 40 hex over the CONTENT of the non-excluded files — the same byt
 })
 
 test('a seeded folder boots as PROD from the folder: no dev slot, no `(dev)` line, no watcher, the content id is the commit, ONE adopt row (ms `at`) + ONE modulesChanged; the dev idle window passes and prod still serves; a re-seed is a new rev; a second host life announces and never rebuilds; a normal folder beside it boots dev-only as before', async () => {
-  const w = world()   // gitCommit false — the system host has no git
+  const w = world({ seededApps: true })   // gitCommit false — the system host has no git; seededApps — its ATELIER_SEEDED_APPS=1
   const dir = w.app('home', { 'module.json': APP_JSON('Home'), 'backend.js': BACKEND(1), 'logo.svg': '<svg/>', [SEEDED_MARKER]: '', '.image-stamp': 'deadbeef' })
   w.app('plain', { 'module.json': APP_JSON('Plain'), 'backend.js': BACKEND(1) })
   let sup = w.make({ timing: { devIdleMs: 300, idleMs: 60_000 } })
@@ -136,9 +136,9 @@ test('a seeded folder boots as PROD from the folder: no dev slot, no `(dev)` lin
 })
 
 test('a broken seeded folder: ONE build report and ONE rev across sweeps (the folder\'s answer until its bytes change), no prod slot (404 not deployed), no worker; fixed bytes → built on the next scan', async () => {
-  const w = world()
+  const w = world({ seededApps: true })
   const dir = w.app('broken', { 'module.json': APP_JSON('B'), 'backend.js': 'export default {', [SEEDED_MARKER]: '' })
-  const sup = w.make()
+  const sup = w.make()   // world({ seededApps: true }) below
   try {
     await sup.scan()
     const r = sup.resolve('acme', 'broken')
@@ -218,5 +218,25 @@ test('a HOST-SIDE failure on the seeded road (the spawn refused: EAGAIN) is retr
     assert.equal(JSON.parse((await api(sup, r, '/rev', prod)).body).rev, 1)
     assert.deepEqual(fs.readdirSync(dot(w, 'last-good', r.instance)).filter((n) => /^rev-\d+$/.test(n)), ['rev-3'])
     assert.equal(w.releases.length, 1); assert.equal(w.reports.length, 1)
+  } finally { await w.done(sup) }
+})
+
+test('the marker alone is not authority (B2): on a host NOT configured with ATELIER_SEEDED_APPS=1 a folder carrying `.atelier-seeded` takes the new-folder road exactly as before — dev-only, watched, `(dev)` line, no prod slot, no adopt row, no seeded line', async () => {
+  const w = world()   // seededApps false: every agent host
+  w.app('sneaky', { 'module.json': APP_JSON('Sneaky'), 'backend.js': BACKEND(1), [SEEDED_MARKER]: '' })
+  const sup = w.make()
+  try {
+    await sup.scan()
+    await waitFor(() => sup.resolve('acme', 'sneaky').dev_state === 'live')
+    const r = sup.resolve('acme', 'sneaky')
+    assert.equal(sup.rows.get(r.instance).seeded, false)
+    assert.equal(r.state, 'undeployed'); assert.equal(r.prod_state, null); assert.equal(r.deployed_rev, null); assert.equal(r.dev_rev, 1)
+    assert.ok(sup.rows.get(r.instance).watcher, 'watched like any folder')
+    assert.ok(w.lines.some((l) => /^\[sneaky\] rev 1 LIVE \(dev\) in \d+ ms$/.test(l)))
+    assert.ok(!w.lines.some((l) => /seeded/.test(l)), w.lines.join('\n'))
+    assert.equal((await api(sup, r, '/rev', prod)).status, 404, 'not deployed: the gate, the rehearsal, the backup and git still stand between the folder and prod')
+    assert.deepEqual(w.releases, []); assert.deepEqual(w.modules, [])
+    await sup.scan()
+    assert.deepEqual(w.releases, [])
   } finally { await w.done(sup) }
 })

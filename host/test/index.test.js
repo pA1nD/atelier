@@ -20,6 +20,10 @@ test('config: defaults are DESIGN §1.2; fleet iff ATELIER_SPINE_URL; dirfd only
   assert.equal(c.appsLinks, false)
   assert.equal(config({ ATELIER_APPS_LINKS: '1' }).appsLinks, true)
   assert.equal(config({ ATELIER_APPS_LINKS: '1', ATELIER_SPINE_URL: 'http://spine:7331' }).appsLinks, false)
+  // ATELIER_SEEDED_APPS (DESIGN §10.3 "seeded rows"): the host-level gate of the seeded road — off unless the image says `1`
+  assert.equal(c.seededApps, false); assert.equal(f.seededApps, false)
+  assert.equal(config({ ATELIER_SEEDED_APPS: '1' }).seededApps, true)
+  assert.equal(config({ ATELIER_SEEDED_APPS: 'true' }).seededApps, false)
 })
 
 test('hostDirs: fleet adds $run (chmod of the 1777 tmpfs), .atelier/tmp, $run/w, the release rows (data-dev, prod, rehearsal, backup) and the chrome cache to the launcher plan; local carries the launcher rows too', () => {

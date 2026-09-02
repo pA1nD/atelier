@@ -59,6 +59,12 @@ export function config(env) {
     gitCommit: env.ATELIER_GIT_COMMIT !== '0',
     gitHome: env.ATELIER_GIT_HOME ?? (spineUrl ? '/work' : (env.HOME ?? '/work')),   // row G's HOME: /work in the fleet, the developer's on a laptop
     appsLinks: env.ATELIER_APPS_LINKS === '1' && !spineUrl,   // symlinked app folders (shell/ local mode, DESIGN §8 H1); refused in the fleet
+    // the seeded road (DESIGN §10.3 "seeded rows") is opened by the HOST's configuration, never by a file in a folder the
+    // agent owns: only the portal-host image sets ATELIER_SEEDED_APPS=1 (its Containerfile ENV); the per-folder
+    // `.atelier-seeded` marker then says WHICH folders. On every other host the marker is inert — a folder carrying it
+    // boots dev-only like any new folder (review 2026-09-02 B2: an agent could otherwise mint a PROD release with
+    // `touch .atelier-seeded`, past the gate, the rehearsal, the backup and git)
+    seededApps: env.ATELIER_SEEDED_APPS === '1',
   }
 }
 

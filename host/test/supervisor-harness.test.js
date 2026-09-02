@@ -113,8 +113,9 @@ export function proxyRequest({ sock, req, res, user }) {
 
 // A world: work/apps + .atelier under a short tmp root (macOS socket path cap), a fake registrar (with the
 // release row + config stamp seams of DESIGN §10.3), a recording report. `gitCommit` (default false) turns
-// the row G git steps on — the deploy tests need them (a real `git` on this machine).
-export function world({ chromeDir = null, timing = {}, gitCommit = false } = {}) {
+// the row G git steps on — the deploy tests need them (a real `git` on this machine); `seededApps` (default
+// false) is the system host's ATELIER_SEEDED_APPS=1 — without it a `.atelier-seeded` marker is inert.
+export function world({ chromeDir = null, timing = {}, gitCommit = false, seededApps = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join('/tmp', 'sup-')))
   const work = path.join(root, 'work'), run = path.join(root, 'run')
   fs.mkdirSync(path.join(work, 'apps'), { recursive: true })
@@ -145,7 +146,7 @@ export function world({ chromeDir = null, timing = {}, gitCommit = false } = {})
     async reconcile(rows) { registrar.reconcileCalls.push(rows); return registrar.reconcileImpl ? registrar.reconcileImpl(rows) : { unlinked: [] } },
   }
   const make = (extra = {}) => createSupervisor({
-    os: osx, dirfd, cfg: { work, run, chromeDir, gitCommit, gitHome: root, company: 'acme' }, log: (l) => lines.push(l),
+    os: osx, dirfd, cfg: { work, run, chromeDir, gitCommit, gitHome: root, company: 'acme', seededApps }, log: (l) => lines.push(l),
     report: (kind, instance, rev, detail) => reports.push({ kind, instance, rev, ...detail }),
     registrar, onSwap: (instance, rev) => { swaps.push([instance, rev]); registrar.modulesChanged(instance, rev) }, onDevSwap: (instance, rev) => devSwaps.push([instance, rev]),
     spawn: makeSpawn(runtime), proxy: proxyRequest, hook: runHook, hostEnv: process.env,
