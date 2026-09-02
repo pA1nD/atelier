@@ -71,6 +71,10 @@ IP=$($K get pod computer -o jsonpath='{.status.podIP}')
 log "Ready $RDY s after staging — $(readyq); pod IP $IP"
 hostlog > $OUT/host-boot.log
 DT=$(X 'cat /run/atelier/dev.token' | tr -d '\r\n')
+# packaging (row 9e's dependency): the deps app's package.json names file:/code/drill-apps/loot-pkg-1.0.0.tgz — it must be in
+# the pod BEFORE any deploy, or every install of deps fails with an ENOENT that looks like a host fault
+PKG=$(X 'test -s /code/drill-apps/loot-pkg-1.0.0.tgz && test -s /code/drill-apps/deps/package.json && echo ok' | tr -d '\r\n ')
+[ "$PKG" = ok ] && log "packaging: /code/drill-apps/loot-pkg-1.0.0.tgz + deps/package.json in the pod" || rowfail 9e "packaging: /code/drill-apps/loot-pkg-1.0.0.tgz or deps/package.json missing in the pod (run-deploy.sh ships host/drill/rows/loot-pkg-1.0.0.tgz into drill-apps/) — row 9e skipped"
 
 # ---- row 9t: the whole suite inside the pod, as uid 1000 (the same rows the Mac runs), bounded
 log "row 9t: node --test host/test/*.test.js inside the pod as uid 1000 (≤ 600 s)"
@@ -195,23 +199,47 @@ hostlog | grep -E 'release row|not recorded at the spine' | tail -2 | sed 's/^/ 
 
 # ---- row 9e: an app WITH dependencies — the rehearsal's install in the export (take → npm → freeze --dest), the export's
 # node_modules 0:<uid>, the worker createRequire's them, the dev tree keeps its own; then the install hold measured under the loop
-log "row 9e: deps (better-sqlite3 + loot-pkg tgz + core-js): the dev install first (row 8's shape), then atelier deploy deps"
-X "$AS1000 sh -c 'cp -r /code/drill-apps/deps /work/apps/deps; ls -ln /work/apps/deps'" | sed 's/^/    | /'
-t0=$(now)
-for i in $(seq 1 900); do hostlog | grep -q 'install deps: \(freeze {\|FREEZE-ABORT\|npm rc=[^0]\)' && break; sleep 0.2; done
-for i in $(seq 1 100); do [ "$(appfield deps dev_state)" = live ] && break; sleep 0.2; done
-hostlog | grep 'install deps' > $OUT/deps-install-dev.log; sed 's/^/    | /' $OUT/deps-install-dev.log
-log "row 9e: dev install + LIVE in $(el $t0) s: dev_state=$(appfield deps dev_state)"
-grep -q 'freeze {' $OUT/deps-install-dev.log && [ "$(appfield deps dev_state)" = live ] || rowfail 9e "the dev install of deps did not freeze / go LIVE: $(tail -1 $OUT/deps-install-dev.log)"
+# the row's steps build on each other: a step that fails names ITSELF and the rest is skipped (a missing install must never
+# read as "the dev tree lost its node_modules" or "no lock in the export")
+R9E=1; skip9e(){ rowfail 9e "$1"; R9E=0; }
+[ "${R[9e]}" = PASS ] || R9E=0
+if [ $R9E = 1 ]; then
+log "row 9e: deps (better-sqlite3 + loot-pkg tgz + core-js): the folder first (no package.json, as row 8), then the manifest arrives → the dev install (a folder that ARRIVES with a package.json is built, not installed — onInstall fires on a manifest change)"
+X "$AS1000 sh -c 'cp -r /code/drill-apps/deps /work/apps/deps && rm -f /work/apps/deps/package.json; ls -ln /work/apps/deps'" | sed 's/^/    | /'
+for i in $(seq 1 150); do [ "$(appfield deps dev_state)" = live ] && break; sleep 0.2; done
+[ "$(appfield deps dev_state)" = live ] || skip9e "deps (no package.json yet) not dev-live within 30 s: dev_state=$(appfield deps dev_state)"
+fi
+if [ $R9E = 1 ]; then
 DINST=$(appfield deps instance); DUID=$(X "cat /work/.atelier/$DINST/uid" | tr -d '\r\n ')
 AS_DWORKER="setpriv --reuid=$DUID --regid=$DUID --clear-groups"
+X "$AS1000 cp /code/drill-apps/deps/package.json /work/apps/deps/package.json"
+t0=$(now)
+for i in $(seq 1 600); do hostlog | grep -q 'install deps: \(freeze {\|FREEZE-ABORT\|npm rc=[^0]\|install FAILED\)' && break; sleep 0.2; done
+hostlog | grep 'install deps\|\[deps\] install' > $OUT/deps-install-dev.log; sed 's/^/    | /' $OUT/deps-install-dev.log
+if ! grep -q 'install deps:' $OUT/deps-install-dev.log; then skip9e "the dev install never ran (no 'install deps:' line within $(el $t0) s of the manifest's arrival)"
+elif ! grep -q 'install deps: freeze {' $OUT/deps-install-dev.log; then skip9e "the dev install did not freeze: $(grep 'install deps' $OUT/deps-install-dev.log | tail -1 | cut -c1-200)"; fi
+fi
+if [ $R9E = 1 ]; then
+for i in $(seq 1 100); do [ "$(appfield deps dev_state)" = live ] && [ "$(appfield deps dev_rev)" -ge 2 ] 2>/dev/null && break; sleep 0.2; done
+log "row 9e: dev install + LIVE in $(el $t0) s: dev_state=$(appfield deps dev_state) dev_rev=$(appfield deps dev_rev); $(grep -o 'freeze {.*}' $OUT/deps-install-dev.log | head -1)"
+[ "$(appfield deps dev_state)" = live ] || skip9e "deps not dev-live after its install: $(appfield deps dev_state)"
+X "$AS1000 test -d /work/apps/deps/node_modules/better-sqlite3" || skip9e "the dev install froze but the dev tree has no node_modules/better-sqlite3"
+fi
+if [ $R9E = 1 ]; then
 LC0=$(hostlog | grep -c 'install deps')
 t0=$(now); CLI 'deploy deps -m "deps release"' > $OUT/deploy-deps-1.log; RCD=$?; sed 's/^/    | /' $OUT/deploy-deps-1.log
 log "row 9e: rc=$RCD in $(el $t0) s; deployed_rev $(appfield deps deployed_rev)"
-grep -q '^deploy green: deps ' $OUT/deploy-deps-1.log && [ "$RCD" = 0 ] || rowfail 9e "atelier deploy deps was not green (rc=$RCD)"
 hostlog | grep 'install deps' | tail -n +$((LC0+1)) > $OUT/deps-install-export.log; sed 's/^/    | /' $OUT/deps-install-export.log
-grep -q 'install deps: take rc=0' $OUT/deps-install-export.log && grep -q 'install deps: freeze {' $OUT/deps-install-export.log || rowfail 9e "the export install did not take + freeze --dest: $(tail -2 $OUT/deps-install-export.log | tr '\n' ' ')"
+grep -q '^deploy green: deps ' $OUT/deploy-deps-1.log && [ "$RCD" = 0 ] || skip9e "atelier deploy deps was not green (rc=$RCD): $(grep -E '^deploy (RED|FAILED)' $OUT/deploy-deps-1.log | cut -c1-300)"
+fi
+if [ $R9E = 1 ]; then
+# after a dev freeze build/ is the agent's (its lock copy inside, the manifest copy the worker's): `take` hands it to the worker
+# without opening the app folder — a `thaw` here would move the dev tree's node_modules into the export
+grep -q 'install deps: take rc=0' $OUT/deps-install-export.log && grep -q 'install deps: freeze {' $OUT/deps-install-export.log || skip9e "the export install did not take + freeze --dest: $(tail -2 $OUT/deps-install-export.log | tr '\n' ' ' | cut -c1-300)"
+grep -q 'install deps: take rc=0 {[^}]*"noop":1' $OUT/deps-install-export.log && log "row 9e: NOTE take was a no-op (build/ was the worker's) — after a dev freeze it should have been the agent's"
 DC12=$(appfield deps deployed_rev | cut -c1-12); DEXP=/work/.atelier/prod/$DINST/$DC12
+fi
+if [ $R9E = 1 ]; then
 X "find $DEXP/node_modules -printf '%m %U:%G %y\n' | sort | uniq -c | sort -rn | head -4" | sed 's/^/    | export node_modules: /'
 NMF=$(X "find $DEXP/node_modules ! -user 0 | wc -l" | tr -d '\r\n '); NMG=$(X "find $DEXP/node_modules ! -group $DUID | wc -l" | tr -d '\r\n '); NMS=$(X "find $DEXP/node_modules -perm /6022 ! -type l ! -type d | wc -l" | tr -d '\r\n ')
 log "row 9e: export node_modules inodes not root-owned: $NMF; not group $DUID: $NMG; setuid/setgid/g+w/o+w files: $NMS (want 0 0 0)"
@@ -221,6 +249,8 @@ X "$AS1000 test -d /work/apps/deps/node_modules/better-sqlite3" || rowfail 9e "t
 X "$AS1000 test -s $DEXP/package-lock.json" || rowfail 9e "no package-lock.json in the export"
 P "cd /code && node host/drill/step2/signer.mjs GET http://$IP:1845/api/acme/deps/deps --app $DINST" > $OUT/prod-deps.txt; sed 's/^/    | prod: /' $OUT/prod-deps.txt
 grep -q '^STATUS 200' $OUT/prod-deps.txt && grep -q '"sqlite":42' $OUT/prod-deps.txt && grep -q '"loot":"1.0.0"' $OUT/prod-deps.txt && grep -q '"corejs":"ok"' $OUT/prod-deps.txt && grep -q "\"cwd\":\"$DEXP\"" $OUT/prod-deps.txt || rowfail 9e "the prod worker did not resolve its deps from the export: $(tail -1 $OUT/prod-deps.txt | head -c 200)"
+fi
+if [ $R9E = 1 ]; then
 # the install hold (DESIGN §10.3, S6 of the review): the second deploy's rehearsal install SIGKILLs the worker uid — prod is held under
 # its gate through the freeze and a cold resume; measured here, never asserted below the 10 s hold (the 503s past it are the waking answer)
 log "row 9e: the second deploy of deps under a 50 ms prod loop — the install hold, measured"
@@ -246,11 +276,13 @@ PY
 log "row 9e: deploy 2 in $T_D2 s; the prod loop across the rehearsal's freeze: $LOOPD (the install hold; a 503 here is the waking answer past the 10 s hold)"
 grep -v '^200 ' $OUT/prod-loop-deps.txt | head -3 | sed 's/^/    | non-200: /'
 echo "$LOOPD" | grep -q ' mixed=0 ' || rowfail 9e "a lower rev after a higher one in the deps loop"
+fi
+[ $R9E = 1 ] || log "row 9e: skipped after its first failure (see FAIL row 9e above)"
 
 X 'cat /work/.atelier/agent.log' > $OUT/agent-log-final.txt; hostlog > $OUT/host-final.log
 X "find /work/.atelier -maxdepth 3 -printf '%m %u:%g %p\n' | sort" > $OUT/tree-final.txt 2>&1
 
 log "== VERDICT"
 SUM="9t:${R[9t]} 9a:${R[9a]} 9b:${R[9b]} 9c:${R[9c]} 9d:${R[9d]} 9e:${R[9e]}"
-[ $FAILS = 0 ] && echo "VERDICT: PASS — $SUM; pod tests pass=$TP fail=$TF; export 0:$WUID 0750/0640 (EACCES as 1000, readable as $WUID); hook uid $HU with DRILL_CONFIG, no token; backup $BID 0:19999 0750 (worker EACCES, 1000 reads); locker $GREEN/3 green, prod loop $LOOP; deps export node_modules 0:$DUID, the install hold: $LOOPD" \
+[ $FAILS = 0 ] && echo "VERDICT: PASS — $SUM; pod tests pass=$TP fail=$TF; export 0:$WUID 0750/0640 (EACCES as 1000, readable as $WUID); hook uid $HU with DRILL_CONFIG, no token; backup $BID 0:19999 0750 (worker EACCES, 1000 reads); locker $GREEN/3 green, prod loop $LOOP; deps export node_modules 0:${DUID:-?}, the install hold: ${LOOPD:-?}" \
                 || echo "VERDICT: FAIL — $SUM"

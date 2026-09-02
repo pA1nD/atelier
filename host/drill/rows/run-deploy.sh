@@ -19,6 +19,9 @@ for p in host protocol package.json package-lock.json index.html client.jsx chro
 cp "$REPO/shell/proxy.mjs" "$STAGE/shell/proxy.mjs"
 rm -rf "$STAGE/host/drill/step2/out" "$STAGE/host/drill/launcher/out" "$STAGE/host/drill/rows/out"
 cp -R "$HERE/apps/." "$STAGE/drill-apps/"
+# the deps app's package.json names `file:/code/drill-apps/loot-pkg-1.0.0.tgz` — the tarball ships beside the apps (row 9e)
+[ -s "$HERE/loot-pkg-1.0.0.tgz" ] || { echo "VERDICT: BLOCKED — packaging: $HERE/loot-pkg-1.0.0.tgz missing (the deps app's local-tarball dependency)"; exit 1; }
+cp "$HERE/loot-pkg-1.0.0.tgz" "$STAGE/drill-apps/"
 COPYFILE_DISABLE=1 tar -C "$STAGE" --exclude='*.log' -czf "$TMP/code.tgz" . || { echo "VERDICT: BLOCKED — tar failed"; exit 1; }
 echo "== shipping $(du -h "$TMP/code.tgz" | cut -f1): $(ls "$STAGE/drill-apps" | tr '\n' ' ')"
 echo "$IMAGE" > "$TMP/image.txt"
