@@ -151,5 +151,9 @@ test('walkFiles applies the 1.x exclusions', () => {
   const dir = mkApp({ 'a.jsx': '', 'b.js': '', 'c.html': '', 'backend.js': '', 'sub/d.tsx': '', 'node_modules/x.js': '', 'data/y.js': '', '_p/z.js': '', '-q/z.js': '', '.h/z.js': '', '.env.js': '' })
   assert.deepEqual(walkFiles(dir).map((f) => f.rel).sort(), ['a.jsx', 'b.js', 'c.html', 'sub/d.tsx'])
   assert.deepEqual(walkFiles(dir, { exts: ['jsx', 'js'] }).map((f) => f.rel).sort(), ['a.jsx', 'b.js'])
+  // name order whatever readdir returns (review 2026-09-02, Grok 8): the Tailwind scan feeds a chrome digest
+  const reversed = { readdirSync: (d, o) => fs.readdirSync(d, o).reverse() }
+  assert.deepEqual(walkFiles(dir, { fs: reversed }).map((f) => f.rel), ['a.jsx', 'b.js', 'c.html', 'sub/d.tsx'], 'sorted, not the filesystem\'s order')
+  assert.deepEqual(walkFiles(dir).map((f) => f.rel), walkFiles(dir, { fs: reversed }).map((f) => f.rel))
   fs.rmSync(dir, { recursive: true, force: true })
 })
