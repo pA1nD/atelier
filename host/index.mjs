@@ -17,6 +17,7 @@ import { spawnWorker } from './worker/spawn.mjs'
 import { proxyRequest } from './worker/proxy.mjs'
 import { jailPlan, applyJail, claimRoundTrip } from './worker/jail.mjs'
 import { installDeps } from './worker/install.mjs'
+import { runHook } from './worker/hook.mjs'
 import { createCollector } from './errors/collector.mjs'
 import { agentLog } from './errors/agentlog.mjs'
 import { push } from './errors/push.mjs'
@@ -55,6 +56,7 @@ export function config(env) {
     hostTls: env.ATELIER_HOST_TLS || null,
     nodeEnv: env.NODE_ENV ?? 'production',
     gitCommit: env.ATELIER_GIT_COMMIT !== '0',
+    gitHome: env.ATELIER_GIT_HOME ?? (spineUrl ? '/work' : (env.HOME ?? '/work')),   // row G's HOME: /work in the fleet, the developer's on a laptop
     appsLinks: env.ATELIER_APPS_LINKS === '1' && !spineUrl,   // symlinked app folders (shell/ local mode, DESIGN §8 H1); refused in the fleet
   }
 }
@@ -66,9 +68,10 @@ export function podIp(ifaces = networkInterfaces()) {
 }
 
 /**
- * The directories the host itself owns beyond the launcher's plan (DESIGN §3): `.atelier/tmp` (the
- * workers' TMPDIR parents) and `$run/w` (the socket dirs). Local mode adds the launcher's rows too
- * (there is no launcher on a laptop) and mints the dev token when none exists.
+ * The directories the host itself owns beyond the launcher's plan (DESIGN §3, §10.3): `.atelier/tmp` (the
+ * workers' TMPDIR parents), `$run/w` (the socket dirs) and the release rows `.atelier/{data-dev,prod,rehearsal,
+ * backup}` (0711 root; the per-instance dirs below are the jail plans'). Local mode adds the launcher's rows
+ * too (there is no launcher on a laptop) and mints the dev token when none exists.
  */
 export function hostDirs(cfg, { local }) {
   const W = cfg.work, R = cfg.run
@@ -76,7 +79,8 @@ export function hostDirs(cfg, { local }) {
     [`${W}/.atelier`, 0o711], [`${W}/.atelier/data`, 0o711], [`${W}/.atelier/last-good`, 0o711], [`${W}/.atelier/scratch`, 0o711],
     [`${W}/apps`, 0o755], [R, 0o711], [`${R}/dev`, 0o710], [`${R}/session`, 0o700],
   ]
-  return [...(local ? launcherRows : []), [R, 0o711], [`${W}/.atelier/tmp`, 0o711], [`${R}/w`, 0o711]]
+  return [...(local ? launcherRows : []), [R, 0o711], [`${W}/.atelier/tmp`, 0o711], [`${R}/w`, 0o711],
+    [`${W}/.atelier/data-dev`, 0o711], [`${W}/.atelier/prod`, 0o711], [`${W}/.atelier/rehearsal`, 0o711], [`${W}/.atelier/backup`, 0o711]]
 }
 // mkdir with the mode (chmod after: the host runs under umask 077); an EXISTING root-owned dir with
 // another mode is chmodded (the launcher closes `$run` 1777 → 0711 before any uid-1000 process exists;
@@ -132,7 +136,7 @@ function ensureDevToken(cfg, log) {
  * Startup audit (DESIGN §6.5, PLAN §4.3 Hygiene): nothing a uid outside its owner set may read —
  * the tokens (0400 root), `/work/.claude` and `/control` (agent-private, no o bits), the agent's
  * credential files `/work/.claude.json` (API-key tails), `/work/.mcp.json`, `/work/.claude/settings.json`
- * (0600), `last-good/<inst>` and `data/<inst>` (no `o+r`). Returns `{bad, absent}`: the host refuses
+ * (0600), `last-good/<inst>`, `data/<inst>`, `data-dev/<inst>`, `prod/<inst>`, `backup/<inst>` (no `o+r`). Returns `{bad, absent}`: the host refuses
  * to serve while `bad` is non-empty; `absent` names what was not there to check (logged, so a drill
  * tells "not there yet" from "checked").
  */
@@ -144,7 +148,7 @@ export function audit(os, cfg, dirfd, { fs: fsx = fs } = {}) {
   check(`${cfg.work}/.claude`, (m) => (m & 0o007) === 0)
   check(cfg.control, (m) => (m & 0o007) === 0)
   for (const f of ['.claude.json', '.mcp.json', '.claude/settings.json']) check(`${cfg.work}/${f}`, (m) => (m & 0o077) === 0)
-  for (const sub of ['last-good', 'data']) {
+  for (const sub of ['last-good', 'data', 'data-dev', 'prod', 'backup']) {
     let names = []
     try { names = fsx.readdirSync(os.at(dirfd, sub)) } catch {}
     for (const n of names) check(os.at(dirfd, `${sub}/${n}`), (m) => (m & 0o007) === 0)
@@ -174,9 +178,9 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const slugOf = (inst) => supervisorRef.current?.apps().find((r) => r.instance === inst)?.slug
   const log = agentLog({ os, path: os.at(dirfd, 'agent.log'), stderr, slugOf })
   const hostLog = (line) => { say(line) }
-  // supervisor lines: every one to stderr; LIVE / STOPPED / RESUMED to agent.log (FAILED / KILLED
-  // reach agent.log through the collector sink — one line per failure, DESIGN §L1)
-  const supLog = (line) => { say(line); if (/ rev \d+ (LIVE in|STOPPED|RESUMED)/.test(line)) log.line(line) }
+  // supervisor lines: every one to stderr; LIVE / STOPPED / RESUMED / the release lines to agent.log (FAILED /
+  // KILLED reach agent.log through the collector sink — one line per failure, DESIGN §L1)
+  const supLog = (line) => { say(line); if (/ rev \d+ (LIVE |STOPPED|RESUMED|adopted|restored|config release)|^\[[^\]]+\] deploy |prod DOWN after/.test(line)) log.line(line) }
 
   // ---- metrics (PLAN §4.5): one recorder, fed by the supervisor, the watchdog and the events lane,
   // served by the protocol port at /_host/metrics
@@ -191,7 +195,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const ip = podIp()
   const rcfg = { ...cfg, podIp: ip, hostBind: local ? '127.0.0.1' : (ip ?? '0.0.0.0') }   // the protocol port: the pod IP alone in the fleet (no loopback path for a worker), loopback on a laptop
   if (!local && !ip) hostLog('no pod IP found — the protocol port binds 0.0.0.0')
-  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().map((w) => w.instance) ?? [] })
+  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().filter((w) => w.slot === 'prod').map((w) => w.instance) ?? [] })
   const events = createEvents({ transport: registrar.lane, hostId: () => registrar.hostId, epoch: () => registrar.epoch, log: hostLog, metrics })
   const pusher = local ? null : push({ transport: registrar.lane, running: collector.running, log: hostLog })
   if (pusher) collector.sink(pusher)
@@ -222,21 +226,28 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
       collector.report(kind, instance, rev, d)
       if (d?.file && d?.hint) dev?.backendError(instance, `rev ${rev}: ${d.hint}`)
     },
-    spawn: spawnWorker, proxy: proxyRequest,
+    spawn: spawnWorker, proxy: proxyRequest, hook: runHook, hostEnv: process.env,
     jail: privileged ? { jailPlan, applyJail, claimRoundTrip } : null,
+    // the install's beforeFreeze: freeze.py SIGKILLs every process of the worker uid (both slots) — the supervisor
+    // stops dev and holds prod under its gate until the install settles (DESIGN §10.3)
     install: privileged ? (a) => installDeps({ ...a, beforeFreeze: () => supervisor.stop(a.spec.instance) }) : null,
+    // a PROD release (deploy.mjs step 4): the running rev, the shell's invalidate, the registry's rev
     onSwap: (instance, rev) => {
       collector.setRunning(instance, rev)
-      dev?.backendError(instance, null)
       events.invalidate(instance)
-      dev?.invalidate(instance)
       registrar.modulesChanged(instance, rev).catch((e) => hostLog(`modules-changed ${instance}: ${e.message}`))
+    },
+    // a DEV swap (D3): the dev shell's reload frame only — the company's shell never hears of dev
+    onDevSwap: (instance, rev) => {
+      dev?.backendError(instance, null)
+      dev?.invalidate(instance, { rev })
     },
     onResume: (instance, rev) => collector.setRunning(instance, rev),   // frontend reports against a resumed rev are not `no-running-rev`
     onBroadcast: (row, event) => dev?.broadcast(row.instance, event),
   })
   supervisorRef.current = supervisor
-  const watchdog = createWatchdog({ os, workers: supervisor.workers, report: collector.report, kill: supervisor.kill, dataRoot: os.at(dirfd, 'data'), log: hostLog, metrics })
+  registrar.onConfigStamp = (instance, updated) => supervisor.onConfigStamp(instance, updated)   // D16: the heartbeat's config stamps → a release under the gate
+  const watchdog = createWatchdog({ os, workers: supervisor.workers, report: collector.report, kill: (instance, why, slot) => supervisor.kill(instance, why, slot), dataRoot: os.at(dirfd, 'data'), log: hostLog, metrics })
 
   const refuse = () => fault
   server = createServer({ cfg: rcfg, auth, supervisor, collector, registrar, log: hostLog, frontendReport: report, refuse, metrics })

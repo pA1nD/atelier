@@ -24,10 +24,17 @@
 //                              aliased to ../../shims/*, minified in production
 //   /modules/global/<chrome>/styles.css   `chromeSheet()` when wired (supervisor/tailwind.mjs), else
 //                              the chrome's styles.css passed through
-//   /_atelier/whoami, /_atelier/apps, /_atelier/events?app=<instance> (collector.recent),
+//   /_atelier/whoami, /_atelier/apps, /_atelier/events?app=<instance|slug> (collector.recent),
 //   /_atelier/report (POST), /_host/healthz, /_atelier/ws (frames from worker broadcasts stamped
 //   topic = company/slug; `shell` frames for reload and backend-error; `shell` is reserved)
 // gzip when accepted (text bodies ≥ 1 KiB).
+//
+// The app lanes here serve the DEV slot (DESIGN §10.3 D3: Bayard's tree, hot reloaded, never the company's).
+// The release verbs (D6): `POST /_atelier/deploy {app, message, commit?, noBackup?}` and `POST /_atelier/restore
+// {app, backup}` answer an NDJSON stream of step lines ending in ONE verdict line (401 without the token, 404
+// unknown app, 409 `deploy in progress`, 400 a bad body); `GET /_atelier/releases?app=` and
+// `GET /_atelier/backups?app=` list the host's rows. `host/devcli.mjs` (`atelier deploy|rollback|releases|
+// backups|restore`) is their client.
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -38,6 +45,9 @@ import { WebSocketServer } from 'ws'
 import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild'
 import { PROTOCOL } from '../../protocol/index.js'
 import { json, parseMount, safeRel, readJson, serveAssetResult, appsView, findInstance, frontendReportHandler, closeDraining, LISTENER_DRAIN_MS } from './server.mjs'
+
+/** findApp(supervisor, x) → the row named by an instance id or a slug (the CLI names slugs). */
+export const findApp = (supervisor, x) => findInstance(supervisor, x) ?? (typeof x === 'string' && x ? supervisor.apps().find((r) => r.slug === x && r.state !== 'unclaimed') ?? null : null)
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const DEFAULT_DEV_PORT = 1844
@@ -188,10 +198,16 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     if (p === '/_atelier/apps') return json(res, 200, appsView(supervisor))
     if (p === '/_host/healthz') return json(res, 200, { api: PROTOCOL, hostId: registrar.hostId, epoch: registrar.epoch, uptime: Math.round((Date.now() - startedAt) / 1000), apps: supervisor.apps().length })
     if (p === '/_atelier/events') {
-      const row = findInstance(supervisor, url.searchParams.get('app'))
+      const row = findApp(supervisor, url.searchParams.get('app'))
       if (!row) return json(res, 404, {})
       return json(res, 200, collector.recent(row.instance))
     }
+    if (p === '/_atelier/releases' || p === '/_atelier/backups') {
+      const row = findApp(supervisor, url.searchParams.get('app'))
+      if (!row) return json(res, 404, { error: 'unknown app' })
+      return json(res, 200, p === '/_atelier/releases' ? { instance: row.instance, slug: row.slug, releases: supervisor.releases(row.instance) } : { instance: row.instance, slug: row.slug, backups: supervisor.backups(row.instance) })
+    }
+    if ((p === '/_atelier/deploy' || p === '/_atelier/restore') && req.method === 'POST') return verb(req, res, user, p === '/_atelier/deploy' ? 'deploy' : 'restore')
     if (p === '/_atelier/report' && req.method === 'POST') {
       let body
       try { body = await readJson(req) } catch (e) { return json(res, e.status ?? 400, {}) }
@@ -218,17 +234,44 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     if (mount) {
       const row = supervisor.resolve(mount.company, mount.slug)
       if (!row) return json(res, 404, {})
-      if (mount.kind === 'api') { const stripped = stripToken(url); if (stripped !== null) req.url = stripped; registrar.served?.(row.instance); return supervisor.handle(row, req, res, user) }
+      if (mount.kind === 'api') { const stripped = stripToken(url); if (stripped !== null) req.url = stripped; return supervisor.handle(row, req, res, user, { slot: 'dev' }) }
       const rel = safeRel(mount.rel)
       if (!rel) return json(res, 404, {})
       const revQ = url.searchParams.get('rev')
-      const asset = await supervisor.asset(row, rel, { rev: revQ !== null && /^\d+$/.test(revQ) ? Number(revQ) : undefined })
+      const asset = await supervisor.asset(row, rel, { rev: revQ !== null && /^\d+$/.test(revQ) ? Number(revQ) : undefined, slot: 'dev' })
       if (!asset) return json(res, 404, {})
       return serveAssetResult(req, res, asset, { encode: encoder(req) })
     }
     if (RESERVED_PREFIXES.some((x) => p.startsWith(x))) return json(res, 404, {})
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, {})
     return send(req, res, 200, document(p, user, url.searchParams.get('token')), HTML, { 'cache-control': 'no-store' })
+  }
+
+  // ---- the release verbs: one NDJSON stream per call — every step a line, the verdict the last line
+  async function verb(req, res, user, kind) {
+    let body
+    try { body = await readJson(req) } catch (e) { return json(res, e.status ?? 400, { error: 'bad json' }) }
+    const row = findApp(supervisor, body?.app)
+    if (!row) return json(res, 404, { error: 'unknown app' })
+    const by = `agent:${user.id}`
+    // step lines may arrive before the verb's precheck returned (a synchronous refusal is a JSON status, not a stream): queued until the head is out
+    let streaming = false
+    const queue = []
+    const write = (line) => { try { res.write(JSON.stringify(line) + '\n') } catch {} }
+    const onStep = (line) => { if (streaming) write(line); else queue.push(line) }
+    let p
+    try {
+      p = kind === 'deploy'
+        ? supervisor.deploy(row.instance, { message: body.message, commit: body.commit ?? null, noBackup: body.noBackup === true, by, onStep })
+        : supervisor.restore(row.instance, body.backup, { by, onStep })
+    } catch (e) { return json(res, e.status ?? 500, { error: e.message }) }
+    res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' })
+    res.flushHeaders?.()
+    streaming = true
+    for (const l of queue.splice(0)) write(l)
+    log(`dev: ${kind} ${row.slug} by ${by}`)
+    await Promise.resolve(p).catch((e) => onStep({ t: 'verdict', outcome: 'failed', slug: row.slug, step: kind, error: e?.message ?? String(e) }))
+    res.end()
   }
 
   // ---- WS multiplex (1.x wire: JSON frames {topic, ...event}; every client gets every frame,
@@ -269,8 +312,8 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     close,
     // worker {t:'broadcast'} → the app's topic (company/slug); the shell owns `topic`, last wins
     broadcast(instance, event) { const qid = qidOf(instance); if (qid) fanout({ ...event, topic: qid }) },
-    // a swap → the 1.x reload frame + the LIVE rev (`moduleId` is the qid the client matches against its module list — a slug alone would full-reload; the client re-imports `frontend.js?rev=<rev>` and re-points the sheet)
-    invalidate(instance, { cssOnly = false } = {}) { const r = findInstance(supervisor, instance); if (r) fanout({ type: 'reload', moduleId: `${r.company}/${r.slug}`, rev: r.rev, cssOnly, topic: 'shell' }) },
+    // a DEV swap → the 1.x reload frame + the dev LIVE rev (`moduleId` is the qid the client matches against its module list — a slug alone would full-reload; the client re-imports `frontend.js?rev=<rev>` and re-points the sheet)
+    invalidate(instance, { cssOnly = false, rev } = {}) { const r = findInstance(supervisor, instance); if (r) fanout({ type: 'reload', moduleId: `${r.company}/${r.slug}`, rev: rev ?? r.dev_rev ?? r.rev, cssOnly, topic: 'shell' }) },
     backendError(instance, message) { const qid = qidOf(instance); if (qid) fanout({ type: 'backend-error', qid, message, topic: 'shell' }) },
     clients, document, chromeQid,
   }
