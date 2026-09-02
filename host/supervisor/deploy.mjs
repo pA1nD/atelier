@@ -509,7 +509,7 @@ export function createDeployer(i) {
             if (kept) return { note: 'kept' }
             if (!exists(path.join(tmpDir, 'package.json'))) { fs.renameSync(tmpDir, i.dot(finalRel)); return { note: 'no package.json' } }
             if (i.install) {
-              const spec = await i.workerSpec(row, rehearsalSlot, rev, null, { appDir: i.realPath(tmpDir) })
+              const spec = await i.workerSpec(row, rehearsalSlot, rev, null, { appDir: i.realPath(tmpDir), config: false })   // an install runs without the document
               // npm's own kill lands with the step's budget: a timed-out install never keeps running into the next attempt
               const r = await i.withInstalling(row, () => i.install({ os, dirfd: i.dirfd, spec, log: emit, dest: tmpRel, timeoutMs: budget(D().installMs) }))
               if (!r?.ok) throw { error: `${r?.class ?? 'install'}: ${r?.message ?? '?'}` }
@@ -848,6 +848,10 @@ export function createDeployer(i) {
       let next, retried = false
       for (;;) {
         try { next = await i.startWorker(row, slot, rev, built.written.dir); break } catch (e) {
+          // the config hold (supervisor §6.1): the door failed and the row has no document — no worker, the prod slot `loading`
+          // (a request answers 503 app not ready, never 404 not deployed), the rev dropped, no report; the scan retries once
+          // the door answers (`seededAttempted` cleared: the same bytes are built again — the failure was never the folder's)
+          if (e?.error === 'config-held') { try { store.remove(inst, rev) } catch {} ; row.seededAttempted = null; slot.configHeld = true; if (!slot.live) slot.state = 'loading'; row.prod = slot; return null }
           if (e.failed?.code === 'MOUNT-ERROR' && slot.live && !retried) {
             retried = true
             emit(`[${slug}] rev ${rev} mount failed beside rev ${slot.live.rev} — retrying once after the old worker exits`)

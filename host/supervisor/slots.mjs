@@ -47,6 +47,7 @@ export function mkSlot(name, { appDir, dataDir, rev = null, commit = null, legac
     name, rev, live: null, state: rev != null ? 'stopped' : 'loading', appDir, dataDir, commit, legacy,
     resources: null, suspendable: false, lastServedAt: 0, inflight: 0, idleTimer: null, restarts: 0, resuming: null,
     retiring: new Set(), kept: [], gate: null, down: null, configAt: null,
+    configHeld: false, configStale: false, configUsed: null,   // the config hold (supervisor §6.1): a spawn refused for want of a document / the worker runs on the last-known one / the document it runs on
   }
 }
 
