@@ -212,9 +212,14 @@ spread from `process.env` anywhere. `SECRETS = [ATELIER_BOOTSTRAP, CHANNEL_TOKEN
 | W worker | host | `node --max-old-space-size=<cap−576 MB, min 256> host/worker/runtime.mjs` (args: none; everything via env + fd 3) | `20000+i` : same / `[]` | `{PATH, NODE_ENV, APP_ID=<instance>, HOME=<scratch>/<inst>/home, HOST, PORT, BASE_URL, ATELIER_WORKER=<json §4.1>}` + the app's spine-held config keys (OR14) | 002 | `/` (the worker `chdir`s to its app dir itself) | `['ignore','pipe','pipe','pipe']` — fd 3 = control lane |
 | I install | host | `npm install --no-audit --no-fund` | `20000+i` : same / `[]` | `{PATH, NODE_ENV, APP_ID, HOME=<scratch>/<inst>/home, npm_config_cache=$HOME/.npm-cache}` | 022 | `<scratch>/<inst>/build` | `['ignore','pipe','pipe']` |
 | F freeze | host | `python3 host/worker/freeze.py freeze|thaw|cleanup <slug> <uid> <appgid>` | 0:0 / `[]` (`setpriv --clear-groups`) | `{PATH}` | 022 | `/` | `['ignore','pipe','pipe']` |
-| G git | host | `git -C /work/apps/<slug> add -A . && git commit -qm 'rev N'` (`git init -q` once) | 1000:1000 / `[]` | `{PATH, HOME=/work, GIT_AUTHOR_NAME=atelier, GIT_AUTHOR_EMAIL=atelier@local, GIT_COMMITTER_NAME=atelier, GIT_COMMITTER_EMAIL=atelier@local}` | 022 | `/work/apps/<slug>` | `['ignore','pipe','pipe']` |
+| G git | host | `git -C /work/apps/<slug> init -q` + `.gitignore` (`set -C`, once at claim/adopt); `add -A . && commit -q -m <message>` + `rev-parse` at a deploy (§10.3 D7 — no per-save commit) | 1000:1000 / `[]` | `{PATH, HOME=/work, GIT_AUTHOR_NAME=atelier, GIT_AUTHOR_EMAIL=atelier@local, GIT_COMMITTER_NAME=atelier, GIT_COMMITTER_EMAIL=atelier@local}` | 022 | `/` (node chdirs before the uid drop; root cannot enter the 2750 folder — `git -C` does, as 1000) | `['ignore','pipe','pipe']` |
+| A archive | host | `git -C /work/apps/<slug> archive --format=tar <commit>` (stdout = row T's stdin) | 1000:1000 / `[]` | row G's | 022 | `/work/apps/<slug>` | `['ignore','pipe','pipe']` |
+| T extract | host | `tar -x -C /work/.atelier/prod/<inst>/<commit12>.tmp -f -` (then chmod-then-chown `0:<uid>` 0750/0640 over what it wrote) | 0:0 / `[]` | `{PATH}` | 077 | `/` | `['pipe','pipe','pipe']` |
+| K hook | host | `node host/worker/hookrun.mjs <module.json deploy\|test\|smoke>` (hookrun reads the config on stdin after the drop, then `sh -c <cmd>`) | `20000+i` : same / `[]` | row W + `DATA_DIR` (+ `ATELIER_SOCK`, `BASE_URL=http://localhost` for smoke) — no config key in the env | 002 | `/work/.atelier/prod/<inst>/<commit12>` | `['pipe','pipe','pipe']` — stdin = the config lane |
+| C copy | host | `cp -dR <src>/. <dst>` (links kept; umask 007 → 0660/0770 at creation; NEVER `--preserve=ownership` — GNU cp creates each inode without its g/o bits and chmods them back after the chown — nor `timestamps` — cp would utimensat the destination dir itself, a `<uid>` inode; both EPERM without FOWNER) then `find <dst> -mindepth 1 -exec chown -h <uid>:19999 {} +` · `rm -rf <dir>` · `du -sk <dir>` · `find <dir> -mindepth 1 -maxdepth 1 -print -quit` (prod data ↔ rehearsal copy / backup) | 0:0 / `[19999]` | `{PATH}` | 007 / 022 | `/` | `['ignore','pipe','pipe']` |
 
-Wrapper for W and I (built by `os.spawn`, §5): `sh -c 'umask 002; echo 1000 > /proc/self/oom_score_adj; exec "$@"' sh prlimit --data=<bytes> --core=0 --nproc=<n> --nofile=<n> -- setpriv --reuid=<u> --regid=<g> --clear-groups -- <argv>`.
+Wrapper for W, I and K (built by `os.spawn`, §5): `sh -c 'umask 002; echo 1000 > /proc/self/oom_score_adj; exec "$@"' sh prlimit --data=<bytes> --core=0 --nproc=<n> --nofile=<n> -- setpriv --reuid=<u> --regid=<g> --clear-groups -- <argv>`.
+Row C runs `setpriv --reuid=0 --regid=0 --groups=19999`: a `<uid>:19999 2770` data dir is EACCES to userns-root without the group (no DAC caps).
 `oom_score_adj` is raised on the wrapper itself before the drop (inherited across exec, needs no
 cap). Rlimits (`errors/limits.mjs`): `data` 1 GiB default (`≥ 1024M`, floor: 512M aborts node at
 boot), `core 0`, `nproc 64`, `nofile 1024`; never `RLIMIT_AS`. Worker `--max-old-space-size` =
@@ -250,13 +255,20 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/apps/<slug>` | `1000:<uid> 2750` | agent (mkdir); host round trip §6.2(a) at claim | the worker reads its sources through appgid; peers EACCES |
 | `/work/apps/<slug>/node_modules` | `1000:<uid>` dirs 0750 files 0640 (`|050`/`|040` normalised) | freeze.py | never written by root; installed in scratch, renamed in as uid 1000 |
 | `/work/apps/<slug>/CLAIM-REFUSED.txt` | `1000:1000 0644` | registrar via row G-style uid-1000 write | the only host write into an app folder, as uid 1000, `O_NOFOLLOW`, `wx` |
-| `/work/apps/<slug>/.git` | `1000:1000` | git as 1000 (row G) | one commit per LIVE revision |
+| `/work/apps/<slug>/.git` | `1000:1000` | git as 1000 (row G) | one commit per RELEASE (`atelier deploy`), one `adopt:` commit for a pre-release row; `.gitignore` (`data/ .env .env.* node_modules/ CLAIM-REFUSED.txt .atelier`) written once, never over the agent's |
 | `/work/.atelier` | `0:0 0711` | launcher | the dirfd root; markers below are `at(dirfd, …)` writes; a worker cannot enumerate its peers' instance ids |
 | `/work/.atelier/agent.log` | `0:1000 0640` | host (`errors/agentlog.mjs`) | agent reads; workers cannot (groups cleared) |
 | `/work/.atelier/registry.json` | `0:0 0600` | registrar, local mode only | the folder registry (§7 `localTransport`) |
-| `/work/.atelier/<inst>/` | `0:0 0711` | host at claim | markers, every one `0600` (the host's alone): `slug`, `uid`, `revision.json` (`{rev, sha256, bytes, builtAt, host, chrome, protocol}`), `current` → `../last-good/<inst>/rev-N` (symlink, atomic rename), `registered.json` (`{instance, slug, uid, company}`) |
+| `/work/.atelier/<inst>/` | `0:0 0711` | host at claim | markers, every one `0600` (the host's alone): `slug`, `uid`, `revision.json` (`{rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug, prod:{rev, commit, deployedAt, message, legacy?}}`), `current` → `../last-good/<inst>/rev-N` (the PROD rev; symlink, atomic rename), `current-dev` → the DEV rev, `registered.json` (`{instance, slug, uid, company}`), `releases.jsonl` (the last 50 release rows), `backups.json` (backup sizes) |
 | `/work/.atelier/data` | `0:0 0711` | launcher | |
 | `/work/.atelier/data/<inst>` | `<uid>:<agid> 2770` | host at claim (mkdir, chown) | `ctx.dataDir`; agent in group via 19999; peers EACCES; data files 0660 (worker umask 002, agent umask 002 inside — the worker chmods sqlite `-wal`/`-shm` it creates to 0660, round trip §6.2(b) for agent-created ones) |
+| `/work/.atelier/data-dev` | `0:0 0711` | host (`hostDirs`) | |
+| `/work/.atelier/data-dev/<inst>` | `<uid>:<agid> 2770` | host at the dev spawn (`jailPlan`) | the DEV slot's `ctx.dataDir` (§10.3 D1) — the same plan as `data/<inst>`; Bayard may `cp -a` prod → dev, never the reverse |
+| `/work/.atelier/prod` | `0:0 0711` | host (`hostDirs`) | |
+| `/work/.atelier/prod/<inst>/<commit12>` | `0:<uid> 0750`; files 0640; `node_modules` `0:<uid>` (`|050`/`|040`) | host at a deploy (rows A/T, then `freeze.py --dest`) | the released commit's export = the prod worker's cwd (`createRequire` base, static files); no `.git`, no `data/`; the current and the previous release's are kept, older ones removed; EACCES to uid 1000 |
+| `/work/.atelier/rehearsal/<inst>` | `0:<uid> 0750` | host at a deploy | `data/` `<uid>:19999 2770` = the `cp -a` copy of prod data the rehearsal worker and hooks run against; deleted when the rehearsal ends |
+| `/work/.atelier/backup` | `0:0 0711` | host (`hostDirs`) | |
+| `/work/.atelier/backup/<inst>/<YYYYMMDDTHHMMSSZ-revN-commit12>` | `0:19999 0750`; inside: `0:19999` (one chown pass after the copy), modes from umask 027 (files 0640, dirs 0750), times = the copy's — root owns every byte, the agent reads through gid 19999, the app's uid never owns (so never chmods) its own backups; neither modes nor times are "preserved": that would be a chmod/utimensat on a foreign inode | host under the gate (row C) | the pre-migration snapshot of prod data (a deploy's `backup`, a restore's `snapshot`); listed only once its `backups.json` marker landed (a half-copied dir is swept, never restorable); last 3 per app, ≤ 1 GiB total; never auto-restored (`atelier restore`) |
 | `/work/.atelier/last-good` | `0:0 0711` | launcher | |
 | `/work/.atelier/last-good/<inst>` | `0:<uid> 0750` | host at claim | the worker resumes from it; agent EACCES |
 | `/work/.atelier/last-good/<inst>/rev-N/` | `0:<uid> 0750`; files 0640 | host per LIVE build | `backend.js` (bundle), `frontend/<file>.js` (transformed), `styles.css`, `revision.json`; written to `rev-N.tmp-<pid>`, fsynced, renamed; the previous rev kept, older pruned |
@@ -270,8 +282,8 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/run/atelier/host-ready` | `0:0 0644` | host after the audit passed and both listeners are up (fleet: after registration) | the kube readiness probe (step 5); unlink + exclusive create (`wx`) — a pre-existing entry is never adopted; unlinked by the launcher on host exit, by the host at teardown and on a host fault |
 | `/run/atelier/dev/` | `0:1000 0710` | launcher | |
 | `/run/atelier/dev/shell.sock` | `0:1000 0660` | host (dev shell) | agent connects; workers EACCES |
-| `/run/atelier/w/<inst>/` | `0:<uid> 0730` at spawn → `0710` after READY | host at spawn (`jailPlan`, re-set before every spawn) / `afterReady` | socket dir: the worker binds, cannot list; after READY it cannot write there either (no filling the `/run/atelier` tmpfs for life) |
-| `/run/atelier/w/<inst>/w.sock` | `<uid>:<uid>` at bind → `0:0 0700` after READY | worker binds; host chowns+chmods after READY | `prepareDirs` re-sets the dir 0730 before the next spawn so a resumed worker can re-bind |
+| `/run/atelier/w/<inst>/` | `0:<uid> 0730` at spawn → `0710` once the LAST spawn of the instance in flight is READY | host at spawn (`jailPlan`, re-set before every spawn) / `lockSockDir` from the supervisor (`row.spawning` counts the spawns in flight — the dir is shared by the dev, prod and rehearsal workers, so one worker's READY never drops the bit under another's `listen`; drill row 9e found the prod resume doing exactly that to the rehearsal worker) | socket dir: the worker binds, cannot list; after READY it cannot write there either (no filling the `/run/atelier` tmpfs for life) |
+| `/run/atelier/w/<inst>/w-<slot>-<rev>.sock` | `<uid>:<uid>` at bind → `0:0 0700` after READY | worker binds; host chowns+chmods after READY | one name per slot and rev (`dev`, `prod`, `rehearsal` — §10.3 D5); the rehearsal socket stays `<uid>`-dialable (the smoke step's `ATELIER_SOCK`) until the rehearsal ends; `prepareDirs` re-sets the dir 0730 before the next spawn so a resumed worker can re-bind |
 | `/control/.host-crash` | `1000:1000 0600` | launcher via the uid-1000 helper | JSON lines; the spine reads it (spine lane) |
 | `/tmp/tmux-1000` | `1000:1000 0700` | launcher | |
 | `/tmp/.X11-unix` | `0:0 1777` | launcher | |
@@ -492,11 +504,13 @@ the app folder as the current user and skips freeze (logged).
   backend bundle (`packages:'external'`, first-party `import.meta.url` rewritten to the source file
   URL, `target:'node24'`), CSS (§6.4). A failure of any of the three, of `mountRoutes`, or a missing
   `module.json` → `report('build', …)` with the classification hint; users stay on the old rev.
-- Load-beside: new worker spawned from the new rev dir while the old serves; on READY the three
-  swap atomically under one rev (a request captures `row.rev` and `row.sock` once); the old worker
-  is stopped 500 ms after the swap (§2.3 step 2 shape). If READY fails with `load-failed`
-  (`MOUNT-ERROR`) and the old worker exists, retry the mount ONCE after the old worker has exited
-  (the sqlite overlap rule; kill-old-then-mount is not offered in step 2 — §10 item 1 is open).
+- Load-beside (the DEV slot only — §10.3 D3/D13): the new dev worker spawned from the new rev dir
+  while the old dev worker serves; on READY the three swap atomically under one rev (a request
+  captures `slot.rev` and `slot.sock` once); the old worker is stopped 500 ms after the swap (§2.3
+  step 2 shape). If READY fails with `load-failed` (`MOUNT-ERROR`) and the old dev worker exists,
+  retry the mount ONCE after it has exited (the sqlite overlap rule). PROD never overlaps: a
+  release stops the old worker under the gate and starts the new one (§10.3 D9) — §10 item 1 is
+  closed by the ruling.
 - Old revisions: the previous rev dir is kept and addressable via `?rev=N` for 10 min after a swap,
   then pruned; `current` always names the live one.
 - Idle-stop (R14): only when the READY report's `resources` is empty (nothing but the IPC server) or
@@ -511,7 +525,7 @@ the app folder as the current user and skips freeze (logged).
   bumps on LIVE and FAILED alike, rebuilding an unchanged broken folder would mint a rev every 30 s,
   and the app-error fold is per (instance, rev) — the agent would hear the identical `file:line` as a
   new save each sweep. Same rule for a `module.json` that does not parse (discovery's `problems`).
-- Every LIVE rev → `git init` → `.git/info/exclude` (`node_modules/`, `data/`, `.atelier`, `CLAIM-REFUSED.txt` — the frozen tree and 1.x data never enter a commit) → `git add -A . && git commit`, all as uid 1000 (row G), serialized per app, failures logged, never fatal.
+- Git (row G, §10.3 D7): `git init -q` + the `.gitignore` once at claim/adopt as uid 1000 (`set -C`: the agent's own file stays); the commit is the deploy's (`atelier deploy` = `git add -A && git commit -m <message>`) — history is releases, a save commits nothing; failures logged, never fatal.
 
 ### 6.2 workers — ownership round trips (the only foreign-inode chmods)
 Both act on an fd, never on a path: the entry lives in an agent-owned directory the agent can swap
@@ -1128,3 +1142,114 @@ Two defects the rows drill found and fixed (both unit-tested):
    defect 2 (the re-install failed at applyJail) until that was fixed. The watcher now gates
    `onInstall` on the manifest CONTENT (`manifestHash` over package.json + package-lock.json), so an
    identical lockfile rewrite — or a bare touch — does not re-trigger the installer (`supervisor/watcher.mjs`).
+
+
+### 10.3 slots and releases — `host/supervisor/{slots,deploy}.mjs`, `serve.mjs`, `host/worker/hook.mjs`, `host/devcli.mjs` (LEDGER R-DEPLOY v2, 2026-09-02)
+
+Every app row carries two slots (D3). **`row.dev`** is the agent's tree (`/work/apps/<slug>`): the watcher, `build()`,
+`installThenRebuild` and the mount retry drive it alone, it hot-reloads on every save, the dev shell (`127.0.0.1:1844`,
+the dev token) serves it, nobody else sees it. **`row.prod`** is the released commit's export
+(`/work/.atelier/prod/<inst>/<commit12>`): the protocol port (`:1845`, the shell's road) serves it, the registry's `rev`
+and `deployed_rev` describe it, boot resumes it. `handle(row, req, res, user, {slot})` / `asset(row, rel, {rev, slot})`
+name the slot (`protocol/server.mjs` → `prod`, `devshell.mjs` → `dev`); a row without a prod slot answers 404
+`{"error":"not deployed"}` on `:1845` (a new folder is dev-only until its first deploy, D14/D17). Data: prod =
+`data/<inst>` (unchanged), dev = `data-dev/<inst>` (D1). Sockets `w-<slot>-<rev>.sock` (D5). The dev worker is never
+resident: idle-stopped 10 min after the last dev request whatever it holds, resumed on demand; prod keeps the R14 rule
+(D18). A dev swap fires the dev shell's reload frame only (`onDevSwap`); `onSwap` — `modulesChanged`, the events
+invalidate, `collector.setRunning` — fires for prod releases only. Dev-slot failures reach the agent through the
+app-error lane with the head `dev:` and **the PROD rev** (`row.prod?.rev ?? 0`: the spine keeps one running rev per
+instance and drops lower ones — a dev counter would silence every later prod error).
+
+**The verb** (D6): `atelier deploy <slug> -m "<message>"` (`host/devcli.mjs`, `/usr/local/bin/atelier` in the image)
+= `POST /_atelier/deploy {app, message, commit?, noBackup?}` on the dev shell with the dev token (401 without it, 404
+`unknown app`, 409 `deploy in progress`, 400 no message), answered as an NDJSON stream of `{t:'step', name, ms, ok,
+note?}` lines ending in ONE `{t:'verdict', outcome: green|red|failed, kind, slug, rev, commit, url, api, step?, error?,
+backup?, rehearsal:{ms, partial?}, release}` line; `atelier rollback <slug> <commit>` = the same verb with `commit`
+(7–40 hex, resolved `git rev-parse --verify <c>^{commit}` as uid 1000); `atelier releases|backups <slug>` read
+`GET /_atelier/releases|backups?app=`; `atelier restore <slug> <backup-id>` = `POST /_atelier/restore`. Exit 0 green ·
+2 red · 3 failed · 1 usage/transport. Every word the host or the CLI prints is `deploy.mjs` `MESSAGES`
+(`docs/atelier2-plan/LANES-DEPLOY-MESSAGES.md` is its source; the skill quotes it).
+
+**The protocol** (`deploy.mjs`; one NDJSON line + one agent.log line `[<slug>] deploy <c12> "<msg>": <step> ok|FAILED
+<ms> ms` per step):
+
+| # | step | what | on failure |
+|---|---|---|---|
+| 1 | `commit` | the dev tree committed as uid 1000 (row G: `add -A`, `commit -m`, `rev-parse HEAD`; `nothing to commit` = the HEAD); a rollback resolves its commit instead | verdict `red` at `commit` — the CLI line and the agent.log `RED` line, no app-error (nothing was rehearsed) |
+| 2 | `rehearsal` = `copy` → `export` → `install` → `build` → `hook` → `boot` → `probe` → `test` → `smoke`, ≤ 240 s | prod untouched: `cp -a` prod data → `rehearsal/<inst>/data` (> 1 GiB → skipped, `partial`); `git archive <commit>` as 1000 \| `tar -x` as root into `prod/<inst>/<c12>.tmp`, chmod-then-chown `0:<uid>` (rows A/T); `installDeps({dest})` when the export has a `package.json` (row I as the worker in scratch, `freeze.py --dest` renames `node_modules` in as root — same setuid refusal); the three artefacts into `rev-N` from the export; `module.json` `deploy` as the worker with `DATA_DIR` = the copy (row K, ≤ 60 s); a worker booted against the copy (`w-rehearsal-<rev>.sock`, READY ≤ 8 s); probe `GET /_atelier/health` then `healthz ?? '/'` (< 500, ≤ 5 s); `test` (≤ 60 s) and `smoke` (≤ 30 s, `ATELIER_SOCK` = the rehearsal socket, `BASE_URL=http://localhost`); stop, delete the copy | verdict `red`: ONE `build` report `rehearsal red at <step>: <error>` + hint `nothing deployed — <slug> stays on rev N (<c12>); fix and run atelier deploy again` at the prod rev; the rev dir removed; the export kept for the next attempt of the same commit |
+| — | the data question | BEFORE the rehearsal and again BEFORE the gate (D11): prod data > 1 GiB or free space < 2× its size → `red` at `backup` (`backup impossible: …`) unless `--no-backup`; an UNKNOWN answer — the `find -quit` or `du` child failed, was killed or timed out, EACCES — is `red` at `backup` too (`backup impossible: could not read/measure the data dir (…)`) and `--no-backup` does not lift it: unknown never means "no data", a migration never runs on prod data without a snapshot behind it | prod never stopped; nothing exported |
+| 3 | the gate (D9): `drain` (inflight 0, ≤ 2 s) → `stop` old (its own 2 s drain) → `backup` (`cp -a` prod data → `backup/<inst>/<id>`, ≤ 30 s; last 3 / ≤ 1 GiB, oldest pruned, the newest always kept) → `migrate` (the hook on PROD data, ≤ 60 s; a rollback runs none) → `start` (≤ 8 s) → `probe` (≤ 5 s) → `release` | `slot.gate` is a promise: a prod request arriving while it is set waits ≤ `GATE_HOLD_MS` (10 s), then answers the shell's exact waking bytes (503 `{"waking":true}`, `retry-after: 2`, `x-atelier-waking: 1`, `cache-control: no-store` — `protocol-samebytes` pins them to `shell/proxy.mjs`); the host is the only party that knows in-flight counts | verdict `failed` (D10): `slot.state = 'down'`, every request 503 `{"error":"app down after a failed deploy","backup":"<id>"}` (no waking flag) until a green deploy or a restore; ONE `worker` report `deploy of <c12> failed at <step>: <error> — <slug> is DOWN` + hint naming the backup; no automatic rollback, no automatic restore. DOWN is on disk: `revision.json.prod.down = {step, error, backup, commit, rev, at}` — a host restart boots the app DOWN and says so (`[<slug>] boot: rev N stays DOWN (…)`), a config stamp on a DOWN app is noted and never released; `prod.releasing = {id, commit, rev, backup, at}` is written before the migration and cleared by `record`, so a host that dies inside the gate boots DOWN too (never the old rev over migrated data). The new rev dir is pinned for the whole verb (`row.releasing`, kept by the rev-dir prune) |
+| 4 | `record` | `revision.json.prod = {rev, commit, deployedAt, message}` + `current` → the new rev (D4); `onSwap` (`modulesChanged`, invalidate, `setRunning`); the release row `{id, instance, kind, commit, message, at, by, verdict, rev, rehearsal:{ms, partial, steps}, backup, error, changelog:null}` appended to `<inst>/releases.jsonl` (0600, last 50) then `registrar.release()` = `POST /v1/host/release` (≤ 30 s; a 404/5xx/network failure is logged, never blocks); `atelier_host_deploy_ms{app,outcome}` + `_total`; agent.log `[<slug>] rev N LIVE (prod) commit <c12> in <ms> ms`; the export two releases back removed | — |
+
+Red and failed deploys record a release row too (`verdict` red/failed, `error` = the report's message). Ids: `r-<16 hex>`;
+an adopt's `adopt-<commit12>` (the spine replays by id).
+
+**Restore** (`atelier restore <slug> <id> [--yes]`): refused unless the app is DOWN or the caller passed `--yes` (409,
+`<slug> is live: restore replaces its prod data with backup <id> (everything written since is lost) — run atelier restore
+<slug> <id> --yes to confirm`); the data question first (the snapshot impossible → `restore RED at snapshot: …`, nothing
+moved) → the gate → drain → stop → `snapshot` (today's prod data as a backup row like the deploy's, the same caps) →
+`restore` (the backup copied into `data/<inst>.restore` as `<uid>:19999`, then two renames: `data/<inst>` → `.old`,
+`.restore` → `data/<inst>`, then `.old` removed — prod is never left empty by a copy that died halfway; boot puts a
+`.old` back when no `data/<inst>` exists and sweeps both leftovers) → start the CURRENT prod rev → probe → release; a row
+`{kind:'restore'}`; the backup stays, the DOWN marker is cleared. **Config release** (D16): the heartbeat reply's `config: [{instance, updated}]` reaches
+`supervisor.onConfigStamp`; a prod worker spawned before that stamp (`slot.configAt`) is restarted under the gate
+(stop → start, the config is fetched at spawn) → probe → a row `{kind:'config'}`; at most one per app per beat; a
+stopped worker just notes the stamp (the next resume fetches the config). **Adopt** (D14): a row whose `revision.json`
+has no `prod` block boots serving from `current` (the folder, `legacy`) and is adopted on the first scan: `git init` +
+`.gitignore` + `git commit -m "adopt: the tree serving rev N"` as 1000, `prod = {rev, commit, legacy: true}`,
+`current-dev` minted, one row `{kind:'adopt', id: adopt-<c12>}` → the spine's `deployed_rev`; it serves exactly as
+before (the bundle from the rev dir, static files and `createRequire` from the folder) until its first deploy moves it
+onto an export; the `prod` block is the idempotence marker across restarts. At every boot the host re-announces the
+prod commit it holds to the spine (`adopt-<c12>`, skipped when the register reply already carries that
+`deployed_rev`) so a migrated registry (`deployed_rev = "legacy"`) converges.
+
+**The socket dir under two spawns.** `w/<inst>` is one dir for the dev, prod and rehearsal sockets; its write bit is
+opened before every bind and dropped after READY — by the supervisor when `row.spawning` (spawns of the instance in
+flight) reaches 0, never from one worker's READY (`afterReady` locks the socket inode only). The install hold makes the
+overlap ordinary: prod is stopped for the freeze, the first request after it resumes prod while the rehearsal worker of
+the same deploy is binding (row 9e's second run: `listen EACCES … w-rehearsal-6.sock`).
+
+**The install hold.** `freeze.py` SIGKILLs every process of the worker uid and BOTH slots run as it: at
+`beforeFreeze` the supervisor stops the dev worker and holds prod under its gate (`holdProd`: stop, the gate released
+when `row.installing` settles) — requests wait for the freeze (kill + chown walk + rename) and a cold resume of the
+prod worker; past the 10 s hold they get the waking 503. The rehearsal's own install (`withInstalling`) takes the same
+hold — so a deploy of an app WITH dependencies is not "prod untouched" for the length of the freeze; drill row 9e
+measures it (the numbers land in its VERDICT line). A dev install arriving meanwhile runs after it. Its install is
+`freeze.py take` (build/ back to the worker WITHOUT touching the agent's tree — a thaw would move the dev tree's
+`node_modules` into the export) → npm → `freeze.py --dest`.
+
+**Ownership** (the review lens): every new row is root-created under the dirfd tree and chmod-then-chown'ed while
+root owns it (`ownTree` over the export, the jail plans for `data-dev/`, `rehearsal/`, `backup/`, `prod/`); root never
+writes into the agent's tree (the export is a `git archive` stream as 1000 into a root `tar -x`; the `.gitignore` and
+every git step run as 1000); the hook's config never enters the env the root wrapper chain receives (stdin, as row W);
+`cp`/`rm -rf`/`du`/`find`/`chown` on `<uid>:19999 2770` data run as root with group 19999 (no DAC caps — root cannot even
+`readdir` that dir itself, so "does prod have data" is a `find -quit` child, row C); the copy never preserves ownership (GNU cp's way is a chmod after the chown: modes come from umask 007 at creation, one chown pass follows — the CAP_CHOWN direction only); every path a child receives is
+the real one, never the host's `/proc/self/fd/N/…` form; git runs from cwd `/` (node chdirs before the uid drop —
+root cannot enter the 2750 app folder, `git -C` does as 1000); the rehearsal socket is `0:<uid> 0770` (connect
+needs write on the inode: the host and the smoke hook's worker uid both dial it); the worker reads its export
+through its gid, uid 1000 gets EACCES; the backup is `0:19999 0750` — the agent reads, no worker traverses. Each
+of these five is a row-9 drill finding (2026-09-02): none shows on a laptop, every one bites under the userns caps.
+
+**The apps view** (`GET /_atelier/apps`, both doors): rows carry `rev`/`state` (the prod slot's; `undeployed` before
+the first deploy), `deployed_rev` (40 hex or null), `prod_rev`, `dev_rev`, `prod_state` (`live|stopped|loading|failed|
+down|null`), `dev_state`. `supervisor.workers()` lists every slot's worker with `key` (`<inst>/<slot>`) and `slot` — the
+watchdog keys its state by `key` and passes `slot` into `kill(instance, why, slot)`; the heartbeat's `visible_apps`
+counts prod workers only. Three workers of one app can be live at once (dev + prod + rehearsal), each under its own
+`rlimits.data` (1 GiB) — the pod's 8 Gi is the ceiling, not a per-app one; a rehearsal worker's watchdog kill is not
+reported on its own (the rehearsal step it served goes red, and that is the chat's one message).
+
+Local mode (`unprivileged()`): the same paths under `ATELIER_WORK`, chown/chmod no-ops, `cp`/`rm`/`du`/`tar`/`git` as
+the developer, the installer runs npm in the export itself (no installer wired → the dev tree's `node_modules` is copied
+into the export), freeze skipped as today.
+
+Tests: `host/test/supervisor-deploy.test.js` (real workers, git, hooks: green / red at every rehearsal step / the gate
+under a 20 ms request loop, the 3 s and the past-the-hold hook / failed after the gate + restore / rollback / config /
+adopt / backups + the refusal / the release door absent; the 2026-09-02 review rows: the data question failing CLOSED
+for EACCES, a killed `find`, a failed or silent `du`; restore `--yes` + the snapshot + a copy that dies; the rev-dir prune
+fired mid-verb; DOWN across a restart, the `releasing` marker, the torn `commitProd`; the install with a real dependency),
+`supervisor-slots`, `worker-hook`, `devcli`, the verbs in
+`protocol-devshell`, `release` + `config` in `protocol-registrar`, the pointers + git in `supervisor-lastgood`, the
+plans in `worker-jail`, `--dest` in `worker-install`, the waking bytes in `protocol-samebytes`; the existing suites run
+on the slot model. Drill row 9: `host/drill/rows/run-deploy.sh` (the suite inside the pod as uid 1000; the export's
+ownership; the hook's uid/env; the backup's readers; `locker` 3/3 green under the prod loop from the peer; `deps` — the
+only place `freeze.py --dest` can run: the chown walk needs CAP_CHOWN, a laptop's suite reaches the ownership guard only).

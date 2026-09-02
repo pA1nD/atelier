@@ -11,7 +11,7 @@ import { keys, memoryFsx } from './protocol-fixtures.mjs'
 // A minimal spine: computers {id, company, token, epoch}, apps rows keyed by instance; the write
 // rules are protocol/registry's (authorizeWrite + reclaimRule), so the registrar meets the real gate.
 function fakeSpine({ computer = 'computer-1', company = 'acme', bootstrap = 'boot-secret', shellKeys = keys() } = {}) {
-  const s = { calls: [], apps: new Map(), token: null, epoch: null, failRegister: 0, rows: [] }
+  const s = { calls: [], apps: new Map(), token: null, epoch: null, failRegister: 0, rows: [], releases: [], releaseDoor: 'ok', config: [] }
   const others = new Map()   // slug → computer (rows other computers hold, for 409s)
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
   const read = (req) => new Promise((r) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => r(b ? JSON.parse(b) : {})) })
@@ -25,11 +25,20 @@ function fakeSpine({ computer = 'computer-1', company = 'acme', bootstrap = 'boo
       if (s.failRegister > 0) { s.failRegister--; return json(res, 503, { error: 'busy' }) }
       s.token = randomBytes(8).toString('hex'); s.epoch = randomBytes(8).toString('hex')
       return json(res, 200, { host_id: computer, epoch: s.epoch, token: s.token, company, origin: `https://${company}.portal.pa1nd.de`, chat: 'chat-1', principal: { id: 'p-agent', name: 'Bayard' },
-        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey) })
+        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at, deployed_rev: a.deployed_rev ?? null })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey) })
     }
     if (auth !== s.token) return json(res, 401, { error: EPOCH_MOVED })
     let m
-    if (url.pathname === '/v1/host/heartbeat') return json(res, 200, { ok: true })
+    if (url.pathname === '/v1/host/heartbeat') return json(res, 200, { ok: true, config: s.config })
+    if (url.pathname === '/v1/host/release') {
+      if (s.releaseDoor === '404') return json(res, 404, { error: 'no-route' })
+      if (s.releaseDoor === '500') return json(res, 500, { error: 'boom' })
+      if (!['deploy', 'rollback', 'adopt', 'config', 'restore'].includes(body.kind) || !['green', 'red', 'failed'].includes(body.verdict) || !/^[0-9a-f]{40}$/.test(body.commit ?? '')) return json(res, 400, { error: 'bad-release' })
+      s.releases.push(body)
+      const a = s.apps.get(body.instance)
+      if (a && body.verdict === 'green') { a.deployed_rev = body.commit; if (Number.isInteger(body.rev)) a.rev = body.rev }
+      return json(res, 200, { ok: true, id: body.id ?? 'r-spine' })
+    }
     if (url.pathname === '/v1/host/modules-changed') { for (const a of body.apps) { const row = s.apps.get(a.instance); if (row) { row.rev = a.rev; row.uid = a.uid } } return json(res, 200, { ok: true }) }
     if (url.pathname === '/v1/host/events') return json(res, 200, { accepted: body.length, rejected: [] })
     if (url.pathname === '/v1/host/event') return json(res, 200, { ok: true })
@@ -175,7 +184,7 @@ test('401 host-epoch-moved on any call → register again with a new epoch, then
     const e1 = r.registrar.epoch
     spine.revoke()
     const hb = await r.registrar.beat()
-    assert.deepEqual(hb, { ok: true })
+    assert.deepEqual(hb, { ok: true, config: [] })
     assert.notEqual(r.registrar.epoch, e1); assert.equal(r.registrar.epoch, spine.epoch)
     assert.deepEqual(spine.calls.slice(-3).map((c) => c.path), ['/v1/host/heartbeat', '/v1/host/register', '/v1/host/heartbeat'])
     assert.ok(r.logs.some((l) => l.includes(EPOCH_MOVED)))
@@ -237,6 +246,74 @@ test('reconcile: unreadable resets, a 5 s settle after /work/apps is readable, �
     // unreadable again → the settle clock restarts
     await r.registrar.reconcile(null)
     assert.deepEqual(await r.registrar.reconcile([]), { skipped: 'settle' })
+  } finally { await spine.close() }
+})
+
+test('release: POST /v1/host/release through call() (epoch-moved re-registers); a 404 (the door not there yet), a 5xx or a network failure is logged and NEVER thrown; a 400 is not retried', async () => {
+  const spine = fakeSpine(); await spine.listen()
+  try {
+    const r = rig(spine)
+    await r.registrar.register()
+    const a = await r.registrar.claim({ slug: 'todo', meta: { name: 'Todo' }, dir: '/work/apps/todo' })
+    const row = { id: 'r-0011223344556677', instance: a.instance, kind: 'deploy', commit: 'a'.repeat(40), message: 'first release', at: '2026-09-02T10:00:00.000Z', by: 'agent:p-agent', verdict: 'green', rev: 2, rehearsal: { ms: 1200, partial: false, steps: [{ name: 'commit', ms: 3, ok: true }] }, backup: null, error: null, changelog: null }
+    assert.deepEqual(await r.registrar.release(row), { ok: true, id: 'r-0011223344556677' })
+    assert.deepEqual(spine.calls.at(-1).body, row, 'the row goes as is (the body shape Lane R validates)')
+    assert.equal(spine.apps.get(a.instance).deployed_rev, 'a'.repeat(40))
+    assert.equal(r.registrar.apps().get(a.instance).deployed_rev, 'a'.repeat(40), 'a green deploy row moves the local deployed_rev too')
+    // the register reply carries deployed_rev ("legacy" | commit | null) — the boot announce's anchor
+    const r2 = rig(spine, { fsx: r.fsx })
+    await r2.registrar.register()
+    assert.equal(r2.registrar.apps().get(a.instance).deployed_rev, 'a'.repeat(40))
+    spine.apps.get(a.instance).deployed_rev = 'legacy'
+    const r3 = rig(spine, { fsx: r.fsx })
+    await r3.registrar.register()
+    assert.equal(r3.registrar.apps().get(a.instance).deployed_rev, 'legacy')
+    // epoch moved → re-register → retried once
+    spine.revoke()
+    assert.deepEqual(await r.registrar.release({ ...row, id: 'r-0011223344556678', verdict: 'red' }), { ok: true, id: 'r-0011223344556678' })
+    assert.deepEqual(spine.calls.slice(-3).map((c) => c.path), ['/v1/host/release', '/v1/host/register', '/v1/host/release'])
+    // the door absent (a spine before v43): null, one log line, no throw
+    spine.releaseDoor = '404'
+    assert.equal(await r.registrar.release(row), null)
+    assert.ok(r.logs.some((l) => /release .* not recorded at the spine \(spine 404 no-route\) — kept in releases.jsonl/.test(l)))
+    spine.releaseDoor = '500'
+    assert.equal(await r.registrar.release(row), null)
+    spine.releaseDoor = 'ok'
+    assert.equal(await r.registrar.release({ ...row, commit: 'short' }), null, 'a 400 is dropped with a log line, never retried')
+    assert.equal(spine.calls.filter((c) => c.path === '/v1/host/release').length, 6)
+    // the network gone: still null
+    await spine.close()
+    assert.equal(await r.registrar.release(row), null)
+  } finally { try { await spine.close() } catch {} }
+})
+
+test('heartbeat config stamps (D16): every {instance, updated} of the reply reaches onConfigStamp; absent or malformed rows are ignored', async () => {
+  const spine = fakeSpine(); await spine.listen()
+  try {
+    const stamps = []
+    const r = rig(spine)
+    r.registrar.onConfigStamp = (instance, updated) => stamps.push([instance, updated])
+    await r.registrar.register()
+    assert.deepEqual(await r.registrar.beat(), { ok: true, config: [] })
+    assert.deepEqual(stamps, [])
+    spine.config = [{ instance: 'i-0123456789abcdef', updated: '2026-09-02T10:00:00.000Z' }, { instance: 'i-fedcba9876543210', updated: 1756807200000 }, { nope: 1 }, { instance: 'i-x' }]
+    await r.registrar.beat()
+    assert.deepEqual(stamps, [['i-0123456789abcdef', '2026-09-02T10:00:00.000Z'], ['i-fedcba9876543210', 1756807200000]])
+    // a stamp handler that throws never breaks the beat
+    r.registrar.onConfigStamp = () => { throw new Error('boom') }
+    assert.deepEqual((await r.registrar.beat())?.ok, true)
+    assert.ok(r.logs.some((l) => /config stamp i-0123456789abcdef: boom/.test(l)))
+    // the local twin answers config: [] and keeps release rows + deployed_rev
+    const state = {}
+    const os = memory(state)
+    const dirfd = os.openDir('/work/.atelier')
+    const fsx = memoryFsx()
+    const local = localTransport({ company: 'local' }, dirfd, { os, fsx })
+    assert.deepEqual(await local.heartbeat(), { ok: true, config: [] })
+    const put = await local.putApp('i-0000000000000001', { slug: 'todo', meta: {} })
+    assert.deepEqual(await local.release({ id: 'r-1', instance: put.instance_id, kind: 'deploy', verdict: 'green', commit: 'b'.repeat(40), rev: 3 }), { ok: true, id: 'r-1' })
+    const saved = JSON.parse(fsx.files.get('/work/.atelier/registry.json').data)
+    assert.equal(saved.apps[0].deployed_rev, 'b'.repeat(40)); assert.equal(saved.apps[0].rev, 3); assert.equal(saved.releases.length, 1)
   } finally { await spine.close() }
 })
 

@@ -1,4 +1,5 @@
 // Shared fakes for the protocol-server lane's tests (host/test/protocol-*.test.js). Not a test file.
+import { MESSAGES } from '../supervisor/deploy.mjs'
 import http from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -36,11 +37,11 @@ export function fakeSupervisor({ rows = [], assets = {} } = {}) {
     apps: () => rows,
     workers: () => rows.filter((r) => r.state === 'live').map((r) => ({ instance: r.instance, pid: 1, uid: r.uid, dataDir: r.dataDir, sock: r.sock })),
     resolve: (company, slug) => rows.find((r) => r.company === company && r.slug === slug) ?? null,
-    handle: (row, req, res, user) => new Promise((resolve) => {
+    handle: (row, req, res, user, { slot = 'prod' } = {}) => new Promise((resolve) => {
       let bytes = 0
       req.on('data', (c) => { bytes += c.length })
       req.on('end', async () => {
-        handled.push({ instance: row.instance, method: req.method, url: req.url, user, bytes })
+        handled.push({ instance: row.instance, method: req.method, url: req.url, user, bytes, slot })
         const hold = /[?&]hold=(\d+)/.exec(req.url)
         if (hold) await new Promise((r) => setTimeout(r, Number(hold[1])))
         const big = /[?&]big=(\d+)/.exec(req.url)
@@ -55,13 +56,43 @@ export function fakeSupervisor({ rows = [], assets = {} } = {}) {
         res.end(body); resolve()
       })
     }),
-    asset: async (row, rel, { rev } = {}) => {
+    asset: async (row, rel, { rev, slot = 'prod' } = {}) => {
       const a = assets[row.instance]?.[rel]
       if (!a) return null
-      const want = rev ?? row.rev
+      const want = rev ?? (slot === 'dev' ? row.dev_rev ?? row.rev : row.rev)
       const hit = a.find((x) => x.rev === want)
       return hit ? { body: Buffer.from(hit.body), type: hit.type, rev: hit.rev } : null
     },
+    // the release verbs (DESIGN §10.3 D6): a scripted deploy/restore stream + the two lists — `verbs` records every call
+    verbs: [],
+    deploy(instance, { message, commit, noBackup, by, onStep }) {
+      const row = rows.find((r) => r.instance === instance)
+      if (!row) throw Object.assign(new Error('unknown app'), { status: 404 })
+      if (row.deploying) throw Object.assign(new Error('deploy in progress'), { status: 409 })
+      if (!commit && (typeof message !== 'string' || !message.trim())) throw Object.assign(new Error('message required'), { status: 400 })
+      this.verbs.push({ verb: commit ? 'rollback' : 'deploy', instance, message, commit, noBackup, by })
+      row.deploying = true
+      return (async () => {
+        try {
+          await new Promise((r) => setTimeout(r, 10))
+          onStep?.({ t: 'step', name: 'commit', ms: 3, ok: true, note: 'abcdef123456 "x"' })
+          onStep?.({ t: 'step', name: 'copy', ms: 1, ok: true })
+          const v = row.script ?? { t: 'verdict', outcome: 'green', kind: commit ? 'rollback' : 'deploy', slug: row.slug, rev: (row.rev ?? 0) + 1, commit: commit ?? 'abcdef1234567890abcdef1234567890abcdef12', url: `http://127.0.0.1:1844/acme/${row.slug}`, api: `http://127.0.0.1:1844/api/acme/${row.slug}` }
+          onStep?.(v)
+          return v
+        } finally { row.deploying = false }
+      })()
+    },
+    restore(instance, backup, { by, yes = false, onStep }) {
+      const row = rows.find((r) => r.instance === instance)
+      if (!row) throw Object.assign(new Error('unknown app'), { status: 404 })
+      if (!backup || !/^\d{8}T\d{6}Z-rev\d+-[0-9a-f]+$/.test(backup)) throw Object.assign(new Error('unknown backup'), { status: 404 })
+      if (row.state !== 'down' && !yes) throw Object.assign(new Error(MESSAGES.refuse.restoreLive(row.slug, backup)), { status: 409 })
+      this.verbs.push({ verb: 'restore', instance, backup, yes, by })
+      return (async () => { const v = { t: 'verdict', outcome: 'green', kind: 'restore', slug: row.slug, rev: row.rev, backup, url: `http://127.0.0.1:1844/acme/${row.slug}` }; onStep?.({ t: 'step', name: 'restore', ms: 2, ok: true }); onStep?.(v); return v })()
+    },
+    releases: (instance) => (rows.find((r) => r.instance === instance)?.releases ?? []),
+    backups: (instance) => (rows.find((r) => r.instance === instance)?.backups ?? []),
   }
 }
 

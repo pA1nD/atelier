@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { memory } from '../adapters/os.mjs'
-import { jailPlan, installPlan, applyJail, afterReady, claimRoundTrip, dataFileRoundTrip, AGENT, AGENT_DATA_GID, WORKER_UID_BASE, INSTANCE_RE } from '../worker/jail.mjs'
+import { jailPlan, installPlan, backupPlan, rehearsalPlan, prodPlan, applyJail, afterReady, lockSockDir, claimRoundTrip, dataFileRoundTrip, AGENT, AGENT_DATA_GID, WORKER_UID_BASE, INSTANCE_RE } from '../worker/jail.mjs'
 
 const spec = { instance: 'i-0123456789abcdef', uid: 20001, dataDir: '/work/.atelier/data/i-0123456789abcdef', tmpDir: '/work/.atelier/tmp/i-0123456789abcdef', sockDir: '/run/atelier/w/i-0123456789abcdef', sock: '/run/atelier/w/i-0123456789abcdef/w.sock' }
 
@@ -27,6 +27,37 @@ test('jailPlan: data/<inst> <uid>:19999 2770, tmp/<inst> <uid>:<uid> 0700, w/<in
     { op: 'chmod', path: spec.sockDir, mode: 0o730 },
     { op: 'chown', path: spec.sockDir, uid: 0, gid: 20001 },
   ])
+})
+
+test('the release rows (DESIGN §10.3 D1): data-dev/<inst> = the jail plan on another dataDir; backup/<inst>/<id> 0:19999 0750; rehearsal/<inst> 0:<uid> 0750 + data <uid>:19999 2770; prod/<inst>/<c12> 0:<uid> 0750 — mkdir → chmod → chown', () => {
+  const devSpec = { ...spec, dataDir: '/work/.atelier/data-dev/i-0123456789abcdef' }
+  assert.deepEqual(jailPlan(devSpec).slice(0, 3), [
+    { op: 'mkdir', path: '/work/.atelier/data-dev/i-0123456789abcdef', mode: 0o2770 },
+    { op: 'chmod', path: '/work/.atelier/data-dev/i-0123456789abcdef', mode: 0o2770 },
+    { op: 'chown', path: '/work/.atelier/data-dev/i-0123456789abcdef', uid: 20001, gid: 19999 },
+  ])
+  assert.deepEqual(backupPlan('/work/.atelier/backup/i-0123456789abcdef/20260902T104702Z-rev3-0f3c9a1b2d4e'), [
+    { op: 'mkdir', path: '/work/.atelier/backup/i-0123456789abcdef/20260902T104702Z-rev3-0f3c9a1b2d4e', mode: 0o750 },
+    { op: 'chmod', path: '/work/.atelier/backup/i-0123456789abcdef/20260902T104702Z-rev3-0f3c9a1b2d4e', mode: 0o750 },
+    { op: 'chown', path: '/work/.atelier/backup/i-0123456789abcdef/20260902T104702Z-rev3-0f3c9a1b2d4e', uid: 0, gid: 19999 },
+  ])
+  assert.deepEqual(rehearsalPlan(spec, '/work/.atelier/rehearsal/i-0123456789abcdef'), [
+    { op: 'mkdir', path: '/work/.atelier/rehearsal/i-0123456789abcdef', mode: 0o750 },
+    { op: 'chmod', path: '/work/.atelier/rehearsal/i-0123456789abcdef', mode: 0o750 },
+    { op: 'chown', path: '/work/.atelier/rehearsal/i-0123456789abcdef', uid: 0, gid: 20001 },
+    { op: 'mkdir', path: '/work/.atelier/rehearsal/i-0123456789abcdef/data', mode: 0o2770 },
+    { op: 'chmod', path: '/work/.atelier/rehearsal/i-0123456789abcdef/data', mode: 0o2770 },
+    { op: 'chown', path: '/work/.atelier/rehearsal/i-0123456789abcdef/data', uid: 20001, gid: 19999 },
+  ])
+  assert.deepEqual(prodPlan(spec, '/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e'), [
+    { op: 'mkdir', path: '/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e', mode: 0o750 },
+    { op: 'chmod', path: '/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e', mode: 0o750 },
+    { op: 'chown', path: '/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e', uid: 0, gid: 20001 },
+  ])
+  // every plan is chmod-then-chown on the inode root just created — no chmod after a chown anywhere
+  for (const plan of [backupPlan('/b'), rehearsalPlan(spec, '/r'), prodPlan(spec, '/p')]) {
+    for (let k = 0; k < plan.length; k += 3) assert.deepEqual(plan.slice(k, k + 3).map((s) => s.op), ['mkdir', 'chmod', 'chown'])
+  }
 })
 
 test('installPlan: scratch/<inst> 0:<uid> 0750, home/ <uid>:<uid> 0700, build/ <uid>:<uid> 0755', () => {
@@ -97,6 +128,20 @@ test('afterReady: the socket becomes 0:0 0700 (chown first, chmod while root own
   // jailPlan re-opens it for the next spawn
   applyJail(os, jailPlan(spec))
   assert.equal(state.fs[spec.sockDir].mode, 0o730)
+  // the rehearsal socket (shared): 0:<uid> 0770 — the host and the worker uid dial it (connect needs write; root has no DAC caps)
+  const s2 = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o775, type: 'socket' }, [spec.sockDir]: { uid: 0, gid: 20001, mode: 0o730, type: 'dir' } } }
+  const os2 = memory(s2)
+  assert.equal(afterReady(os2, spec, () => {}, { shared: true }).ok, true)
+  assert.deepEqual(s2.calls, [['chown', spec.sock, 0, 20001], ['chmod', spec.sock, 0o770], ['chmod', spec.sockDir, 0o710]])
+  assert.deepEqual(s2.fs[spec.sock], { uid: 0, gid: 20001, mode: 0o770, type: 'socket' })
+  // the worker lane's call (spawn.mjs): the socket only — the dir's bit is the supervisor's, dropped by the LAST spawn in flight (lockSockDir)
+  const s3 = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o755, type: 'socket' }, [spec.sockDir]: { uid: 0, gid: 20001, mode: 0o730, type: 'dir' } } }
+  const os3 = memory(s3)
+  assert.equal(afterReady(os3, spec, () => {}, { lockDir: false }).ok, true)
+  assert.deepEqual(s3.calls, [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700]]); assert.equal(s3.fs[spec.sockDir].mode, 0o730)
+  assert.equal(lockSockDir(os3, spec).ok, true)
+  assert.deepEqual(s3.calls.at(-1), ['chmod', spec.sockDir, 0o710]); assert.equal(s3.fs[spec.sockDir].mode, 0o710)
+  assert.deepEqual(lockSockDir(os3, { ...spec, sockDir: undefined }), { ok: true, results: [] })
 })
 
 test('claimRoundTrip §6.2(a) on an fd: setgroups([uid]) → openDir O_NOFOLLOW → fstat guard → fchown 0:<uid> → fchmod 2750 → fchown 1000:<uid> → close → groups restored', () => {

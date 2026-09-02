@@ -38,3 +38,24 @@ rc=0; **5** ten saves of `locker` → LIVE / mount-retry / FAILED counts.
 Evidence: `out/` (host log, agent.log, the probe / alloc / fork JSON, peer latency samples, worker State
 samples, install logs a/b/c, the locker's lines, the spine's JSON lines, the final tree) — copied to
 `design/atelier2/r2/spike-host-step2-rows/out/`, numbers in its `RESULT.md`.
+
+## Row 9 — the release protocol (DESIGN §10.3), `run-deploy.sh` / `remote-deploy.sh` / `loop.mjs`
+
+One backgrounded task, ≤ 30 min, throwaway namespace `spike-step7-deploy` (trap-deleted), last line `VERDICT:`:
+
+```
+bash host/drill/rows/run-deploy.sh > host/drill/rows/run-deploy.log
+```
+
+The same pod + fake spine as rows 5–8 (the spine answers `/v1/host/release` 404 — the host tolerates it and keeps
+`releases.jsonl`); the code tree adds `shell/proxy.mjs` (the waking-bytes test imports it). Rows: **9t** the whole
+`node --test host/test/*.test.js` inside the pod as uid 1000; **9a** `atelier deploy locker -m "first release"` (the
+CLI as uid 1000 with the session's dev token) → green, the export `prod/<inst>/<c12>` is `0:<uid> 0750` / files 0640,
+EACCES as uid 1000, readable as the worker uid, the prod worker's cwd; **9b** the `deploy` hook ran as the worker uid
+in the export with the spine's `DRILL_CONFIG` and no token-shaped key, `DATA_DIR` = prod data, and the dev shell
+refuses the worker's token-less dial (401); **9c** a second deploy backs prod data up: `backup/<inst>/<id>` is
+`0:19999 0750` — EACCES for the worker, listable as uid 1000 (group 19999), `locker.sqlite` inside; **9d** three
+deploys of `locker` (node:sqlite, EXCLUSIVE lock, writing every 50 ms) under `loop.mjs` on the peer — one identity
+assertion per request against `:1845` (the shell's road) every 50 ms — 0 non-200, no lower rev after a higher one,
+max latency < the 10 s hold. Evidence in `out-deploy/` (the in-pod test log, every deploy's stream, the export tree,
+the hook's env, the prod loop samples, agent.log, the final tree).

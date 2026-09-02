@@ -51,6 +51,23 @@ export function jailPlan(spec) {
   ]
 }
 
+/**
+ * The release rows (DESIGN §10.3 D1), every one a root-owned dir under the `.atelier` dirfd tree:
+ *   backupPlan(dir)            backup/<inst> and backup/<inst>/<id>   `0:19999 0750`  — the agent reads through gid 19999, no worker traverses
+ *                              (the files inside land `0:19999 0640` — slots.mjs copySpecs `backup`: the app's uid never owns its backups)
+ *   dataPlan(dir, uid)         one more `<uid>:19999 2770` data dir (the restore stages the backup beside `data/<inst>`, then renames)
+ *   rehearsalPlan(spec, root)  rehearsal/<inst> `0:<uid> 0750`, rehearsal/<inst>/data `<uid>:19999 2770` (the prod data copy the rehearsal worker writes)
+ *   prodPlan(spec, dir)        prod/<inst> and prod/<inst>/<commit12> `0:<uid> 0750` — the export the worker reads, EACCES to uid 1000
+ * `dir` / `root` are full paths (dirfd forms in the fleet); the caller passes each level it wants created.
+ */
+export function backupPlan(dir) { return mkdirOwned(dir, 0o750, 0, AGENT_DATA_GID) }
+/** dataPlan(dir, uid) — one data dir of the §3 shape (`<uid>:19999 2770`): the restore's staging tree beside `data/<inst>`. */
+export function dataPlan(dir, uid) { return mkdirOwned(dir, 0o2770, uid, AGENT_DATA_GID) }
+export function rehearsalPlan(spec, root) {
+  return [...mkdirOwned(root, 0o750, 0, spec.uid), ...mkdirOwned(path.posix.join(root, 'data'), 0o2770, spec.uid, AGENT_DATA_GID)]
+}
+export function prodPlan(spec, dir) { return mkdirOwned(dir, 0o750, 0, spec.uid) }
+
 /** scratch/<inst> at first install: `0:<uid> 0750`, `home/` `<uid>:<uid> 0700`, `build/` `<uid>:<uid> 0755`. */
 export function installPlan(spec, scratchDir) {
   const { uid } = spec
@@ -109,13 +126,26 @@ export function applyJail(os, steps, log = () => {}) {
  * After READY: the socket the worker bound (`<uid>:<uid>`) becomes `0:0 0700` — only the host dials
  * it — and the socket dir drops the worker's write bit (`0730` → `0710`): the worker cannot fill the
  * `/run/atelier` tmpfs for life; `jailPlan` re-sets `0730` before the next spawn (prepareDirs).
+ * `shared` (the rehearsal worker, DESIGN §10.3 D8): `0:<uid> 0770` — the host (owner) AND the worker uid
+ * (the smoke hook's `curl --unix-socket`) dial it; connect(2) needs write on the socket inode and
+ * userns-root has no DAC caps, so a `0:0 0700` socket is the host's alone and a worker-owned 0775 one
+ * is EACCES to root. Chown first, chmod while root owns it.
  */
-export function afterReady(os, spec, log = () => {}) {
+export function afterReady(os, spec, log = () => {}, { shared = false, lockDir = true } = {}) {
   return applyJail(os, [
-    { op: 'chown', path: spec.sock, uid: 0, gid: 0 },
-    { op: 'chmod', path: spec.sock, mode: 0o700 },
-    ...(spec.sockDir ? [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }] : []),
+    { op: 'chown', path: spec.sock, uid: 0, gid: shared ? spec.uid : 0 },
+    { op: 'chmod', path: spec.sock, mode: shared ? 0o770 : 0o700 },
+    ...(lockDir && spec.sockDir ? [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }] : []),
   ], log)
+}
+/**
+ * lockSockDir(os, spec) — the socket dir drops the worker write bit (0730 → 0710) once every worker of the instance that
+ * was binding is READY. The dir is shared by the dev, prod AND rehearsal workers of one instance (`w/<inst>/w-<slot>-<rev>.sock`),
+ * so the supervisor calls this when the LAST spawn in flight settles, never from one worker's READY: a prod resume that
+ * landed READY while the rehearsal worker was still binding dropped the bit under its `listen` (EACCES — drill row 9e).
+ */
+export function lockSockDir(os, spec, log = () => {}) {
+  return spec.sockDir ? applyJail(os, [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }], log) : { ok: true, results: [] }
 }
 
 // The fd-based round trips (§6.2). chown(2)/chmod(2) follow symlinks, and both round trips act on

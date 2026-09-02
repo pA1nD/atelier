@@ -76,11 +76,11 @@ X 'cat /sys/fs/cgroup/memory.events' > $OUT/memory-events-before.txt; log "memor
 X "$AS1000 sh -c 'mkdir -m 700 /work/.claude && echo canary-credential > /work/.claude/.credentials.json && chmod 600 /work/.claude/.credentials.json && for a in probe hello locker deps; do cp -r /code/drill-apps/\$a /work/apps/\$a; done && rm -f /work/apps/deps/package.json && ls -ldn /work/apps/*'" | sed 's/^/    | /'
 T_SAVE=$(now)
 for i in $(seq 1 150); do
-  apps | py 'import json,sys; a=json.load(sys.stdin); sys.exit(0 if {r["slug"] for r in a if r["state"]=="live"}=={"probe","hello","locker","deps"} else 1)' 2>/dev/null && break
+  apps | py 'import json,sys; a=json.load(sys.stdin); sys.exit(0 if {r["slug"] for r in a if r["dev_state"]=="live"}=={"probe","hello","locker","deps"} else 1)' 2>/dev/null && break
   sleep 0.2
 done
 T_LIVE=$(el $T_SAVE); A=$(apps); log "apps after $T_LIVE s: $A"; echo "$A" > $OUT/apps-after-scan.json
-echo "$A" | py 'import json,sys; a=json.load(sys.stdin); sys.exit(0 if {r["slug"] for r in a if r["state"]=="live"}=={"probe","hello","locker","deps"} else 1)' 2>/dev/null || { hostlog | tail -30; echo "VERDICT: FAIL — apps not live within 30 s: $A"; exit 1; }
+echo "$A" | py 'import json,sys; a=json.load(sys.stdin); sys.exit(0 if {r["slug"] for r in a if r["dev_state"]=="live"}=={"probe","hello","locker","deps"} else 1)' 2>/dev/null || { hostlog | tail -30; echo "VERDICT: FAIL — apps not live within 30 s: $A"; exit 1; }
 declare -A INST UIDS
 for s in probe hello locker deps; do INST[$s]=$(appfield $s instance); UIDS[$s]=$(X "cat /work/.atelier/${INST[$s]}/uid" | tr -d '\r\n '); done
 log "instances: probe ${INST[probe]}/${UIDS[probe]} hello ${INST[hello]}/${UIDS[hello]} locker ${INST[locker]}/${UIDS[locker]} deps ${INST[deps]}/${UIDS[deps]}"

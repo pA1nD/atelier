@@ -64,6 +64,7 @@ test('auth order: no bearer → 401 {}; wrong epoch → 401; unknown app → 404
     const j = JSON.parse(res.body.toString())
     assert.deepEqual(j.user, { id: 'p1', name: 'Ada', claims: {} })
     assert.equal(j.url, '/api/acme/todo/items?x=1')     // req.url reaches the supervisor untouched
+    assert.equal(r.supervisor.handled.at(-1).slot, 'prod', 'the protocol port serves the PROD slot (D3)')
     assert.deepEqual(r.registrar.servedList, ['i-0123456789abcdef'])
     // the same assertion again is a replay
     res = await request(r.target, { path: '/api/acme/todo/items?x=1', headers: r.withId('GET', '/api/acme/todo/items?x=1', 'i-0123456789abcdef') })
@@ -135,9 +136,10 @@ test('/_atelier/apps and /_host/healthz are bearer-only; Upgrade → 426', async
     let res = await request(r.target, { path: '/_atelier/apps' })
     assert.equal(res.status, 401)
     res = await request(r.target, { path: '/_atelier/apps', headers: r.bearer() })
+    // the row shape (DESIGN §10.3 D17): rev/state = the prod slot's, plus deployed_rev, prod_rev, dev_rev, prod_state, dev_state
     assert.deepEqual(JSON.parse(res.body.toString()), [
-      { instance: 'i-0123456789abcdef', slug: 'todo', company: 'acme', rev: 3, state: 'live' },
-      { instance: 'i-fedcba9876543210', slug: 'wiki', company: 'acme', rev: 1, state: 'stopped' },
+      { instance: 'i-0123456789abcdef', slug: 'todo', company: 'acme', rev: 3, state: 'live', deployed_rev: null, prod_rev: null, dev_rev: null, prod_state: null, dev_state: null },
+      { instance: 'i-fedcba9876543210', slug: 'wiki', company: 'acme', rev: 1, state: 'stopped', deployed_rev: null, prod_rev: null, dev_rev: null, prod_state: null, dev_state: null },
     ])
     res = await request(r.target, { path: '/_host/healthz', headers: r.bearer() })
     const h = JSON.parse(res.body.toString())

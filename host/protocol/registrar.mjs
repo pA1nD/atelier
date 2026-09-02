@@ -25,6 +25,10 @@
 //     on either re-registers and retries once, the same as every registry write.
 //   - reconcile: rows with no folder are unlinked only after `/work/apps` was readable for a
 //     5 s settle, at most 5 per pass (more → one loud log line, the rest next pass).
+//   - `release(row)` = `POST /v1/host/release` through `call()` (DESIGN §10.3 step 4): a spine that does
+//     not answer it yet (404), a 5xx or a network failure is logged and NEVER blocks a deploy — the
+//     host's own `releases.jsonl` is the row until the spine answers. `beat()` reads `config:
+//     [{instance, updated}]` from the heartbeat reply and hands each stamp to `onConfigStamp` (D16).
 import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
@@ -74,7 +78,7 @@ export function writeClaimRefused(os, dir, why, now = Date.now) {
  * createRegistrar({ os, dirfd, transport, cfg, log, now, fsx, backoffMs, liveWorkers, setTimer })
  *   liveWorkers: () => instance[] — the supervisor's live workers (heartbeat's visible_apps input)
  */
-export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}, now = Date.now, fsx = nodeFsx, backoffMs = REGISTER_BACKOFF_MS, liveWorkers = () => [], setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}, now = Date.now, fsx = nodeFsx, backoffMs = REGISTER_BACKOFF_MS, liveWorkers = () => [], setTimer = setTimeout, clearTimer = clearTimeout, onConfigStamp = null }) {
   const st = { hostId: null, epoch: null, startedAt: null, company: cfg.company ?? null, origin: cfg.origin ?? null, chat: null, principal: null, token: null, pubKey: null, lastServedAt: null }
   const apps = new Map()              // instance → {slug, uid, rev, meta, tombstone_at}
   const lastServed = new Map()        // instance → ms
@@ -90,7 +94,8 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     st.startedAt = now()
     for (const a of r.apps ?? []) {
       const prev = apps.get(a.instance)
-      apps.set(a.instance, { slug: a.slug, uid: a.uid ?? prev?.uid ?? null, rev: a.rev ?? prev?.rev ?? null, meta: a.meta ?? prev?.meta ?? {}, tombstone_at: a.tombstone_at ?? null })
+      // `deployed_rev` (DESIGN §10.3): a 40-hex commit, "legacy" (a migrated registry, no release row yet) or null — the boot announce's anchor
+      apps.set(a.instance, { slug: a.slug, uid: a.uid ?? prev?.uid ?? null, rev: a.rev ?? prev?.rev ?? null, meta: a.meta ?? prev?.meta ?? {}, tombstone_at: a.tombstone_at ?? null, deployed_rev: a.deployed_rev ?? prev?.deployed_rev ?? null })
     }
     transport.setToken?.(st.token)
   }
@@ -195,7 +200,29 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     return v.size
   }
   async function beat() {
-    try { return await call('heartbeat', { visible_apps: visibleApps(), last_served_at: st.lastServedAt, pod_ip: cfg.podIp ?? null }) } catch (e) { log(`registrar: heartbeat failed (${e?.message ?? e})`); return null }
+    let r
+    try { r = await call('heartbeat', { visible_apps: visibleApps(), last_served_at: st.lastServedAt, pod_ip: cfg.podIp ?? null }) } catch (e) { log(`registrar: heartbeat failed (${e?.message ?? e})`); return null }
+    // D16: a config PUT at the spine is a release — the reply names the instances whose app_config moved
+    for (const c of Array.isArray(r?.config) ? r.config : []) {
+      if (typeof c?.instance !== 'string' || c.updated == null) continue
+      try { hooks.onConfigStamp?.(c.instance, c.updated) } catch (e) { log(`registrar: config stamp ${c.instance}: ${e?.message ?? e}`) }
+    }
+    return r
+  }
+  const hooks = { onConfigStamp }
+  // release(row) → the spine's {ok, id} | null (logged, never thrown): the release row is the host's first;
+  // a green deploy/rollback/adopt moves the local `deployed_rev` too (the next boot's anchor)
+  async function release(row) {
+    try {
+      const r = await call('release', row)
+      const a = apps.get(row?.instance)
+      if (a && row.verdict === 'green' && ['deploy', 'rollback', 'adopt'].includes(row.kind) && typeof row.commit === 'string') a.deployed_rev = row.commit
+      return r
+    } catch (e) {
+      const why = e instanceof TransportError ? `spine ${e.status} ${e.body?.error ?? ''}`.trim() : (e?.message ?? String(e))
+      log(`registrar: release ${row?.instance ?? '?'} ${row?.kind ?? ''}/${row?.verdict ?? ''} not recorded at the spine (${why}) — kept in releases.jsonl`)
+      return null
+    }
   }
   function heartbeat(ms = HEARTBEAT_MS) {
     if (hb) clearInterval(hb)
@@ -222,7 +249,8 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     get hostId() { return st.hostId }, get epoch() { return st.epoch }, get startedAt() { return st.startedAt },
     get company() { return st.company }, get origin() { return st.origin }, get chat() { return st.chat },
     get principal() { return st.principal }, get token() { return st.token },
-    register, claim, unlink, modulesChanged, heartbeat, beat, served, reconcile, visibleApps,
+    register, claim, unlink, modulesChanged, heartbeat, beat, served, reconcile, visibleApps, release,
+    set onConfigStamp(fn) { hooks.onConfigStamp = fn }, get onConfigStamp() { return hooks.onConfigStamp },
     draining: () => call('draining'),
     appConfig: (instance) => call('appConfig', instance),
     lane: { events: (batch) => call('events', batch), appError: (body) => call('appError', body) },
@@ -280,6 +308,7 @@ export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, to
     appError: (b) => body(request('POST', '/v1/host/event', b)),
     appConfig: (instance) => body(request('GET', `/v1/apps/${encodeURIComponent(instance)}/config`)),
     draining: () => body(request('POST', '/v1/host/draining', {})),
+    release: (b) => body(request('POST', '/v1/host/release', b)),
   }
 }
 
@@ -291,6 +320,7 @@ export function localTransport(cfg = {}, dirfd, { os, fsx = nodeFsx, now = Date.
   const file = os.at(dirfd, 'registry.json')
   const load = () => { try { const j = JSON.parse(fsx.readFile(file) ?? 'null'); return j && Array.isArray(j.apps) ? j : null } catch { return null } }
   const state = load() ?? { host_id: 'local', apps: [] }
+  state.releases ??= []
   const save = () => fsx.writeFile(file, JSON.stringify(state, null, 1) + '\n', 0o600)
   const ring = new EventRing({ adoptFirst: true })
   const appErrors = []
@@ -303,7 +333,7 @@ export function localTransport(cfg = {}, dirfd, { os, fsx = nodeFsx, now = Date.
       return { host_id: 'local', epoch: newEpoch(), token: randomBytes(16).toString('hex'), company, origin: cfg.origin ?? 'http://127.0.0.1:1844', chat: null,
         principal: { id: 'local', name: 'local' }, apps: state.apps.map(row), shell_public_key_hex: publicKeyHex(keys.publicKey) }
     },
-    async heartbeat() { return { ok: true } },
+    async heartbeat() { return { ok: true, config: [] } },
     async putApp(instance, body) {
       if (typeof body?.slug !== 'string' || !SLUG_RE.test(body.slug)) throw new TransportError(400, { error: 'bad-slug' })
       const m = allowMeta(body.meta)
@@ -338,5 +368,13 @@ export function localTransport(cfg = {}, dirfd, { os, fsx = nodeFsx, now = Date.
     async appError(b) { appErrors.push(b); if (appErrors.length > 200) appErrors.shift(); return { ok: true } },
     async appConfig() { return { env: {} } },
     async draining() { return { ok: true } },
+    // the release twin: the row kept (last 50), `deployed_rev` on the app row when green
+    async release(r) {
+      if (!r || typeof r.instance !== 'string') throw new TransportError(400, { error: 'bad-instance' })
+      state.releases.push(r); if (state.releases.length > 50) state.releases.splice(0, state.releases.length - 50)
+      const a = state.apps.find((x) => x.instance === r.instance)
+      if (a && r.verdict === 'green' && typeof r.commit === 'string') { a.deployed_rev = r.commit; if (Number.isInteger(r.rev)) a.rev = r.rev }
+      save(); return { ok: true, id: r.id ?? null }
+    },
   }
 }

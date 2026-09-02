@@ -4,7 +4,9 @@
 // `freeze.py` moves the tree into the agent-owned app folder as `1000:<appgid>` (worker processes
 // SIGKILLed, dirfd-relative O_NOFOLLOW walk, setuid/setgid refused, rename as uid 1000). On a freeze
 // abort `freeze.py cleanup` hands the scratch back and nothing lands in the app folder.
-// Re-install = thaw (a no-op when nothing is frozen) → install (npm no-op ≈ 300 ms) → freeze.
+// Re-install = thaw (a no-op when nothing is frozen) → install (npm no-op ≈ 300 ms) → freeze. The prod-export install
+// (`dest`, DESIGN §10.3 D8) = take (build/ back to the worker, the agent's tree untouched — a thaw would move the dev
+// tree's node_modules out of /work/apps/<slug> and into the export) → install → `freeze --dest`.
 //
 // Under `unprivileged()` (a laptop): npm runs in the app folder as the current user, freeze is
 // skipped (logged) — the jail is lifecycle-only there (DESIGN §5).
@@ -42,10 +44,10 @@ export function copyManifestSpec(spec, { scratchDir, hostEnv }) {
   }
 }
 
-/** Row F: `python3 freeze.py <mode> <inst> <slug> <uid> <appgid>` as root with groups cleared; fd 3 = the .atelier dirfd. */
-export function freezeSpec(mode, spec, { dirfd, hostEnv, freeze = FREEZE_PATH }) {
+/** Row F: `python3 freeze.py <mode> <inst> <slug> <uid> <appgid> --dirfd 3 [--dest <rel>]` as root with groups cleared; fd 3 = the .atelier dirfd. `mode` ∈ freeze|thaw|take|cleanup. */
+export function freezeSpec(mode, spec, { dirfd, hostEnv, freeze = FREEZE_PATH, dest = null }) {
   return {
-    argv: ['python3', freeze, mode, spec.instance, spec.slug, String(spec.uid), String(appgid(spec)), '--dirfd', '3'],
+    argv: ['python3', freeze, mode, spec.instance, spec.slug, String(spec.uid), String(appgid(spec)), '--dirfd', '3', ...(dest ? ['--dest', dest] : [])],
     env: { PATH: hostEnv.PATH },
     cwd: '/',
     uid: 0, gid: 0, groups: [],
@@ -94,18 +96,23 @@ export function realScratch(os, dirfd, instance, fallback) {
   return typeof base === 'string' && base ? path.posix.join(base, 'scratch', instance) : fallback
 }
 
-const tail = (s, n = 5) => String(s).split('\n').filter(Boolean).slice(-n).join(' | ')
+// the last lines of a child's stderr — npm's `notice` block (the update nag) is dropped: it ends every run and would
+// push the one `npm error` line that names the cause out of the tail (drill row 9e's first deploy of deps)
+const tail = (s, n = 5) => String(s).split('\n').filter((l) => l && !/^npm notice\b/.test(l)).slice(-n).join(' | ')
 
 /**
  * @returns {Promise<{ok:true, ms:number, files:number|null} | {ok:false, class:'install'|'freeze-abort'|'setuid-refused', message:string}>}
  *   `beforeFreeze` (optional, async): the supervisor stops the live worker here — freeze.py SIGKILLs every process
  *   of the worker uid, so a still-running worker dies without its teardown otherwise.
+ *   `dest` (DESIGN §10.3 D8): the PROD export, dirfd-relative (`prod/<inst>/<commit12>`) — `spec.appDir` is the
+ *   export's real path (the manifest copy reads it as the worker through appgid); the freeze lands the tree there
+ *   `0:<appgid>` instead of in the agent's folder. Unprivileged: npm runs in the export itself.
  */
-export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = process.env, freeze = FREEZE_PATH, beforeFreeze, timeoutMs = INSTALL_TIMEOUT_MS }) {
+export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = process.env, freeze = FREEZE_PATH, beforeFreeze, timeoutMs = INSTALL_TIMEOUT_MS, dest = null }) {
   const t0 = os.now()
   const ms = () => os.now() - t0
   if (!os.privileged) {
-    log(`install ${spec.slug}: unprivileged — npm in the app folder as the current user, freeze skipped`)
+    log(`install ${spec.slug}: unprivileged — npm in the ${dest ? 'export' : 'app folder'} as the current user, freeze skipped`)
     const r = await run(os, {
       argv: NPM_ARGV,
       env: { PATH: hostEnv.PATH, NODE_ENV: hostEnv.NODE_ENV ?? 'production', APP_ID: spec.instance, HOME: hostEnv.HOME },
@@ -130,11 +137,13 @@ export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = p
   const scratchReal = realScratch(os, dirfd, spec.instance, scratchDir)
   if (!jail.ok) { const f = jail.results.at(-1); return { ok: false, class: 'install', message: `scratch ${f.step.op} ${f.step.path}: ${f.code}` } }
 
-  // thaw: a frozen tree comes back to build/ as the worker's so npm can re-run in place (no-op when nothing is frozen)
-  const thaw = await run(os, freezeSpec('thaw', spec, { dirfd, hostEnv, freeze }), { timeoutMs })
+  // thaw: a frozen tree comes back to build/ as the worker's so npm can re-run in place (no-op when nothing is frozen);
+  // take (dest): build/ becomes the worker's WITHOUT touching the agent's tree — the dev slot keeps its node_modules
+  const first = dest ? 'take' : 'thaw'
+  const thaw = await run(os, freezeSpec(first, spec, { dirfd, hostEnv, freeze }), { timeoutMs })
   const thawV = parseFreeze(thaw.stdout)
-  log(`install ${spec.slug}: thaw rc=${thaw.code} ${thawV.ok ? JSON.stringify(thawV.stats) : thawV.reason}`)
-  if (thaw.code !== 0 || !thawV.ok) return { ok: false, class: 'freeze-abort', message: `thaw: ${thawV.reason ?? tail(thaw.stderr)}` }
+  log(`install ${spec.slug}: ${first} rc=${thaw.code} ${thawV.ok ? JSON.stringify(thawV.stats) : thawV.reason}`)
+  if (thaw.code !== 0 || !thawV.ok) return { ok: false, class: 'freeze-abort', message: `${first}: ${thawV.reason ?? tail(thaw.stderr)}` }
 
   const cp = await run(os, copyManifestSpec(spec, { scratchDir: scratchReal, hostEnv }), { timeoutMs })
   if (cp.code !== 0) return { ok: false, class: 'install', message: `package.json copy failed (rc=${cp.code}): ${tail(cp.stderr)}` }
@@ -144,7 +153,7 @@ export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = p
   if (npm.code !== 0) return { ok: false, class: 'install', message: `npm exit ${npm.code ?? npm.signal}: ${tail(npm.stderr)}` }
 
   await beforeFreeze?.()
-  const fr = await run(os, freezeSpec('freeze', spec, { dirfd, hostEnv, freeze }), { timeoutMs })
+  const fr = await run(os, freezeSpec('freeze', spec, { dirfd, hostEnv, freeze, dest }), { timeoutMs })
   const frV = parseFreeze(fr.stdout)
   if (fr.code === 0 && frV.ok) {
     log(`install ${spec.slug}: freeze ${JSON.stringify(frV.stats)}`)

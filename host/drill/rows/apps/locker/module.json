@@ -1,1 +1,1 @@
-{ "name": "Locker" }
+{ "name": "Locker", "healthz": "/count", "deploy": "id -u > \"$DATA_DIR/hook-uid\"; env | sort > \"$DATA_DIR/hook-env\"; pwd > \"$DATA_DIR/hook-cwd\"" }

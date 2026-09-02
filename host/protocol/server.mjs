@@ -5,10 +5,11 @@
 // assertion (auth.verifyRequest) bound to the resolved instance. Bodies are streamed by the
 // supervisor's proxy (worker/proxy.mjs applies headers.mjs); this file never buffers an app body.
 //
-//   GET|… /api/<company>/<slug>/<rest>    → supervisor.handle(row, req, res, user)   404 when unresolved
-//   GET   /modules/<company>/<slug>/<rel> → supervisor.asset(row, rel, {rev})       ?rev=N = an older kept rev
+//   GET|… /api/<company>/<slug>/<rest>    → supervisor.handle(row, req, res, user, {slot:'prod'})   404 when unresolved / not deployed
+//   GET   /modules/<company>/<slug>/<rel> → supervisor.asset(row, rel, {rev, slot:'prod'})     ?rev=N = an older kept rev
+//   (the PROD slot on every app lane — this port is the company's road, DESIGN §10.3 D3; the dev shell serves dev)
 //   POST  /_atelier/report                → the kit's frontend report (body.instance must be a row of this host)
-//   GET   /_atelier/apps                  → [{instance, slug, company, rev, state}]  bearer only
+//   GET   /_atelier/apps                  → [{instance, slug, company, rev, state, deployed_rev, prod_rev, dev_rev, prod_state, dev_state}]  bearer only
 //   GET   /_host/healthz                  → {api, hostId, epoch, uptime, apps}       bearer only
 //   GET   /_host/metrics                  → the PLAN §4.5 rows, Prometheus text      bearer only
 //   anything else → 404 `{}`; an Upgrade → 426 (no WS lane in 2.0.0, B6)
@@ -69,7 +70,7 @@ export function readJson(req, cap = REPORT_BODY_CAP) {
   })
 }
 
-export const appsView = (supervisor) => supervisor.apps().map((r) => ({ instance: r.instance, slug: r.slug, company: r.company, rev: r.rev ?? null, state: r.state }))
+export const appsView = (supervisor) => supervisor.apps().map((r) => ({ instance: r.instance, slug: r.slug, company: r.company, rev: r.rev ?? null, state: r.state, deployed_rev: r.deployed_rev ?? null, prod_rev: r.prod_rev ?? null, dev_rev: r.dev_rev ?? null, prod_state: r.prod_state ?? null, dev_state: r.dev_state ?? null }))
 export const findInstance = (supervisor, instance) => (typeof instance === 'string' && instance ? supervisor.apps().find((r) => r.instance === instance) ?? null : null)
 
 // serveAssetResult(req, res, asset): the one asset response shape — server and dev shell share it
@@ -166,14 +167,14 @@ export function createServer({ cfg = {}, auth, supervisor, collector, registrar,
     if (!v.ok) return json(res, 401, {})
     if (mount.kind === 'api') {
       registrar.served?.(row.instance)
-      return supervisor.handle(row, req, res, v.user)
+      return supervisor.handle(row, req, res, v.user, { slot: 'prod' })
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, {})
     const rel = safeRel(mount.rel)
     if (!rel) return json(res, 404, {})
     const revQ = url.searchParams.get('rev')
     const rev = revQ !== null && /^\d+$/.test(revQ) ? Number(revQ) : undefined
-    const asset = await supervisor.asset(row, rel, { rev })
+    const asset = await supervisor.asset(row, rel, { rev, slot: 'prod' })
     if (!asset) return json(res, 404, {})
     return serveAssetResult(req, res, asset)
   }
