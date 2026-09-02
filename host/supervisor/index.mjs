@@ -93,6 +93,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       counter: 0, fingerprint: null, attempted: null,
       building: null, pending: false, broken: null, watcher: null, installing: null, installPending: false, git: Promise.resolve(), gitInit: null, gitReady: false,
       savedAt: null, tailwindWarm: false, deploying: null, configStamp: null, rehearsal: null, releasing: null, spawning: 0,
+      configDoc: null, configWhy: null,   // the last-known composed document (§7 appConfig, this host life only) and the door failure last logged
       dev: mkSlot('dev', { appDir: dir, dataDir: rel(REL.devData(instance)) }),
       prod: null,
       armIdle: (slot) => armIdle(row, slot ?? row.prod ?? row.dev),
@@ -115,16 +116,66 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // the collector and the spine (review 2026-09-02, Grok 2); a retiring worker (another one is the slot's) keeps its own
   const prodRev = (row, slot, live) => (slot.name === 'prod' ? (slot.live === live ? slot.rev : live.rev) : reportRev(row))
 
+  // --- the app config (DESIGN §7 appConfig → {env:{K:V}}; the hold rule of §6.1) -----------------------------
+  // readConfig(row) → the composed document {K:V}, fresh from the door and cached as `row.configDoc` for this host life
+  // (never to disk); a 404 (no config rows) is the empty document. Throws the transport's error on anything else — a
+  // 5xx, API 50's `503 no config key` / `config key mismatch`, a network error, a timeout — the caller decides.
+  async function readConfig(row) {
+    if (!registrar?.appConfig) return {}
+    try { const r = await registrar.appConfig(row.instance); row.configDoc = r?.env ?? {} }
+    catch (e) { if (e?.status !== 404) throw e; row.configDoc = {} }
+    if (row.configWhy) { row.configWhy = null; emit(`[${row.slug}] app config: the door answers again`) }
+    return row.configDoc
+  }
+  // configFailed(row, e): one line per row per reason (not one per spawn or per scan), until the door answers again
+  function configFailed(row, e) {
+    const why = e?.message ?? String(e)
+    if (row.configWhy === why) return
+    row.configWhy = why
+    emit(`[${row.slug}] app config: ${why} — ${row.configDoc ? 'spawning with the last-known document (swapped at the next successful read)' : 'no known document: spawn HELD (retried at each scan)'}`)
+  }
+  // configRetry(row) → true when the row's spawns may go. A row with a HELD slot (a spawn refused for want of a document) or
+  // a STALE prod worker (spawned on the last-known one) reads the door once per scan: held → the spawn is retried only after
+  // the door answered (a rebuild against a closed door would mint a rev every 30 s, §6.1); stale → settleStale. Others: no read.
+  async function configRetry(row) {
+    const held = row.dev.configHeld || !!row.prod?.configHeld
+    if (!held && !row.prod?.configStale) return true
+    try { await readConfig(row) } catch (e) { configFailed(row, e); return !held }
+    settleStale(row)
+    return true
+  }
+  // settleStale(row): the prod worker ran on the last-known document; the door answered — the same document: nothing;
+  // a moved one: a config release (D16, the same restart a config stamp brings); idle-stopped: the next resume reads fresh
+  function settleStale(row) {
+    const slot = row.prod
+    if (!slot?.configStale) return
+    if (!slot.live || slot.configUsed === JSON.stringify(row.configDoc)) { slot.configStale = false; return }
+    if (row.deploying || slot.state === 'down') return   // a release in flight spawns fresh itself; DOWN stays down (S2)
+    emit(`[${row.slug}] app config: the document moved while rev ${slot.rev} ran on the last-known one — config release`)
+    deployer.configRelease(row).catch((e) => emit(`[${row.slug}] config release crashed: ${e?.stack ?? e}`))
+  }
+
   // --- worker spec (§4.1 WorkerSpec) ----------------------------------------------------------
-  async function workerSpec(row, slot, rev, codeDir, { appDir, dataDir, sockFile } = {}) {
-    let configEnv = {}
-    try { const r = await registrar?.appConfig?.(row.instance); configEnv = r?.env ?? {} } catch (e) { emit(`[${row.slug}] app config: ${e.message} (spawning without)`) }   // DESIGN §7: → {env:{K:V}}
+  // The config door decides whether the spawn goes (§6.1 "config hold"): a fresh document (or a 404) → the spawn; the door
+  // failing WITH a last-known document → the spawn on that one, `configStale` for the slot (the scan swaps the fresh
+  // document in); failing WITHOUT one → `{error:'config-held'}` — no worker rather than one without its env (2026-09-02:
+  // the system host's `home` spawned without SPINE_ADMIN and the portal was dark for every signed-in user).
+  // `config:false` (the install specs): no read — an install runs without the document.
+  async function workerSpec(row, slot, rev, codeDir, { appDir, dataDir, sockFile, config = true } = {}) {
+    let configEnv = {}, configStale = false
+    if (config) {
+      try { configEnv = await readConfig(row) } catch (e) {
+        configFailed(row, e)
+        if (!row.configDoc) throw { error: 'config-held', msg: e?.message ?? String(e) }
+        configEnv = row.configDoc; configStale = true
+      }
+    }
     // one socket per slot and rev (D5): load-beside needs the new dev worker bound while the old one still
     // serves, a proxy's keep-alive pool is keyed by socket path, and dev and prod never share a name
     return {
       instance: row.instance, slug: row.slug, name: row.meta?.name, company: row.company, uid: row.uid, rev, codeDir: codeDir ? realPath(codeDir) : null, appDir: appDir ?? slot.appDir,
       dataDir: dataDir ?? slot.dataDir, tmpDir: row.tmpDir, scratchDir: rel(`scratch/${row.instance}`), sockDir: row.sockDir, sock: path.join(row.sockDir, sockFile ?? sockName(slot.name, rev)),
-      baseUrl: `${origin()}/api/${row.company}/${row.slug}`, origin: origin(), configEnv, rlimits: T.rlimits,
+      baseUrl: `${origin()}/api/${row.company}/${row.slug}`, origin: origin(), configEnv, configStale, rlimits: T.rlimits,
     }
   }
   // prepareDirs: a failed mkdir/chown/chmod of data/<inst>, tmp/<inst> or w/<inst> (ENOSPC, a wrong-owner
@@ -141,6 +192,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
   // startWorker(row, slot, rev, codeDir, opts) → {live, resources, suspendable, teardown} ; throws {error, msg, failed?}
   //   error: 'no-ready' | 'spawn-eagain' | 'load-failed' | 'jail' | 'host-fault' (the .atelier tree moved: no real path may leave the host)
+  //          | 'config-held' (the config door failed and the row has no last-known document — workerSpec; no worker was spawned)
   //   opts: {appDir, dataDir, sockFile, lockSocket, ephemeral} — the rehearsal worker (deploy.mjs) is ephemeral: its
   //   exit is nobody's crash; its socket is `0:<uid> 0770` (lockSocket 'shared') so the smoke step dials it as the worker.
   //   The socket dir `w/<inst>` is shared by every worker of the instance (dev, prod, rehearsal): its write bit is opened by
@@ -180,6 +232,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       throw { error: e?.error ?? 'no-ready', msg: e?.msg ?? e?.message ?? String(e), failed: st.failed }
     }
     slot.configAt = row.configStamp
+    slot.configUsed = JSON.stringify(spec.configEnv); slot.configStale = !!spec.configStale; slot.configHeld = false   // the document this worker runs on
     return { live, resources: st.ready?.resources ?? null, suspendable: st.suspendable, teardown: !!st.ready?.teardown }
   }
   async function stopLive(row, slot, live, reason) {
@@ -275,6 +328,10 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
             continue
           }
           store.remove(row.instance, rev)
+          // the config hold (§6.1): no worker, the slot `loading` unless an old dev worker serves, no report (the door's line is
+          // workerSpec's, once per reason), no verdict — the save is dropped; `attempted` cleared: the folder is NOT built (the
+          // sweep owes it, needsBuild), and the scan builds it again once the door answers
+          if (e.error === 'config-held') { slot.configHeld = true; row.attempted = null; if (!slot.live) slot.state = 'loading'; return null }
           const hostSide = { 'spawn-eagain': 'the host could not spawn the worker (process cap or memory) — not an app bug', jail: 'the host could not prepare the worker\'s directories (disk full or a wrong owner under /work/.atelier) — not an app bug; free space or tell the operator', 'host-fault': 'the computer\'s /work/.atelier was renamed or removed — the operator restores it; nothing is served until then' }[e.error]
           if (hostSide) {
             report('worker', row.instance, reportRev(row), { message: MESSAGES.devBuild.message(`${e.error === 'spawn-eagain' ? 'spawn failed' : e.error}: ${e.msg}`), hint: hostSide })
@@ -374,6 +431,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         armIdle(row, slot)
         return slot.live
       } catch (e) {
+        if (e?.error === 'config-held') { slot.configHeld = true; slot.state = 'loading'; return null }   // §6.1 config hold: no report, the scan retries (the crash ladder stops here — `failed` is not the state)
         slot.state = 'failed'
         report('worker', row.instance, slot.name === 'prod' ? cur.rev : reportRev(row), { message: devMsg(slot, `resume failed: ${e.msg ?? e.message}`) })
         emit(`[${row.slug}] rev ${cur.rev} RESUME FAILED ${e.msg ?? e.message}`)
@@ -488,7 +546,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     if (row.installing) { row.installPending = true; return row.installing }
     return withInstalling(row, async () => {
       if (install) {
-        const r = await install({ os, dirfd, spec: await workerSpec(row, row.dev, row.counter, null), log: emit }).catch((e) => ({ ok: false, class: 'install', message: e.message }))
+        const r = await install({ os, dirfd, spec: await workerSpec(row, row.dev, row.counter, null, { config: false }), log: emit }).catch((e) => ({ ok: false, class: 'install', message: e.message }))
         if (!r?.ok) { report('build', row.instance, reportRev(row), { message: MESSAGES.devBuild.message(`install failed: ${r?.message ?? '?'}`), hint: `package.json:1:1 ${r?.class ?? 'install'}: ${r?.message ?? '?'} — fix package.json and re-save`, file: 'package.json', line: 1, col: 1 }); emit(`[${row.slug}] install FAILED ${r?.message ?? ''}`); verdict(row, takeSave(row), 'error'); return }
         emit(`[${row.slug}] install ok ${r.ms ?? ''} ms`)
       }
@@ -648,11 +706,23 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
           row = await claimFolder(app, row)
           if (!row) continue
         }
-        if (row.seeded) { seededBuilds.push(deployer.seeded(row)); continue }   // the folder is the release (DESIGN §10.3 "seeded rows"): prod built from it, never a dev slot, no watcher
+        // the config hold's retry clock (§6.1): a held row's spawn goes again only once the door answered (configRetry — one
+        // read, never a rebuild against a closed door); a stale prod worker gets the fresh document there too. `prodHeld` is
+        // read BEFORE this scan's own attempts: a prod spawn held just now (a seeded build) is the next scan's to retry
+        const prodHeld = !!row.prod?.configHeld
+        const heldResume = () => { if (prodHeld && row.prod?.configHeld) { row.prod.configHeld = false; resume(row, row.prod) } }   // a held prod resume (a boot row, the crash ladder, a request while the door was closed) goes again
+        if (row.seeded) {   // the folder is the release (DESIGN §10.3 "seeded rows"): prod built from it, never a dev slot, no watcher
+          if (!(await configRetry(row))) continue
+          seededBuilds.push(deployer.seeded(row).then(heldResume))   // side by side; the held resume once its build (or boot announce) settled
+          continue
+        }
         watchRow(row)
         if (row.prod?.adoptPending) await deployer.adopt(row)
         else if (row.prod?.commit && !row.prod.announced) await deployer.announce(row)   // the boot announce (DESIGN §10.3): the spine learns the prod commit this host holds
+        if (!(await configRetry(row))) continue
+        row.dev.configHeld = false   // a held dev build is the sweep's (needsBuild: `attempted` was cleared); a held dev resume is the next request's (D18: dev on demand)
         if (needsBuild(row)) rebuild(row)
+        heldResume()
       }
       await Promise.all(seededBuilds)
       // boot reconcile (PLAN §4.3): the registrar tombstones rows with no folder on disk — the DISCOVERED

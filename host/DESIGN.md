@@ -544,6 +544,18 @@ the app folder as the current user and skips freeze (logged).
   bumps on LIVE and FAILED alike, rebuilding an unchanged broken folder would mint a rev every 30 s,
   and the app-error fold is per (instance, rev) — the agent would hear the identical `file:line` as a
   new save each sweep. Same rule for a `module.json` that does not parse (discovery's `problems`).
+- The config hold: every spawn reads `registrar.appConfig` (§7) first, and the door's answer decides whether the spawn
+  goes. A 2xx is the composed document, cached in memory as the row's last-known one for this host life (never to disk);
+  a 404 (no config rows) is the empty document, known from then on. Any other failure — a 5xx, API 50's `503 no config
+  key` / `config key mismatch`, a network error, a timeout — WITH a last-known document spawns on it (`slot.configStale`;
+  one log line per row per reason) and WITHOUT one HOLDS the spawn (`{error:'config-held'}` from `workerSpec`): no
+  worker — never one without its env (2026-09-02: the system host's `home` came up without `SPINE_ADMIN`, the portal dark
+  for every signed-in user) — the slot `loading` (a request answers 503 `app not ready`), the built rev dropped, no
+  report, no save verdict, one log line per row per reason. Every `scan()` retries a held or stale row with ONE read
+  first (never a rebuild against a closed door): held → the spawn again (dev rebuild, prod resume, the seeded build);
+  stale → the fresh document compared with the one the prod worker runs on, a config release (D16) when it moved,
+  nothing when it did not; an idle-stopped worker simply reads fresh at its next resume. The install specs read no
+  document (`config:false`); the deploy road reports `config-held` as the failing rehearsal step.
 - Git (row G, §10.3 D7): `git init -q` + the `.gitignore` once at claim/adopt as uid 1000 (`set -C`: the agent's own file stays); the commit is the deploy's (`atelier deploy` = `git add -A && git commit -m <message>`) — history is releases, a save commits nothing; failures logged, never fatal.
 
 ### 6.2 workers — ownership round trips (the only foreign-inode chmods)
