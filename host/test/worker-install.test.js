@@ -78,7 +78,7 @@ test('a freeze abort runs cleanup and classifies: setuid plant → setuid-refuse
   assert.match(r.message, /symlink/)
 })
 
-test('npm failure → class install with the stderr tail; no freeze is attempted', async () => {
+test('npm failure → class install with the stderr tail (npm\'s `notice` nag dropped, so the `npm error` line that names the cause survives the tail); no freeze is attempted', async () => {
   const state = { fds: new Map([[3, '/work/.atelier']]) }
   const os = driven(state, (argv) => { const k = kind(argv); if (k === 'freeze:thaw') return { code: 0, stdout: 'FREEZE-OK thaw demo files=0' }; if (k === 'npm') return { code: 1, stderr: 'npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/nope-pkg' } })
   const r = await installDeps({ os, dirfd: 3, spec, hostEnv })
@@ -86,6 +86,19 @@ test('npm failure → class install with the stderr tail; no freeze is attempted
   assert.equal(r.class, 'install')
   assert.match(r.message, /^npm exit 1: .*E404.*nope-pkg/)
   assert.deepEqual(state.calls.filter((c) => c[0] === 'spawn').map((c) => kind(c[1])), ['freeze:thaw', 'cp', 'npm'])
+  // the shape drill row 9e produced: the cause, then npm's five-line notice block — the tail keeps the cause
+  const state2 = { fds: new Map([[3, '/work/.atelier']]) }
+  const os2 = driven(state2, (argv) => { const k = kind(argv); if (k === 'freeze:thaw') return { code: 0, stdout: 'FREEZE-OK thaw demo files=0' }; if (k === 'npm') return { code: 254, stderr: ['npm error errno -2', "npm error enoent ENOENT: no such file or directory, open '/code/drill-apps/loot-pkg-1.0.0.tgz'", 'npm error enoent This is related to npm not being able to find a file.', 'npm notice', 'npm notice New major version of npm available! 11.19.0 -> 12.0.2', 'npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2', 'npm notice To update run: npm install -g npm@12.0.2', 'npm notice', 'npm error A complete log of this run can be found in: /x/_logs/1-debug-0.log'].join('\n') } })
+  const r2 = await installDeps({ os: os2, dirfd: 3, spec, hostEnv })
+  assert.equal(r2.message, "npm exit 254: npm error errno -2 | npm error enoent ENOENT: no such file or directory, open '/code/drill-apps/loot-pkg-1.0.0.tgz' | npm error enoent This is related to npm not being able to find a file. | npm error A complete log of this run can be found in: /x/_logs/1-debug-0.log")
+})
+
+test('dest: a `take` abort (a foreign inode in build/ — what a take that walked the worker\'s own manifest copy as the agent\'s would have said) is reported as freeze-abort before the manifest copy or npm run', async () => {
+  const state = { fds: new Map([[3, '/work/.atelier']]) }
+  const os = driven(state, (argv) => { if (kind(argv) === 'freeze:take') return { code: 2, stdout: 'FREEZE-ABORT take demo: foreign inode package.json uid=20001 nlink=1' } })
+  const r = await installDeps({ os, dirfd: 3, spec: { ...spec, appDir: '/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp' }, hostEnv, dest: 'prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp' })
+  assert.deepEqual(r, { ok: false, class: 'freeze-abort', message: 'take: foreign inode package.json uid=20001 nlink=1' })
+  assert.deepEqual(state.calls.filter((c) => c[0] === 'spawn').map((c) => kind(c[1])), ['freeze:take'])
 })
 
 test('thaw refusal (app folder not 1000-owned / symlinked) → freeze-abort before anything runs', async () => {

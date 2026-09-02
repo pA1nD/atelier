@@ -11,8 +11,11 @@ thaw:    the reverse, so the worker can re-run `npm install` in place (second in
          app folder holds no node_modules.
 take:    build/ becomes the worker's again WITHOUT touching the agent's tree (the prod-export install, --dest): a dev
          freeze left build/ to uid 1000 and moved node_modules into /work/apps/<slug> — thaw would move that tree back
-         here and the DEV slot would lose its deps at every deploy. What build/ holds (the lock copy, a tree a dead
-         freeze left) is chowned to the worker; a root-owned build/ (a freeze that died mid-walk) is cleaned up first.
+         here and the DEV slot would lose its deps at every deploy. build/ is MIXED after a dev freeze: the lock copy
+         is the agent's (chowned before its copy), the manifest copy is still the worker's (cp as the worker, never
+         moved) — the agent's entries are chowned to the worker (dirs walked, the same setuid/symlink/hardlink refusals),
+         the worker's own are left as they are, any other uid aborts; a root-owned build/ (a freeze that died mid-walk)
+         is cleaned up first.
 cleanup: after an aborted freeze — take every dir, remove node_modules + lock from build/, hand build/ back.
 
 Mechanism: the worker's processes are SIGKILLed first (CAP_KILL); every step is dirfd-relative (openat /
@@ -224,10 +227,24 @@ elif mode in ('take', 'cleanup'):
     if mode == 'take' and st.st_uid == WUID:
         T['files'] = 0; T['noop'] = 1                # the worker's already (a first install, or after a --dest freeze)
     elif mode == 'take' and st.st_uid == AGENT:
-        # after a dev freeze: build/ is the agent's, holding its copy of the lock (and whatever a dead agent step left);
-        # everything below goes to the worker — a foreign inode aborts, as in every walk. The app folder is never opened.
+        # after a dev freeze: build/ is the agent's, holding its copy of the lock (agent-owned) beside the manifest copy
+        # (still the worker's) and whatever a dead agent step left. The agent's entries go to the worker (a dir is walked
+        # with the usual refusals), the worker's own stay, any other uid aborts. The app folder is never opened.
         os.chown('build', 0, AGID, dir_fd=ifd, follow_symlinks=False); bfd = opendir('build', ifd, want_uid=0)
-        T['files'] = chown_walk(bfd, AGENT, WUID, AGID)
+        n = 0
+        for e in os.scandir(bfd):
+            st = e.stat(follow_symlinks=False)
+            if st.st_uid == WUID: T['kept'] = T.get('kept', 0) + 1; continue
+            if st.st_uid != AGENT: die(f'foreign inode {e.name} uid={st.st_uid} nlink={st.st_nlink}')
+            if stat.S_ISDIR(st.st_mode):
+                sub = take_dir(e.name, bfd, AGENT); n += chown_walk(sub, AGENT, WUID, AGID)
+                os.fchown(sub, WUID, AGID); os.close(sub)
+            else:
+                if st.st_nlink > 1 and stat.S_ISREG(st.st_mode): die(f'hardlinked inode {e.name} nlink={st.st_nlink}')
+                if stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) & 0o6000: die(f'setuid/setgid file {e.name} mode={stat.S_IMODE(st.st_mode):o} refused')
+                os.chown(e.name, WUID, AGID, dir_fd=bfd, follow_symlinks=False)
+            n += 1
+        T['files'] = n
         os.fchmod(bfd, 0o755); os.fchown(bfd, WUID, AGID)
     else:
         # cleanup (after an aborted freeze), or take over a root-owned build/ (a freeze died mid-walk): build/ may be

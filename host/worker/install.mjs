@@ -96,7 +96,9 @@ export function realScratch(os, dirfd, instance, fallback) {
   return typeof base === 'string' && base ? path.posix.join(base, 'scratch', instance) : fallback
 }
 
-const tail = (s, n = 5) => String(s).split('\n').filter(Boolean).slice(-n).join(' | ')
+// the last lines of a child's stderr — npm's `notice` block (the update nag) is dropped: it ends every run and would
+// push the one `npm error` line that names the cause out of the tail (drill row 9e's first deploy of deps)
+const tail = (s, n = 5) => String(s).split('\n').filter((l) => l && !/^npm notice\b/.test(l)).slice(-n).join(' | ')
 
 /**
  * @returns {Promise<{ok:true, ms:number, files:number|null} | {ok:false, class:'install'|'freeze-abort'|'setuid-refused', message:string}>}
