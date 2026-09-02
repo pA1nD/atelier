@@ -1264,9 +1264,11 @@ comes; D18 then idle-stopped the dev worker ten minutes after boot and the shell
 answered 404 for every signed-in user). Instead the first scan builds the three artefacts from the folder into a new rev,
 starts the PROD worker at once (load-beside on a re-seed), records `prod = {rev, commit, legacy: true, chrome}` +
 `current`, fires `onSwap` (the registry's `rev`, the invalidate) and posts ONE `{kind:'adopt', id: adopt-<c12>}` row. The
-commit is the folder's CONTENT id — `watcher.mjs treeId`, sha256 over the non-excluded files as `<rel>\0<bytes>\0` in path
-order cut to 40 hex: the same image bytes give the same id on every boot (mtimes, which every `cp` rewrites, do not move
-it), so the spine replays the id and `deployed_rev` converges from `legacy`. No dev slot, no watcher, no `.git`: the
+commit is the folder's CONTENT id — `watcher.mjs treeId`, sha256 over the fingerprint's set PLUS the manifests
+(`package.json`/lockfile: a re-seed that bumps only a dependency is a new rev; dotfiles, `data/`, `node_modules/`, `_*`
+and `CLAIM-REFUSED.txt` are out) as `<rel>\0<bytes>\0` in path order cut to 40 hex: the same image bytes give the same
+id on every boot (mtimes, which every `cp` rewrites, do not move it), so the spine replays the id and `deployed_rev`
+converges from `legacy`. No dev slot, no watcher, no `.git`: the
 folder is served in the legacy shape (bundle from the rev dir, static files and `createRequire` from the folder); prod
 keeps the R14 idle rule (resume on the next request, requests held) — nothing D18 can stop. Every scan recomputes the
 id: equal → the boot announce only (a spine that refused or was unreachable is asked again; `announced` is not set by the

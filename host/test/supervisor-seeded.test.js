@@ -15,7 +15,7 @@ const HEX40 = /^[0-9a-f]{40}$/
 const dot = (w, ...p) => path.join(w.work, '.atelier', ...p)
 const revJson = (w, inst) => JSON.parse(fs.readFileSync(dot(w, inst, 'revision.json'), 'utf8'))
 
-test('treeId: 40 hex over the CONTENT of the non-excluded files — the same bytes give the same id whatever the mtimes; a changed byte, a new file and a renamed file move it; dotfiles, data/, node_modules/, the manifests and CLAIM-REFUSED.txt do not; null for a missing folder', () => {
+test('treeId: 40 hex over the CONTENT of the fingerprint\'s set plus the manifests — the same bytes give the same id whatever the mtimes; a changed byte, a new file, a renamed file and (S3) a changed package.json or lockfile move it; dotfiles, data/, node_modules/, _* and CLAIM-REFUSED.txt do not; null for a missing folder', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tree-id-'))
   const a = path.join(root, 'a'), b = path.join(root, 'b')
   const write = (d, files) => { for (const [f, c] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(d, f)), { recursive: true }); fs.writeFileSync(path.join(d, f), c) } }
@@ -29,7 +29,15 @@ test('treeId: 40 hex over the CONTENT of the non-excluded files — the same byt
     for (const f of ['module.json', 'backend.js', 'frontend/app.jsx']) fs.utimesSync(path.join(b, f), past, past)
     assert.equal(treeId(b), id)
     // excluded rows never move it
-    write(b, { '.atelier-seeded': 'x', '.image-stamp': 'abc', 'data/db.sqlite': 'rows', 'node_modules/dep/index.js': 'x', 'package.json': '{}', 'package-lock.json': '{}', 'CLAIM-REFUSED.txt': 'no', '_scratch/x.txt': 'y' })
+    write(b, { '.atelier-seeded': 'x', '.image-stamp': 'abc', 'data/db.sqlite': 'rows', 'node_modules/dep/index.js': 'x', 'CLAIM-REFUSED.txt': 'no', '_scratch/x.txt': 'y' })
+    assert.equal(treeId(b), id)
+    // the manifests do (S3): a re-seed that bumps only a dependency is a new rev — the watcher's fingerprint leaves them out
+    // (their change is its install trigger), the content id does not
+    write(b, { 'package.json': '{"dependencies":{"left-pad":"1"}}' })
+    const idm = treeId(b); assert.match(idm, HEX40); assert.notEqual(idm, id)
+    write(b, { 'package-lock.json': '{"lockfileVersion":3}' })
+    assert.notEqual(treeId(b), idm)
+    fs.unlinkSync(path.join(b, 'package.json')); fs.unlinkSync(path.join(b, 'package-lock.json'))
     assert.equal(treeId(b), id)
     // content does
     fs.writeFileSync(path.join(b, 'backend.js'), 'export default {}\n')

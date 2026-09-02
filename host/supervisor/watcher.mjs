@@ -56,9 +56,11 @@ export function fingerprint(dir, fs = nodeFs) {
 }
 
 /**
- * treeId(dir, fs) → 40 hex | null — the CONTENT id of a folder: sha256 over the non-excluded files (the fingerprint's set —
- * package.json/lockfile included, they are part of what is served), each as `<rel>\0<bytes>\0` in path order, cut to 40 hex
- * so it has a git sha's shape. A seeded row's `commit` (DESIGN §10.3 "seeded rows"): the system host has no git and a
+ * treeId(dir, fs) → 40 hex | null — the CONTENT id of a folder: sha256 over the fingerprint's set PLUS the manifests
+ * (package.json / package-lock.json: the watcher leaves them out because their change is the install trigger, but a seeded
+ * folder is never installed into — its deps came with the image — and a re-seed that changes only a dependency must be a
+ * new rev; review 2026-09-02 S3), each as `<rel>\0<bytes>\0` in path order, cut to 40 hex so it has a git sha's shape.
+ * Out: dotfiles (the marker, `.image-stamp`), `data/`, `node_modules/`, `_*`, `CLAIM-REFUSED.txt`. A seeded row's `commit` (DESIGN §10.3 "seeded rows"): the system host has no git and a
  * fresh /work on every pod — the same image bytes must give the same id on every boot (the spine replays `adopt-<c12>`),
  * and mtimes (which every `cp` rewrites) must not move it. null when the folder cannot be read.
  */
@@ -69,7 +71,7 @@ export function treeId(dir, fs = nodeFs) {
     try { ents = fs.readdirSync(d, { withFileTypes: true }) } catch { return false }
     for (const ent of ents) {
       const r = rel ? rel + '/' + ent.name : ent.name
-      if (excluded(r.split('/').join(path.sep))) continue
+      if (excludedSegment(ent.name) || ent.name === 'CLAIM-REFUSED.txt') continue
       const p = path.join(d, ent.name)
       if (ent.isDirectory()) { if (!walk(p, r)) return false; continue }
       if (ent.isFile()) files.push([r, p])
