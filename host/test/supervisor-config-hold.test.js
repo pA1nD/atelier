@@ -9,7 +9,7 @@
 // follow the same rule.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { world, api, waitFor, APP_JSON, fs, path } from './supervisor-harness.test.js'
+import { world, api, waitFor, sleep, APP_JSON, fs, path } from './supervisor-harness.test.js'
 import { TransportError } from '../protocol/registrar.mjs'
 import { SEEDED_MARKER } from '../supervisor/discovery.mjs'
 
@@ -259,6 +259,57 @@ test('the seeded (system host) road: a MASKED document at boot HOLDS the prod bu
     assert.equal(w.releases.length, 1); assert.equal(w.releases[0].kind, 'adopt')
     assert.equal(configLines(w, 'home').at(-1), `[home] app config: ${BACK}`)
     assert.equal(row.prod.configHeld, false); assert.equal(row.prod.configStale, false)
+    assert.equal(w.reports.length, 0)
+  } finally { await w.done(sup) }
+})
+
+test('the dev slot re-reads its document without the clock (an always-on computer, D18 standing down): a config stamp stops a live dev worker and the next request resumes it on the new document; a dev worker spawned on the last-known document (the door failing at a save) is stopped at the scan that reads a MOVED document — the same document read again leaves it running', async () => {
+  const w = world()
+  const d = door(w); d.open({ K: 'v1' })
+  w.registrar.sleep = 'always-on'
+  const dir = w.app('todo', { 'module.json': APP_JSON('Todo'), 'backend.js': ENV_BACKEND(1) })
+  const sup = w.make({ timing: { devIdleMs: 150 } })
+  try {
+    await sup.scan()
+    const r = await waitFor(() => { const x = state(sup, 'todo'); return x?.dev_state === 'live' ? x : null })
+    const inst = r.instance, row = sup.rows.get(inst)
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 1, K: 'v1' })
+    await sleep(400)   // past two windows: no idle stop on an always-on computer
+    assert.equal(state(sup, 'todo').dev_state, 'live'); assert.equal(row.dev.idleTimer, null)
+    // a stamp: the worker stops, the next request resumes it on the new document (a resume on an always-on computer arms no timer)
+    d.open({ K: 'v2' })
+    sup.onConfigStamp(inst, 'u2')
+    assert.equal(state(sup, 'todo').dev_state, 'stopped')
+    assert.ok(w.lines.includes('[todo] config stamp u2: dev rev 1 stopped — resumed on the new document at the next request'))
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 1, K: 'v2' })
+    assert.equal(state(sup, 'todo').dev_state, 'live'); assert.equal(row.dev.idleTimer, null)
+    sup.onConfigStamp(inst, 'u2'); await sleep(50)
+    assert.equal(state(sup, 'todo').dev_state, 'live', 'the same stamp again: nothing')
+    // the door fails at a save: the spawn goes on the last-known document (stale); the door answers with a MOVED document →
+    // the scan stops the worker and the next request resumes it fresh — the line's promise holds for the dev slot too
+    d.closed()
+    fs.writeFileSync(path.join(dir, 'backend.js'), ENV_BACKEND(2))
+    await waitFor(() => state(sup, 'todo').dev_rev === 2)
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 2, K: 'v2' }); assert.equal(row.dev.configStale, true)
+    assert.equal(configLines(w, 'todo').at(-1), `[todo] app config: ${CACHED('spine 503 no config key')}`)
+    await sup.scan()
+    assert.equal(row.dev.configStale, true, 'still closed'); assert.equal(state(sup, 'todo').dev_state, 'live'); assert.equal(configLines(w, 'todo').length, 1)
+    d.open({ K: 'v3' })
+    await sup.scan()
+    assert.equal(row.dev.configStale, false); assert.equal(state(sup, 'todo').dev_state, 'stopped')
+    assert.deepEqual(configLines(w, 'todo').slice(1), [`[todo] app config: ${BACK}`, '[todo] app config: the document moved while dev rev 2 ran on the last-known one — dev worker stopped, resumed on the fresh document at the next request'])
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 2, K: 'v3' })
+    assert.equal(row.dev.idleTimer, null)
+    // the same document read again: the worker keeps running
+    d.closed()
+    fs.writeFileSync(path.join(dir, 'backend.js'), ENV_BACKEND(3))
+    await waitFor(() => state(sup, 'todo').dev_rev === 3)
+    assert.equal(row.dev.configStale, true); assert.equal(row.dev.idleTimer, null, 'a save on an always-on computer arms no timer')
+    d.open({ K: 'v3' })
+    await sup.scan()
+    assert.equal(row.dev.configStale, false); assert.equal(state(sup, 'todo').dev_state, 'live')
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 3, K: 'v3' })
+    assert.equal(configLines(w, 'todo').at(-1), `[todo] app config: ${BACK}`)
     assert.equal(w.reports.length, 0)
   } finally { await w.done(sup) }
 })

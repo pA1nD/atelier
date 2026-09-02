@@ -142,21 +142,30 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     emit(`[${row.slug}] app config: ${why} — ${row.configDoc ? 'spawning with the last-known document (swapped at the next successful read)' : 'no known document: spawn HELD (retried at each scan)'}`)
   }
   // configRetry(row) → true when the row's spawns may go. A row with a HELD slot (a spawn refused for want of a document) or
-  // a STALE prod worker (spawned on the last-known one) reads the door once per scan: held → the spawn is retried only after
-  // the door answered (a rebuild against a closed door would mint a rev every 30 s, §6.1); stale → settleStale. Others: no read.
+  // a STALE worker in either slot (spawned on the last-known one) reads the door once per scan: held → the spawn is retried
+  // only after the door answered (a rebuild against a closed door would mint a rev every 30 s, §6.1); stale → settleStale.
+  // Others: no read.
   async function configRetry(row) {
     const held = row.dev.configHeld || !!row.prod?.configHeld
-    if (!held && !row.prod?.configStale) return true
+    if (!held && !row.prod?.configStale && !row.dev.configStale) return true
     try { await readConfig(row) } catch (e) { configFailed(row, e); return !held }
     settleStale(row)
     return true
   }
-  // settleStale(row): the prod worker ran on the last-known document; the door answered — the same document: nothing;
-  // a moved one: a config release (D16, the same restart a config stamp brings); idle-stopped: the next resume reads fresh
+  // settleStale(row): a worker ran on the last-known document; the door answered — the same document: nothing; a moved one:
+  // prod → a config release (D16, the same restart a config stamp brings); dev → the worker stopped, the next request resumes
+  // it on the fresh document (D18's own road: a running worker's env cannot be swapped, and on an always-on computer no clock
+  // ever stops the dev worker — this is its refresh); idle-stopped: the next resume reads fresh
   function settleStale(row) {
+    const fresh = JSON.stringify(row.configDoc)
+    const dev = row.dev
+    if (dev.configStale) {
+      dev.configStale = false
+      if (dev.live && dev.configUsed !== fresh) { emit(`[${row.slug}] app config: the document moved while dev rev ${dev.live.rev} ran on the last-known one — dev worker stopped, resumed on the fresh document at the next request`); idleStop(row, dev) }
+    }
     const slot = row.prod
     if (!slot?.configStale) return
-    if (!slot.live || slot.configUsed === JSON.stringify(row.configDoc)) { slot.configStale = false; return }
+    if (!slot.live || slot.configUsed === fresh) { slot.configStale = false; return }
     if (row.deploying || slot.state === 'down') return   // a release in flight spawns fresh itself; DOWN stays down (S2)
     emit(`[${row.slug}] app config: the document moved while rev ${slot.rev} ran on the last-known one — config release`)
     deployer.configRelease(row).catch((e) => emit(`[${row.slug}] config release crashed: ${e?.stack ?? e}`))
@@ -640,10 +649,15 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     try { return await p } finally { if (row.deploying === p) row.deploying = null }
   }
 
+  // onConfigStamp(instance, updated) — D16: prod → a config release under the gate; dev → a live worker on an older document
+  // is stopped and the next request resumes it on the new one (D18: no gate, no release row; a stopped one reads fresh at
+  // its resume anyway — the same on an always-on computer, where this and settleStale are the dev slot's only refresh)
   function onConfigStamp(instance, updated) {
     const row = rows.get(instance)
     if (!row) return
     row.configStamp = updated
+    const dev = row.dev
+    if (dev.live && dev.configAt !== updated) { emit(`[${row.slug}] config stamp ${updated}: dev rev ${dev.live.rev} stopped — resumed on the new document at the next request`); idleStop(row, dev) }
     const slot = row.prod
     if (!slot || row.deploying) return
     if (slot.state === 'down') { emit(`[${row.slug}] config stamp ${updated} noted — the app is DOWN after a failed release; no restart (restore or deploy first)`); return }   // S2: a config PUT never resurrects a failed release

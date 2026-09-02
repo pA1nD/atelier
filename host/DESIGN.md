@@ -539,7 +539,10 @@ the app folder as the current user and skips freeze (logged).
   `always-on` computer the dev slot's idle stop (D18, 10 min) stands down — no timer is armed and a live dev worker stays
   live; `24h` is the rule above. The supervisor applies the mode at every `scan()` (one log line per flip: always-on
   clears the dev timers, 24h arms one on every live dev worker, the window from then), so a value that changes at a
-  later beat takes effect at the next scan; prod keeps R14 either way.
+  later beat takes effect at the next scan; prod keeps R14 either way. Only the clock stands down: the dev slot still
+  re-reads its document — a config stamp (D16) or a settled stale read (the config hold below) stops a live dev worker
+  and the next request resumes it on the fresh one. A dev worker already stopped at the flip stays stopped until a
+  request (a fresh always-on pod boots with cold dev slots too: every row starts `stopped`).
 - Boot: table from `last-good/*/` + markers; every row starts `stopped` (lazy resume); the first
   scan re-claims folders and rebuilds only folders whose fingerprint differs from `revision.json`.
 - Sweep = a net, not a retry loop: every `scan()` (the 30 s rescan, §9.12) rebuilds a folder only when
