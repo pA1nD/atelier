@@ -61,15 +61,21 @@ export function deferred() {
 const ROOT_G = { uid: 0, gid: 0, groups: [AGENT_DATA_GID], umask: 0o022, cwd: '/', stdio: ['ignore', 'pipe', 'pipe'] }
 const envOf = (hostEnv) => ({ PATH: hostEnv.PATH ?? '/usr/bin:/bin' })
 /**
- * The data copy — the contents of src into an existing dst. On Linux (GNU cp, the fleet): ownership, timestamps and
- * links preserved (root has CAP_CHOWN), modes NOT — cp chowns each copied inode to `<uid>` and then chmods it, and
- * userns-root has no CAP_FOWNER (`preserving permissions … Operation not permitted`, the row-9 drill); umask 007
- * gives files 0660 and dirs 0770 (the setgid bit is inherited from the 2770 parent) — DESIGN §3's data shape.
- * Elsewhere (a laptop, BSD cp) `cp -a` as the developer.
+ * The data copy — the contents of src into an existing dst (the rehearsal copy, the backup, the restore) — as a LIST
+ * of specs run in order. In the fleet (GNU cp, root + group 19999): `cp -dR --preserve=timestamps,links` under umask
+ * 007 (files 0660, dirs 0770, the setgid bit inherited from the 2770 parent — DESIGN §3's data shape) and then ONE
+ * chown pass over the copied contents to `<uid>:19999` (CAP_CHOWN). Never `--preserve=ownership`: GNU cp implements it
+ * by creating each inode WITHOUT its group/other bits and chmodding them back AFTER the chown — a chmod on a `<uid>`
+ * inode, EPERM without CAP_FOWNER (`preserving permissions … Operation not permitted`, the row-9 drill). Unprivileged
+ * (the same user copies): no chown pass; a laptop's BSD cp: `cp -a`.
  */
-export const cpSpec = (src, dst, hostEnv = process.env, { gnu = process.platform === 'linux' } = {}) => (gnu
-  ? { ...ROOT_G, umask: 0o007, argv: ['cp', '-dR', '--preserve=ownership,timestamps,links', '--', `${String(src).replace(/\/+$/, '')}/.`, dst], env: envOf(hostEnv) }
-  : { ...ROOT_G, argv: ['cp', '-a', '--', `${String(src).replace(/\/+$/, '')}/.`, dst], env: envOf(hostEnv) })
+export function copySpecs(src, dst, { uid, hostEnv = process.env, gnu = process.platform === 'linux', privileged = true } = {}) {
+  const from = `${String(src).replace(/\/+$/, '')}/.`
+  if (!gnu) return [{ ...ROOT_G, argv: ['cp', '-a', '--', from, dst], env: envOf(hostEnv) }]
+  const specs = [{ ...ROOT_G, umask: 0o007, argv: ['cp', '-dR', '--preserve=timestamps,links', '--', from, dst], env: envOf(hostEnv) }]
+  if (privileged) specs.push({ ...ROOT_G, argv: ['find', dst, '-mindepth', '1', '-exec', 'chown', '-h', `${uid}:${AGENT_DATA_GID}`, '{}', '+'], env: envOf(hostEnv) })
+  return specs
+}
 /** `rm -rf <dir>` — a data dir or a rehearsal copy; root enters the `2770` dir through group 19999. */
 export const rmSpec = (dir, hostEnv = process.env) => ({ ...ROOT_G, argv: ['rm', '-rf', '--', dir], env: envOf(hostEnv) })
 /** `du -sk <dir>` → KiB on stdout. */
