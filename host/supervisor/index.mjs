@@ -122,15 +122,22 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // (never to disk); a 404 (no config rows) is the empty document. Throws the transport's error on anything else — a
   // 5xx, API 50's `503 no config key`, a network error, a timeout — and throws `{masked:true}` on a MASKED document: a 200
   // whose `sealed_missing` names keys the spine could not unseal (API 50) is no document at all — the partial env never
-  // becomes the last-known one; the error names the keys, never a value. The caller decides.
+  // becomes the last-known one; the error names the keys, never a value. The door falls CLOSED on a shape it does not
+  // know: a `sealed_missing` that is not a list of env-shaped names (a string, a null entry, a name with a newline) is held
+  // like a masked document (`{masked, shapeless}`; the answer may be masking keys it cannot even name, and no such
+  // "name" reaches a log line), and a 200 without an `env` object is a failed read (never "the empty document, known
+  // from then on" — a body that did not parse, or something other than the spine answering 200). The caller decides.
+  const KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/   // the spine's CONFIG_KEY_RE (registry/store.ts)
   async function readConfig(row) {
     if (!registrar?.appConfig) return {}
     let r
     try { r = await registrar.appConfig(row.instance) }
     catch (e) { if (e?.status !== 404) throw e; r = { env: {} } }
-    const missing = Array.isArray(r?.sealed_missing) ? r.sealed_missing.filter((k) => typeof k === 'string') : []
+    const missing = r?.sealed_missing ?? []
+    if (!Array.isArray(missing) || !missing.every((k) => typeof k === 'string' && KEY_RE.test(k))) throw Object.assign(new Error('the config door\'s sealed_missing is not a list of key names (shapeless answer)'), { masked: true, shapeless: true })
     if (missing.length) throw Object.assign(new Error(`spine cannot unseal ${missing.join(', ')} (sealed_missing)`), { masked: true })
-    row.configDoc = r?.env ?? {}
+    if (!r || typeof r.env !== 'object' || r.env === null || Array.isArray(r.env)) throw new Error('the config door answered without an env document')
+    row.configDoc = r.env
     if (row.configWhy) { row.configWhy = null; emit(`[${row.slug}] app config: the door answers again`) }
     return row.configDoc
   }
@@ -143,6 +150,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     if (row.configWhy === why) return
     row.configWhy = why
     const then = running ? 'the running worker keeps its document (settled at the next successful read)'
+      : e?.shapeless ? 'spawn HELD: not the API 50 answer (a spine mid-rollout?) — a running worker keeps its document; retried at each scan'
       : e?.masked ? 'spawn HELD: the keys are sealed under a key the spine does not hold (CONFIG_KEY_PREVIOUS at the spine\'s boot, or set them again) — a running worker keeps its document; retried at each scan'
       : row.configDoc ? 'spawning with the last-known document (swapped at the next successful read)'
       : 'no known document: spawn HELD (retried at each scan)'
