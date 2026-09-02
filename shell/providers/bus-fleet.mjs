@@ -6,7 +6,7 @@
 // seam (`stream.subscribe(handlers)`); step 5 wires the spine's, the shell tests pass a fake.
 // `snapshot(instance)`: `rev` from the registry row; `error: null` always — errors go to the agent
 // (OR16), never to a member's tab.
-import { EventRing, validEvent, companyTopic } from '../../protocol/index.js'
+import { EventRing, validEvent, companyTopic, asDigest } from '../../protocol/index.js'
 import { randomBytes } from 'node:crypto'
 import { visibleRows } from '../presence.mjs'
 
@@ -23,7 +23,10 @@ export function createBusFleet({ registry, stream, log = () => {} }) {
   const stats = { appended: 0, rejected: 0 }
   let unsub = null
   const fire = (ev) => { for (const fn of listeners) { try { fn(ev) } catch (e) { log(`bus: listener ${e.message}`) } } }
-  const moduleRow = (r) => ({ id: r.slug, instance: r.instance, rev: r.rev ?? null, hasFrontend: r.hasFrontend !== false, meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) } })
+  // the rail row carries `chromeDigest` — the digest ITS computer reports (step 7 ship C) — beside the frame's company DEFAULT
+  // (`chrome.digest`/`chromeRev`): the client compares an app document against its row, an app-less one against the default,
+  // never an app document against the default (a computer lagging the default would reload forever)
+  const moduleRow = (r) => ({ id: r.slug, instance: r.instance, rev: r.rev ?? null, hasFrontend: r.hasFrontend !== false, meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) }, chromeDigest: asDigest(r.chromeDigest) })   // 64 hex or null: what the shell composes by
 
   function accept(ev) {
     if (!validEvent(ev)) { stats.rejected++; return { ok: false, reason: 'envelope' } }
@@ -61,7 +64,7 @@ export function createBusFleet({ registry, stream, log = () => {} }) {
         let rows = await registry.apps(company)
         if (person) rows = await visibleRows(registry, person.id, rows)
         const chrome = registry.chrome(company)
-        return { ...base, modules: rows.map(moduleRow), chrome: { qid: chrome.qid, digest: chrome.digest }, chromeRev: chrome.digest }
+        return { ...base, modules: rows.map(moduleRow), chrome: { qid: chrome.qid, digest: chrome.digest, ...(chrome.version ? { version: chrome.version } : {}) }, chromeRev: chrome.digest }
       }
       const row = await registry.byInstance(topic)
       return row ? { ...base, rev: row.rev ?? null, error: null } : null

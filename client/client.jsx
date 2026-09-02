@@ -11,12 +11,15 @@
  *   • window.__atelier: subscribe, self (three-base, client/self.js), navigate, useRoute
  *   • URL routing `/<company>/<app>[/<rest>]` (client/route.js)
  *   • the chrome from the bootstrap (exactly the document's chrome), the active app lazily; every
- *     asset URL carries `?rev=N` — never `?v=`
+ *     asset URL carries `?rev=N` — never `?v=` — except a chrome by DIGEST (`boot.chromeBase`, step 7
+ *     ship C): `/_chrome/<digest>/…`, immutable, no cache-buster (client/chrome.js)
  *   • each loaded app subscribes on its instance topic: an invalidate → `GET /_atelier/topics/
  *     <instance>` → `{rev, error}` → re-import at the new rev (+ the sheet swap when active), the
  *     overlay for a build/load failure of the running save
  *   • the document subscribes on `company:<c>` → `GET /_atelier/rail` → module rows replaced in
- *     state; a moved chromeRev → full reload (a chrome cannot swap inside a document)
+ *     state; a moved chrome digest FOR THIS ROUTE → full reload (a chrome cannot swap inside a
+ *     document): an app document is compared against its row's `chromeDigest`, an app-less one
+ *     against the rail's default — never an app document against the default (client/chrome.js)
  *   • the per-app stylesheet swap on SPA navigation (client/sheet.js)
  *   • the picker → a full page load (client/picker.js: portal POST in the fleet, href locally)
  *   • the waking fallback (client/waking.js) when the shell answers 503 {waking:true}
@@ -32,6 +35,7 @@ import { createBridge } from './bridge.js';
 import { self as selfOf } from './self.js';
 import { parseUrl, buildUrl } from './route.js';
 import { swapSheet, sheetHref } from './sheet.js';
+import { chromeUrl, railDefault, chromeMoved, targetDigest } from './chrome.js';
 import { pickTarget, performPick } from './picker.js';
 import { createReporter } from './reporter.js';
 import { isWakingResponse, startWakePoll, wakeUrl, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from './waking.js';
@@ -53,6 +57,7 @@ function rowsOf(list, company) {
       id: m.id, qid: `${company}/${m.id}`, workspace: company,
       instance: m.instance || null, rev: m.rev ?? null,
       hasFrontend: m.hasFrontend !== false, meta: m.meta || {},
+      chromeDigest: m.chromeDigest ?? null,               // the digest ITS computer reports (step 7 ship C); null = the default
     });
   }
   return out;
@@ -155,8 +160,7 @@ reporter.install(window, console);
  * ========================================================================= */
 const bundleUrl = (qid, rev) => withDevToken(`/modules/${qid}/frontend.js${rev != null ? `?rev=${encodeURIComponent(rev)}` : ''}`);
 
-async function loadModuleBundle(qid, rev) {
-  const url = bundleUrl(qid, rev);
+async function loadModuleBundle(qid, rev, url = bundleUrl(qid, rev)) {
   try {
     const mod = await import(url);
     const Module = typeof mod.default === 'function' ? mod.default : null;
@@ -298,6 +302,7 @@ function App() {
   const user = boot.user || { id: 'local', name: 'local', workspaces: [] };
   const chromeQid = boot.chromeQid || null;
   const chromeRev = boot.chromeRev ?? null;
+  const chromeBase = boot.chromeBase || null;             // `/_chrome/<digest>` when the document is composed by digest
   // The shell advertises exactly the document's chrome: an app pinning another `meta.chrome`
   // renders the error below; `requiredChromeForQid` never crosses chromes.
   const defaultChromeQid = boot.defaultChromeQid || boot.chromeQid || null;
@@ -322,11 +327,11 @@ function App() {
   }, [urlState.ws]);
   const effectiveWorkspace = urlState.ws || COMPANY;
 
-  // The chrome bundle at the chrome's revision.
+  // The chrome bundle at the chrome's revision — by digest the immutable `/_chrome/<digest>/frontend.js` (client/chrome.js).
   useEffect(() => {
     if (!chromeQid) return;
     let cancelled = false;
-    loadModuleBundle(chromeQid, chromeRev).then(async (res) => {
+    loadModuleBundle(chromeQid, chromeRev, withDevToken(chromeUrl({ chromeQid, chromeRev, chromeBase }, 'frontend.js'))).then(async (res) => {
       if (cancelled) return;
       if (res.status === 'error' && await probeWaking()) { setWaking(true); return; }
       setChromeEntry(res);
@@ -383,7 +388,7 @@ function App() {
   useEffect(() => {
     const href = activeMod
       ? sheetHref({ company: activeMod.workspace, slug: activeMod.id, rev: revRef.current.get(activeMod.qid) ?? activeMod.rev }, null)
-      : sheetHref(null, { qid: chromeQid, rev: chromeRev });
+      : sheetHref(null, { qid: chromeQid, rev: chromeRev, base: chromeBase });
     if (href) swapSheet(document, href);
   }, [activeQid]);
 
@@ -437,11 +442,15 @@ function App() {
   }, [loaded]);
   useEffect(() => () => { for (const off of subsRef.current.values()) off(); subsRef.current.clear(); }, []);
 
-  // ---- the rail: `company:<c>` → /_atelier/rail → module rows; a moved chromeRev → reload ----
+  // ---- the rail: `company:<c>` → /_atelier/rail → module rows; a moved chrome digest FOR THIS ROUTE → reload ----
+  // (client/chrome.js: the active app's row `chromeDigest`, the rail's default on an app-less route — the digest the
+  // shell composed THIS document with; `railDefaultRef` remembers the default for navigation across computers)
+  const railDefaultRef = useRef(null);
   const applyRail = (rail) => {
     if (!rail || typeof rail !== 'object') return;
-    const nextChromeRev = rail.chromeRev ?? rail.chrome?.digest ?? rail.chrome?.rev ?? null;
-    if (chromeRev != null && nextChromeRev != null && String(nextChromeRev) !== String(chromeRev)) { window.location.reload(); return; }
+    railDefaultRef.current = railDefault(rail);
+    const active = activeQidRef.current ? activeQidRef.current.split('/')[1] : null;
+    if (chromeMoved(chromeRev, rail, active)) { window.location.reload(); return; }
     if (Array.isArray(rail.modules)) {
       const rows = rowsOf(rail.modules, COMPANY);
       for (const r of rows) { const known = revRef.current.get(r.qid); if (known != null && r.rev != null && Number(r.rev) < Number(known)) r.rev = known; }
@@ -490,11 +499,20 @@ function App() {
       return;
     }
     if (requiredChromeForQid(id ? qid : null) !== chromeQid) { window.location.assign(target); return; }
+    // another computer's app may render another chrome digest (its host's): that document is another page load
+    const want = targetDigest({ row: id ? rowByQid(qid) : null, railDefault: railDefaultRef.current, bootRev: chromeRev });
+    if (chromeRev != null && want != null && String(want) !== String(chromeRev)) { window.location.assign(target); return; }
     navigateTo(target);
   }
-  // The picker: a full page load in both modes (client/picker.js).
+  // The picker: a full page load in both modes (client/picker.js). Our own company's home is an app-less document: it
+  // renders the rail's DEFAULT digest, so from an app document on another digest it is a page load too (client/chrome.js).
   function pickWorkspace(ws) {
-    if (ws === COMPANY) { navigateTo(buildUrl(ws, null)); return; }
+    if (ws === COMPANY) {
+      const target = buildUrl(ws, null);
+      const want = targetDigest({ row: null, railDefault: railDefaultRef.current, bootRev: chromeRev });
+      if (chromeRev != null && want != null && String(want) !== String(chromeRev)) { window.location.assign(target); return; }
+      navigateTo(target); return;
+    }
     performPick(document, pickTarget(boot, ws));
   }
 

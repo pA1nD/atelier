@@ -31,6 +31,7 @@ export function walkFiles(dir, { exts, fs = nodeFs } = {}) {
   const walk = (d, rel) => {
     let ents
     try { ents = fs.readdirSync(d, { withFileTypes: true }) } catch { return }
+    ents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))   // name order, whatever the filesystem returns: the Tailwind scan is deterministic (a chrome digest must not depend on it)
     for (const ent of ents) {
       if (SERVE_DENY_RE.test(ent.name) || SKIP_DIRS.has(ent.name)) continue
       const abs = path.join(d, ent.name), r = rel ? `${rel}/${ent.name}` : ent.name

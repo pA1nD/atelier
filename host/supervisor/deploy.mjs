@@ -19,7 +19,7 @@
 // skill quotes verbatim (lane K hands wording changes here, never a second copy).
 import http from 'node:http'
 import path from 'node:path'
-import { archiveSpec, commitAll, resolveCommit, gitInit } from './lastgood.mjs'
+import { archiveSpec, commitAll, resolveCommit } from './lastgood.mjs'
 import { formatHint, classifyWorkerFailure } from './bundle.mjs'
 import { REL, commit12, backupId, parseBackupId, newReleaseId, copySpecs, rmSpec, duSpec, lsSpec, extractSpec, parseKb, ownTree, pruneBackups, backupFeasible, mb, deferred, RELEASES_KEEP, COMMIT_RE, DATA_CAP_BYTES, sockName } from './slots.mjs'
 import { run } from '../worker/install.mjs'
@@ -163,7 +163,7 @@ const childWhy = (r) => tail(r.stderr) || (r.signal ? `killed by ${r.signal}` : 
  * createDeployer(i) — the supervisor's internals (index.mjs hands them over): os, dirfd, fs, cfg, T, emit, report,
  * registrar, store, metrics, hostEnv, jail, install, hook, treeOk, company(), origin(), rel(), dot(), workerSpec,
  * startWorker, stopLive, buildArtefacts, prune, prodSlot, exportDir, withInstalling, later, onSwap, armIdle,
- * withGroupSync, checkModuleJson.
+ * withGroupSync, checkModuleJson, ensureGit (the row's one `git init`).
  *   .deploy(row, {message, commit?, by, noBackup, onStep}) → the verdict (never throws once started; 409 while one runs)
  *   .restore(row, backupId, {by, yes, onStep}) → the verdict (refused unless the app is DOWN or `yes`)
  *   .configRelease(row) → the verdict (D16)
@@ -452,7 +452,8 @@ export function createDeployer(i) {
               commit = r.commit; R.commit = commit
               return { note: MESSAGES.step.notes.commitGiven(commit12(commit)) }
             }
-            if (!row.gitReady) { const g = await gitInit({ os, appDir: row.dir, log: emit, home: i.cfg.gitHome }); if (!g.ok) throw { error: `git ${g.step}: ${g.error}` }; row.gitReady = true }
+            const g = await i.ensureGit(row)   // the claim's init when it is still in flight — never a second `git init` on the dir
+            if (!g.ok) throw { error: `git ${g.step}: ${g.error}` }
             const r = await commitAll({ os, appDir: row.dir, message, log: emit, home: i.cfg.gitHome })
             if (!r.ok) throw { error: `git ${r.step}: ${r.error}` }
             commit = r.commit; R.commit = commit
@@ -588,7 +589,8 @@ export function createDeployer(i) {
         })
         if (!g.ok) return await failedAfterGate({ step: g.step, error: g.error, prevRev: prevSnapshot?.rev ?? 0 }, rehearsalMs)
         // ---- 4. record
-        try { store.commitProd(inst, rev, { commit, message, deployedAt: nowIso(os.now()) }) } catch (e) {
+        const chrome = i.chromeNameOf?.() ?? null   // the chrome buildArtefacts just compiled the prod sheet against (rebuildAll reads it back); none = no key
+        try { store.commitProd(inst, rev, { commit, message, deployedAt: nowIso(os.now()), ...(chrome ? { chrome } : {}) }) } catch (e) {
           // the pointer did not land (ENOSPC, EIO): the new worker serves, but a restart would boot the OLD rev over the migrated
           // data — the honest state is DOWN (the marker write may fail too; the in-flight marker then still says so at boot)
           const failure = { step: 'record', error: `revision.json: ${e?.code ?? e?.message ?? e}` }
@@ -726,9 +728,8 @@ export function createDeployer(i) {
     row.git = row.git.then(async () => {
       if (!slot.adoptPending) return null
       const rev = slot.rev
-      const g = await gitInit({ os, appDir: row.dir, log: emit, home: i.cfg.gitHome })
+      const g = await i.ensureGit(row)
       if (!g.ok) { emit(`[${row.slug}] adopt: git ${g.step} failed (${g.error}) — retried on the next scan`); return null }
-      row.gitReady = true
       const message = MESSAGES.git.adoptMessage(rev)
       const c = await commitAll({ os, appDir: row.dir, message, log: emit, home: i.cfg.gitHome })
       if (!c.ok) { emit(`[${row.slug}] adopt: git ${c.step} failed (${c.error}) — retried on the next scan`); return null }

@@ -259,7 +259,8 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/.atelier` | `0:0 0711` | launcher | the dirfd root; markers below are `at(dirfd, …)` writes; a worker cannot enumerate its peers' instance ids |
 | `/work/.atelier/agent.log` | `0:1000 0640` | host (`errors/agentlog.mjs`) | agent reads; workers cannot (groups cleared) |
 | `/work/.atelier/registry.json` | `0:0 0600` | registrar, local mode only | the folder registry (§7 `localTransport`) |
-| `/work/.atelier/<inst>/` | `0:0 0711` | host at claim | markers, every one `0600` (the host's alone): `slug`, `uid`, `revision.json` (`{rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug, prod:{rev, commit, deployedAt, message, legacy?}}`), `current` → `../last-good/<inst>/rev-N` (the PROD rev; symlink, atomic rename), `current-dev` → the DEV rev, `registered.json` (`{instance, slug, uid, company}`), `releases.jsonl` (the last 50 release rows), `backups.json` (backup sizes) |
+| `/work/.atelier/<inst>/` | `0:0 0711` | host at claim | markers, every one `0600` (the host's alone): `slug`, `uid`, `revision.json` (`{rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug, prod:{rev, commit, deployedAt, message, legacy?, chrome?}}` — `chrome` = the chrome the DEV sheet was built with, `prod.chrome` the PROD sheet's; a deploy/rollback and a chrome rebuild stamp it, an adopt names none), `current` → `../last-good/<inst>/rev-N` (the PROD rev; symlink, atomic rename), `current-dev` → the DEV rev, `registered.json` (`{instance, slug, uid, company}`), `releases.jsonl` (the last 50 release rows), `backups.json` (backup sizes) |
+| `/work/.atelier/chrome` | `0:0 0755` | host (`hostDirs`) | the chrome cache (step 7 ship C, `host/chrome/fetch.mjs`): `<digest>/` (dirs 0755, files 0644 — `frontend.js`, `kit.js`, `styles.css`, `chrome.css`, `fonts/*.woff2`, `manifest.json` last) fetched from the spine (`GET /v1/host/chrome/<digest>`) and verified (every sha, the recomputed digest), `current` → `<digest>` (symlink, atomic rename); current + previous kept, older pruned at a swap, `.tmp-*` swept at boot; root-owned under a root `0711` parent (nothing else can create, rename or unlink in it) and world-readable — these are the PUBLIC chrome bytes every company origin serves, and the dev shell serves them at `/_chrome/<digest>/…`; every app sheet compiles against `current` (ATELIER_CHROME_DIR is the fallback while no release is held) |
 | `/work/.atelier/data` | `0:0 0711` | launcher | |
 | `/work/.atelier/data/<inst>` | `<uid>:<agid> 2770` | host at claim (mkdir, chown) | `ctx.dataDir`; agent in group via 19999; peers EACCES; data files 0660 (worker umask 002, agent umask 002 inside — the worker chmods sqlite `-wal`/`-shm` it creates to 0660, round trip §6.2(b) for agent-created ones) |
 | `/work/.atelier/data-dev` | `0:0 0711` | host (`hostDirs`) | |
@@ -448,7 +449,10 @@ export function createRegistrar({ os, dirfd, transport, cfg, log, now = Date.now
   //                        meta split by protocol/registry allowMeta (primary → requested); refusal → CLAIM-REFUSED.txt as uid 1000
   // .unlink(instance)      tombstone (24 h); folder re-created by the same computer → revive with the same instance id
   // .modulesChanged(instance, rev)   → transport.modulesChanged({apps:[{instance, slug, rev}]})  (spine calls setRunning)
-  // .heartbeat(ms)         every 10 s: transport.heartbeat({visible_apps, last_served_at, pod_ip}); visible_apps = live workers + served in 10 min
+  // .heartbeat(ms)         every 10 s: transport.heartbeat({visible_apps, last_served_at, pod_ip, chrome_digest}); visible_apps = live workers + served in 10 min;
+  //                        chrome_digest = the digest every prod sheet is BUILT with (`chromeDigest()` → the cache's `built()`; null = none). `beat()` returns the answer;
+  //                        its `chrome: {digest, version} | null` (the register answer's too) → `onChrome` (host/chrome/fetch.mjs createChromeCache.want)
+  // .chromeFetch(digest)   GET /v1/host/chrome/<digest> through call() → {digest, version, files:{path: base64}} (15 s bound)
   // .served(instance)      bumps last_served_at (called by serve.mjs on every proxied request)
   // .reconcile(rows)       boot: rows with no folder → unlink, only after /work/apps is readable + 5 s settle, ≤ 5 rows per pass (more → one loud log, next pass)
   // .draining()            preStop: transport.draining()
@@ -565,13 +569,45 @@ chown.
   report, SIGCONT when < 90 %. All through the adapter.
 
 ### 6.4 CSS (supervisor/tailwind.mjs)
-One sheet per app = `ATELIER_CHROME_DIR/styles.css` compiled with `compile()` from
+One sheet per app = the chrome dir's `styles.css` compiled with `compile()` from
 `@tailwindcss/node` (`base` = chrome dir) and `Scanner({sources:[]}).scanFiles(contents)` over an
 EXPLICIT list: the chrome folder's and the app folder's `.jsx/.js/.tsx/.ts/.html` files, walked
 recursively with the 1.x exclusions (`node_modules`, `data`, dotfiles, `_*`), every line > 8 KB split
 at 200 chars before scanning. No resident compiler; recompiled on every save; a chrome change
 rebuilds every app sheet. No chrome dir → the app's own `styles.css` passed through unchanged.
 Budget: ≤ 50 ms cold in-process for the median corpus app (b5: 4.9 ms), ≤ 200 ms for a 5 k-candidate app.
+
+**The chrome dir** (step 7 ship C, R-CHROME decisions 7–8; `host/chrome/fetch.mjs`): the release the
+host HOLDS — the cache's `current` under `/work/.atelier/chrome/<digest>/` (§3) — else `ATELIER_CHROME_DIR`
+(local mode; the system host's `/opt/chrome` while the spine names no release). The spine names the
+computer's effective release in every register and heartbeat answer (`chrome: {digest, version} | null`);
+the host fetches what it does not hold after `registered` resolves (never on the boot path), verifies
+every sha and the recomputed digest (a bundle already on disk is verified the same way before it is
+swapped to, and `current` is verified at boot — a corrupt dir is removed and fetched again), swaps
+`current` and — once the supervisor has booted — `supervisor.rebuildAll()`: every DEPLOYED prod slot
+whose sheet is not built against the held chrome (`revision.json.prod.chrome`) gets a NEW rev of the same
+code with a sheet compiled against it (`store.clone`, no gate, no restart; `current` moves, the previous
+rev stays addressable for the window, one `onSwap` → `modulesChanged` → the company's frames, so a tab on
+that app reloads once with the new chrome), every linked row one dev rebuild per chrome. **The heartbeat
+reports the digest every prod sheet is BUILT with** (`chrome.built()`), never the one merely held: the
+shell composes an app document's JS from the reported digest and its CSS is the sheet the host built, so
+the two must be one digest. Hence the rebuild is all or nothing — phase 1 compiles every sheet that is
+behind (nothing moves), phase 2 commits them all; one sheet refused (a css failure, a row mid-deploy, the
+host in fault) and nothing commits, the computer keeps reporting the previous digest, and the next beat
+that names the held digest (`onHold`) tries again — idempotent and cheap when nothing is behind, so a
+row that falls behind later (adopted, rolled back, its deploy over) is caught within a beat. A css
+failure is logged once per (chrome, reason), not once per beat. `row.deploying` is held for a row's
+commit alone (milliseconds); a deploy landing inside it answers 409 `deploy in progress`. The new rev
+moves the collector's running rev (`onSwap` → `setRunning`), which closes that app's open error tallies:
+an error still firing after a chrome release notifies once more; the prod worker keeps running and its
+reports carry the SLOT's rev (the rev it was born with would be `stale-rev` at the collector and the
+spine). With a digest held the sheet build rewrites every RELATIVE `url()` of the chrome's source to
+`/_chrome/<digest>/…` (`buildSheet({chromeBase})` — the bundle's `fonts/…` are served by the shell there;
+the chrome's `styles.css` is one file: an `@import`ed sheet of its own is not rebased, and an app's own
+`url()` candidates are never touched). A fetch that fails or is refused keeps `current` (the cached
+fallback) and retries at the next beat; no cache and no folder = no chrome dir, as before a release. The
+dev shell serves the same dir (`chrome.dir()` — the held one, ahead of the report) and the cache's files at
+`/_chrome/<digest>/<path>`, so render-verify sees the digest the company sees.
 
 ### 6.5 protocol-server
 - Auth order and reasons are protocol/identity's; `hostStartedAt` is mandatory; nonce cache per
@@ -650,8 +686,8 @@ against a fake server in `test/protocol-registrar.test.js`.
 
 | method | HTTP (bearer = registrar token; `register` uses the bootstrap secret) | body → reply |
 |---|---|---|
-| `register()` | `POST /v1/host/register` | `{pod_ip, host_started_at}` → `{host_id, epoch, token, company, origin, chat, principal:{id,name}, apps:[{instance, slug, uid, rev}], shell_public_key_hex}` — the previous epoch is revoked here |
-| `heartbeat(b)` | `POST /v1/host/heartbeat` | `{visible_apps, last_served_at, pod_ip}` → `{ok}` |
+| `register()` | `POST /v1/host/register` | `{pod_ip, host_started_at}` → `{host_id, epoch, token, company, origin, chat, principal:{id,name}, apps:[{instance, slug, uid, rev, deployed_rev}], shell_public_key_hex, chrome}` — the previous epoch is revoked here; `chrome` = `{digest, version}` the computer's effective release, null while the spine names none (§6.4) |
+| `heartbeat(b)` | `POST /v1/host/heartbeat` | `{visible_apps, last_served_at, pod_ip, chrome_digest}` → `{ok, config:[{instance, updated}], chrome}` — `chrome_digest` = the digest the host holds (null = none); `chrome` as on register |
 | `putApp(instance, b)` | `PUT /v1/apps/<instance>` | `{slug, meta}` (protocol/registry `BODY_KEYS`; `company`/`computer` never sent) → `201 {claimed}` \| `200 {adopted\|updated\|renamed, revived?}` \| `403/409/400 {error}`; the uid is not in this body — it travels in `modulesChanged` and comes back in `register().apps` |
 | `unlink(instance)` | `POST /v1/apps/<instance>/unlink` | → `{tombstone_at}` |
 | `modulesChanged(b)` | `POST /v1/host/modules-changed` | `{apps:[{instance, slug, uid, rev}]}` → `{ok}` (spine: `setRunning`, `apps.uid` persisted) |
@@ -659,6 +695,7 @@ against a fake server in `test/protocol-registrar.test.js`.
 | `appError(b)` | `POST /v1/host/event` | `{kind:'app-error', error:<AppErrorEvent>}` → `{ok}` (the spine reuses `parseAppError`) |
 | `appConfig(instance)` | `GET /v1/apps/<instance>/config` | → `{env:{K:V}}` (OR14; fetched at every worker spawn, never cached to disk) |
 | `draining()` | `POST /v1/host/draining` | → `{ok}` |
+| `chrome(digest)` | `GET /v1/host/chrome/<digest>` | → `{digest, version, files:{<path>: base64}}` (~1.2 MB; its own 15 s bound) · `404 unknown-digest` · `503 no chrome store` — the bundle the register/heartbeat answers' `chrome` named (§6.4); the local twin answers 404 (the fixed folder is the chrome) |
 
 Transport rules: 5 s connect / 30 s total timeout; a `401 host-epoch-moved` on any call →
 `register()` again; the host token lives in memory only.
@@ -750,8 +787,9 @@ are sites (a) and (b).
    the old worker exits; no `exclusiveData` declaration in step 2.
 9. **Host vs session supervisor naming** — "host supervisor" in the plan = `host/index.mjs` +
    `supervisor/`; "session supervisor" = the image's uid-1000 process, spawned but not built here.
-10. **Chrome source** — a folder (`ATELIER_CHROME_DIR`); the pinned-digest fetch of §10 item 6 is
-    step 5. No chrome → app-less documents and pass-through app CSS.
+10. **Chrome source** — a folder (`ATELIER_CHROME_DIR`), or the release the spine names, fetched by
+    digest into `/work/.atelier/chrome` (step 7 ship C, §6.4). No chrome → app-less documents and
+    pass-through app CSS.
 11. **Readiness probe** — the host writes `/run/atelier/host-ready`; the step-1 probe still reads
     `/control/.supervisor-ready` until the step-5 pod spec moves it (nothing in step 2 edits a spec).
 12. **HOST/PORT/BASE_URL for workers** — `BASE_URL = ctx.baseUrl`
@@ -1162,7 +1200,7 @@ instance and drops lower ones — a dev counter would silence every later prod e
 
 **The verb** (D6): `atelier deploy <slug> -m "<message>"` (`host/devcli.mjs`, `/usr/local/bin/atelier` in the image)
 = `POST /_atelier/deploy {app, message, commit?, noBackup?}` on the dev shell with the dev token (401 without it, 404
-`unknown app`, 409 `deploy in progress`, 400 no message), answered as an NDJSON stream of `{t:'step', name, ms, ok,
+`unknown app`, 409 `deploy in progress` — also for the milliseconds a chrome swap commits the row's rebuilt sheet (§6.4), 400 no message), answered as an NDJSON stream of `{t:'step', name, ms, ok,
 note?}` lines ending in ONE `{t:'verdict', outcome: green|red|failed, kind, slug, rev, commit, url, api, step?, error?,
 backup?, rehearsal:{ms, partial?}, release}` line; `atelier rollback <slug> <commit>` = the same verb with `commit`
 (7–40 hex, resolved `git rev-parse --verify <c>^{commit}` as uid 1000); `atelier releases|backups <slug>` read

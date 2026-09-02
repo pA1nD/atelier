@@ -1,7 +1,15 @@
 // shell/document.mjs — head order, preloads, escaping, chromeApi 2, one sheet, CSP nonce, no-store.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { renderDocument, escapeBootstrap, relativeImports, composeDocument, FALLBACK_TEMPLATE, SLOTS } from '../document.mjs'
+import { createConfig } from '../config.mjs'
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
 const person = { id: 'local', name: 'local', epoch: null }
 const chrome = { qid: 'global/catalyst-chrome', rev: 1700, hasKit: true, hasStyles: true }
@@ -83,6 +91,13 @@ test('CSP: one nonce on both inline scripts, no-store, nosniff, font hosts, form
   assert.ok(cspv.includes("font-src 'self' data: https://rsms.me"))
   assert.ok(cspv.includes("style-src 'self' 'unsafe-inline' https://rsms.me"))
   assert.ok(cspv.includes("form-action 'self' https://portal.pa1nd.de"))
+  // the defaults (review 2026-09-02, S3): the fleet self-hosts the chrome's fonts (`/_chrome/<digest>/fonts/`) → no font host;
+  // local runs the chrome folder, whose frontend.jsx loads Inter from rsms.me → that host; a config's own list wins in both
+  assert.deepEqual(createConfig({ mode: 'fleet', config: {}, env: {} }).cfg.csp.fontHosts, [])
+  assert.deepEqual(createConfig({ mode: 'local', config: {}, env: {} }).cfg.csp.fontHosts, ['https://rsms.me'])
+  assert.deepEqual(createConfig({ mode: 'fleet', config: { csp: { fontHosts: ['https://fonts.example'] } }, env: {} }).cfg.csp.fontHosts, ['https://fonts.example'])
+  const fleet = renderDocument({ cfg: createConfig({ mode: 'fleet', config: {}, env: {} }).cfg, company: 'acme', person, modules: [], chrome, portal: 'https://portal.pa1nd.de' }).headers['content-security-policy']
+  assert.ok(fleet.includes("font-src 'self' data:;") && fleet.includes("style-src 'self' 'unsafe-inline';"), fleet)
   assert.ok(cspv.includes("frame-ancestors 'none'"))
   assert.equal(r.headers['cache-control'], 'no-store')
   assert.equal(r.headers['x-content-type-options'], 'nosniff')
@@ -95,4 +110,43 @@ test('relativeImports lists ./ specifiers once, .jsx as .js; a template without 
   assert.deepEqual(relativeImports(`import { h } from './helper.js?rev=4'\nimport '../up.js#x'`), ['./helper.js', '../up.js'])
   assert.throws(() => composeDocument({ template: '<html></html>', nonce: 'n', bootstrap: {}, sheet: null, importMap: null }), /slot/)
   for (const s of Object.values(SLOTS)) assert.ok(FALLBACK_TEMPLATE.includes(s))
+})
+
+test('the chrome by digest (step 7 ship C, decision 5): `base` puts every chrome asset under /_chrome/<digest>/ with no ?rev=, the app-less sheet is chrome.css, the bootstrap carries chromeBase + chromeRev = the digest and a row\'s chromeDigest; without `base` nothing of it appears', () => {
+  const D = 'd'.repeat(64)
+  const byDigest = { qid: 'portal/catalyst-chrome', rev: D, hasKit: true, hasStyles: true, base: `/_chrome/${D}` }
+  const rows = [{ ...modules[0], company: 'acme', chromeDigest: D }, { ...modules[1], company: 'acme', chromeDigest: null }]
+  const bare = renderDocument({ company: 'acme', person, modules: rows, chrome: byDigest })
+  assert.equal(bare.sheet, `/_chrome/${D}/chrome.css`)
+  assert.deepEqual(bare.preloads, ['/assets/client.js', '/assets/chrome-resolve.js', `/_chrome/${D}/frontend.js`, `/_chrome/${D}/kit.js`])
+  assert.match(bare.html, new RegExp(`"@atelier/kit":"/_chrome/${D}/kit\\.js"`))
+  assert.equal(bare.bootstrap.chromeRev, D); assert.equal(bare.bootstrap.chromeBase, `/_chrome/${D}`)
+  assert.deepEqual(bare.bootstrap.user.workspaces[0].modules.map((m) => m.chromeDigest), [D, undefined])
+  const app = renderDocument({ company: 'acme', slug: 'weather', person, modules: rows, chrome: byDigest, entryImports: ['./x.js'] })
+  assert.equal(app.sheet, '/modules/acme/weather/styles.css?rev=7')
+  assert.deepEqual(app.preloads, ['/assets/client.js', '/assets/chrome-resolve.js', `/_chrome/${D}/frontend.js`, `/_chrome/${D}/kit.js`, '/modules/acme/weather/frontend.js?rev=7', '/modules/acme/weather/x.js?rev=7'])
+  assert.ok(!app.html.includes('?rev=' + D) && !app.html.includes(`/_chrome/${D}/frontend.js?`), 'immutable URLs carry no cache-buster')
+  const rowShape = renderDocument({ company: 'acme', person, modules: rows.map((r) => ({ ...r, chromeDigest: null })), chrome: { qid: 'portal/catalyst-chrome', rev: null, hasKit: true, hasStyles: true } })
+  assert.ok(!('chromeBase' in rowShape.bootstrap) && !rowShape.html.includes('chromeBase') && !rowShape.html.includes('chromeDigest') && !rowShape.html.includes('/_chrome/'))
+  assert.equal(rowShape.sheet, '/modules/portal/catalyst-chrome/styles.css')
+})
+
+// self-skips without the `step5` ref: a shallow or ref-less checkout (CI on a clone without that branch) loses this proof
+// silently — run it from a full checkout when the null-digest path is touched (review 2026-09-02, Opus lens 2)
+test('a null digest is step 5\'s document byte for byte: the same inputs through the step5 document.mjs (git show step5:shell/document.mjs) and this one compose identical html', async (t) => {
+  let src
+  try { src = execFileSync('git', ['-C', REPO, 'show', 'step5:shell/document.mjs'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) } catch { t.skip('no git / no step5 ref here'); return }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'step5-doc-'))
+  fs.writeFileSync(path.join(dir, 'document.mjs'), src)
+  const step5 = await import(pathToFileURL(path.join(dir, 'document.mjs')).href)
+  const nonce = 'n0nce'
+  const chromes = [{ qid: 'portal/catalyst-chrome', rev: null, hasKit: true, hasStyles: true }, chrome, null]
+  const cfg = { label: 'Lab', csp: { fontHosts: [] } }
+  for (const c of chromes) for (const slug of [null, 'weather', 'nope']) {
+    const args = { cfg, template: FALLBACK_TEMPLATE, company: 'global', slug, person, modules, chrome: c, companies: [{ id: 'global', name: 'global', href: '/global/' }], portal: 'https://portal.pa1nd.de', entryImports: ['./x.js'], nonce }
+    const now = renderDocument(args), then = step5.renderDocument(args)
+    assert.equal(now.html, then.html, `chrome ${c?.rev} slug ${slug}`)
+    assert.deepEqual(now.headers, then.headers)
+  }
+  fs.rmSync(dir, { recursive: true, force: true })
 })

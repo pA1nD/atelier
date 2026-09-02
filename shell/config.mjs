@@ -13,7 +13,12 @@ export const FLEET_IGNORED = ['port', 'host', 'baseUrl', 'env', 'defaultChrome',
 export const GONE_IN_2 = ['hotReload', 'auth', 'revalidateMs', 'observe']
 export const DEFAULT_PORT = 1844
 export const DEFAULT_DOMAIN = 'portal.pa1nd.de'
-export const DEFAULT_FONT_HOSTS = ['https://rsms.me']     // catalyst-chrome's Inter, until PLAN §10 item 6 rules
+// `csp.fontHosts` (DESIGN §2.3): the fleet serves the chrome's fonts itself (`/_chrome/<digest>/fonts/`, step 7 ship C) —
+// its default is `[]`; a local instance runs the chrome FOLDER, and catalyst-chrome's frontend.jsx loads Inter from rsms.me
+// there, so local keeps that host. An `atelier.config.json` `csp.fontHosts` overrides either.
+export const LOCAL_FONT_HOSTS = ['https://rsms.me']
+export const FLEET_FONT_HOSTS = []
+export const DEFAULT_FONT_HOSTS = LOCAL_FONT_HOSTS
 
 /**
  * createConfig({ mode, root, config, env }) → { cfg, ignored }
@@ -34,7 +39,7 @@ export function createConfig({ mode = 'local', root = null, config, env = proces
     label: env.ATELIER_LABEL ?? (mode === 'local' ? c.label : undefined) ?? null,
     defaultChrome: env.ATELIER_DEFAULT_CHROME ?? (mode === 'local' ? c.defaultChrome : undefined) ?? null,
     domain, portalOrigin,
-    csp: { fontHosts: Array.isArray(c.csp?.fontHosts) ? c.csp.fontHosts : DEFAULT_FONT_HOSTS },
+    csp: { fontHosts: Array.isArray(c.csp?.fontHosts) ? c.csp.fontHosts : (mode === 'fleet' ? FLEET_FONT_HOSTS : LOCAL_FONT_HOSTS) },
     origin: (company) => (mode === 'fleet' ? `https://${company}.${domain}` : `http://localhost:${port}`),
     root,
   }

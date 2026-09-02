@@ -24,6 +24,8 @@
 //                              aliased to ../../shims/*, minified in production
 //   /modules/global/<chrome>/styles.css   `chromeSheet()` when wired (supervisor/tailwind.mjs), else
 //                              the chrome's styles.css passed through
+//   /_chrome/<digest>/<path>   a cached chrome RELEASE's file (host/chrome/fetch.mjs `chrome.open`, step 7
+//                              ship C): the sheets Bayard's browser loads name their fonts there
 //   /_atelier/whoami, /_atelier/apps, /_atelier/events?app=<instance|slug> (collector.recent),
 //   /_atelier/report (POST), /_host/healthz, /_atelier/ws (frames from worker broadcasts stamped
 //   topic = company/slug; `shell` frames for reload and backend-error; `shell` is reserved)
@@ -45,6 +47,7 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { transform as esbuildTransform, build as esbuildBuild } from 'esbuild'
 import { PROTOCOL } from '../../protocol/index.js'
+import { chromeType, CHROME_CACHE_CONTROL } from '../chrome/fetch.mjs'
 import { json, parseMount, safeRel, readJson, serveAssetResult, appsView, findInstance, frontendReportHandler, closeDraining, LISTENER_DRAIN_MS } from './server.mjs'
 
 /** findApp(supervisor, x) → the row named by an instance id or a slug (the CLI names slugs). */
@@ -53,7 +56,7 @@ export const findApp = (supervisor, x) => findInstance(supervisor, x) ?? (typeof
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const DEFAULT_DEV_PORT = 1844
 export const GZIP_MIN = 1024
-export const RESERVED_PREFIXES = ['/api/', '/assets/', '/modules/', '/_atelier/', '/_host/']
+export const RESERVED_PREFIXES = ['/api/', '/assets/', '/modules/', '/_atelier/', '/_host/', '/_chrome/']
 const JS = 'application/javascript; charset=utf-8', CSS = 'text/css; charset=utf-8', HTML = 'text/html; charset=utf-8'
 
 function maxMtimeRecursive(rootDir) {
@@ -74,15 +77,18 @@ function maxMtimeRecursive(rootDir) {
 /**
  * createDevShell({ cfg, os, supervisor, collector, registrar, auth, principal, log, frontendReport,
  *                  chromeSheet, repoRoot, sockPath, devPort, devHost })
- *   chromeSheet: () => Promise<{body:Buffer, type}> — the chrome's compiled sheet (supervisor lane); absent = pass-through
+ *   chromeSheet: () => Promise<{body:Buffer, type} | null> — the chrome's compiled sheet (supervisor lane); absent or null = pass-through
+ *   chrome: host/chrome/fetch.mjs createChromeCache — `dir()` the chrome folder NOW (the held release first, `cfg.chromeDir`
+ *           else: what the company's sheets compile against, so render-verify sees the digest the company sees), `open()`
  */
-export function createDevShell({ cfg = {}, os, supervisor, collector, registrar, auth, principal, log = () => {}, frontendReport, chromeSheet, repoRoot = REPO_ROOT, sockPath, devPort, devHost = '127.0.0.1', refuse = () => null }) {
+export function createDevShell({ cfg = {}, os, supervisor, collector, registrar, auth, principal, log = () => {}, frontendReport, chromeSheet, chrome = null, repoRoot = REPO_ROOT, sockPath, devPort, devHost = '127.0.0.1', refuse = () => null }) {
   const report = frontendReport ?? frontendReportHandler({ collector })
   const startedAt = Date.now()
   const prod = (cfg.nodeEnv ?? process.env.NODE_ENV ?? 'production') === 'production'
-  const chromeDir = cfg.chromeDir ? path.resolve(cfg.chromeDir) : null
-  const chromeId = chromeDir ? path.basename(chromeDir) : null
-  const chromeQid = chromeId ? `global/${chromeId}` : null
+  const fixedChromeDir = cfg.chromeDir ? path.resolve(cfg.chromeDir) : null
+  const chromeDirNow = () => chrome?.dir?.() ?? fixedChromeDir
+  const chromeId = fixedChromeDir ? path.basename(fixedChromeDir) : 'chrome'   // the id is stable across releases: the dir behind it moves
+  const chromeQidNow = () => (chromeDirNow() ? `global/${chromeId}` : null)
   const sock = sockPath ?? (cfg.run ? path.join(cfg.run, 'dev', 'shell.sock') : null)
   const port = devPort === undefined ? (cfg.devPort ?? DEFAULT_DEV_PORT) : devPort   // null/false = socket only
   const hostRequire = createRequire(path.join(repoRoot, 'package.json'))
@@ -92,7 +98,7 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
   let template = null
 
   const exists = (p) => { try { return fs.statSync(p).isFile() } catch { return false } }
-  const chromeHas = (name) => !!chromeDir && exists(path.join(chromeDir, name))
+  const chromeHas = (name) => { const d = chromeDirNow(); return !!d && exists(path.join(d, name)) }
 
   // ---- assets
   async function clientJs() {
@@ -106,6 +112,8 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     return e
   }
   async function chromeBundle(entry) {
+    const chromeDir = chromeDirNow()
+    if (!chromeDir) return null
     const src = ['jsx', 'js'].map((x) => path.join(chromeDir, `${entry}.${x}`)).find(exists)
     if (!src) return null
     const mtime = maxMtimeRecursive(chromeDir)
@@ -149,6 +157,7 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     const c = company()
     const rows = supervisor.apps().filter((r) => r.company === c)
     const modules = rows.map((r) => ({ id: r.slug, meta: registrar.apps?.().get(r.instance)?.meta ?? {} }))
+    const chromeQid = chromeQidNow()
     const bootstrap = {
       mode: 'host', label: null, observe: false,
       user: { id: user.id, name: user.name, workspaces: [{ id: c, modules }] },
@@ -221,13 +230,17 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     if (p === '/assets/client.js') { const e = await clientJs(); return send(req, res, 200, e.body, e.type, { etag: `"${e.mtime}"` }) }
     if (p === '/assets/chrome-resolve.js') return send(req, res, 200, fs.readFileSync(path.join(repoRoot, 'chrome-resolve.js')), JS)
     if (p.startsWith('/assets/')) return json(res, 404, {})
+    const chromeRelease = /^\/_chrome\/([0-9a-f]{64})\/(.+)$/.exec(p)
+    if (chromeRelease) { const b = chrome?.open?.(chromeRelease[1], chromeRelease[2]); return b ? send(req, res, 200, b, chromeType(chromeRelease[2]), { etag: `"${chromeRelease[1]}"`, 'cache-control': CHROME_CACHE_CONTROL }) : json(res, 404, {}) }
+    const chromeQid = chromeQidNow()
     const chromeAsset = chromeQid && /^\/modules\/global\/([^/]+)\/([^/]+)$/.exec(p)
     if (chromeAsset && chromeAsset[1] === chromeId) {
       const [, , file] = chromeAsset
       if (file === 'frontend.js' || file === 'kit.js') { const e = await chromeBundle(file.replace(/\.js$/, '')); return e ? send(req, res, 200, e.body, e.type, { etag: `"${e.mtime}"` }) : json(res, 404, {}) }
       if (file === 'styles.css') {
-        if (chromeSheet) { const s = await chromeSheet(); return send(req, res, 200, s.body, s.type ?? CSS) }
-        return chromeHas('styles.css') ? send(req, res, 200, fs.readFileSync(path.join(chromeDir, 'styles.css')), CSS) : json(res, 404, {})
+        const s = chromeSheet ? await chromeSheet() : null
+        if (s) return send(req, res, 200, s.body, s.type ?? CSS)
+        return chromeHas('styles.css') ? send(req, res, 200, fs.readFileSync(path.join(chromeDirNow(), 'styles.css')), CSS) : json(res, 404, {})
       }
       return json(res, 404, {})
     }
@@ -316,6 +329,6 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     // a DEV swap → the 1.x reload frame + the dev LIVE rev (`moduleId` is the qid the client matches against its module list — a slug alone would full-reload; the client re-imports `frontend.js?rev=<rev>` and re-points the sheet)
     invalidate(instance, { cssOnly = false, rev } = {}) { const r = findInstance(supervisor, instance); if (r) fanout({ type: 'reload', moduleId: `${r.company}/${r.slug}`, rev: rev ?? r.dev_rev ?? r.rev, cssOnly, topic: 'shell' }) },
     backendError(instance, message) { const qid = qidOf(instance); if (qid) fanout({ type: 'backend-error', qid, message, topic: 'shell' }) },
-    clients, document, chromeQid,
+    clients, document, get chromeQid() { return chromeQidNow() },
   }
 }

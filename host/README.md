@@ -53,7 +53,7 @@ Ports: `<pod IP>:1845` the protocol port (mTLS — mandatory in the fleet — pl
 for the agent; the token is stripped from the URL before a request reaches a worker).
 
 Knobs (`ATELIER_*`, DESIGN §1.2): `ATELIER_WORK` `/work`, `ATELIER_RUN` `/run/atelier`, `ATELIER_CONTROL`
-`/control`, `ATELIER_CHROME_DIR` (the chrome folder — it needs no node_modules of its own, `@import 'tailwindcss'` falls back to the host's; unset = app-less documents and pass-through app CSS),
+`/control`, `ATELIER_CHROME_DIR` (the chrome folder — it needs no node_modules of its own, `@import 'tailwindcss'` falls back to the host's; unset = app-less documents and pass-through app CSS — until the spine names a chrome RELEASE: the host then fetches it into `/work/.atelier/chrome/<digest>/` and compiles every sheet against that, whatever the env says; DESIGN §6.4),
 `ATELIER_HOST_PORT` 1845, `ATELIER_DEV_PORT` 1844, `ATELIER_SPINE_URL` (unset = local mode),
 `ATELIER_HOST_TLS` `cert,key,ca` (mTLS on 1845; required in fleet mode — a fleet host without it exits 2; the literal `plain` is the drill's opt-out, logged INSECURE), `ATELIER_GIT_COMMIT=0` (no row-G commit per LIVE rev).
 

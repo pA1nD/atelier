@@ -10,6 +10,7 @@ import { createAssets } from './assets.mjs'
 import { createEventsSocket } from './events.mjs'
 import { createWakingMarks, createWaker } from './waking.mjs'
 import { createMetrics } from './metrics.mjs'
+import { createChromeStore } from './chrome-store.mjs'
 
 export const LISTENER_DRAIN_MS = 25_000
 
@@ -39,6 +40,9 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   const { identity, registry, gate, bus, hostLink } = providers
   for (const [k, v] of Object.entries({ identity, registry, gate, bus, hostLink })) if (!v) throw new Error(`createShell: provider ${k} is missing`)
   assets ??= createAssets({ repoRoot, clientDir, nodeEnv: cfg.nodeEnv, log })
+  // the chrome store (step 7 ship C): `cfg.chromeStore` = `${ARTIFACTS_MOUNT}/_chromes` in the fleet (the portal sets it),
+  // nothing locally — without it `/_chrome/<digest>/…` is 404 and every document composes the chrome row's path
+  const chromeStore = cfg.chromeStore ? createChromeStore({ root: cfg.chromeStore, log }) : null
   const metrics = createMetrics({ now })
   const events = createEventsSocket({ bus, registry, log, now, metrics })
   const entryCache = new Map()
@@ -53,7 +57,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   server.on('upgrade', (req, socket, head) => upgrade(req, socket, head))
   server.keepAliveTimeout = 65_000
 
-  const base = (req) => ({ req, cfg, providers, gate, assets, events, metrics, log, now, entryCache, marks, waker, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, op: false, upgrade: false })
+  const base = (req) => ({ req, cfg, providers, gate, assets, chromeStore, events, metrics, log, now, entryCache, marks, waker, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, op: false, upgrade: false })
 
   function finish(ctx, out, t0) {
     const res = ctx.res
@@ -99,7 +103,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
 
   let started = false
   return {
-    server, events, assets, metrics, entryCache, marks,
+    server, events, assets, chromeStore, metrics, entryCache, marks,
     start() { if (started) return; started = true; bus.start?.(); registry.start?.(); for (const c of registry.companies?.() ?? []) ensureWatch(c.id) },
     stop() { started = false; for (const off of watches.values()) { try { off() } catch {} } watches.clear(); registry.stop?.(); bus.stop?.() },
     handle, upgrade,
@@ -108,7 +112,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
       server.listen(port, host, () => { server.off('error', reject); const a = server.address(); log(`shell: listening ${a.address}:${a.port} (${cfg.mode})`); resolve({ port: a.port, host: a.address }) })
     }),
     close(drainMs = LISTENER_DRAIN_MS) {
-      this.stop(); events.close(); hostLink.close?.(); assets.close?.()
+      this.stop(); events.close(); hostLink.close?.(); assets.close?.(); chromeStore?.close()
       return new Promise((resolve) => {
         server.closeIdleConnections?.()
         const t = setTimeout(() => server.closeAllConnections?.(), drainMs); t.unref?.()

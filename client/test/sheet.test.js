@@ -18,6 +18,9 @@ test('sheetHref: app sheet at its rev, chrome sheet without an app, ?rev= never 
   assert.equal(sheetHref(null, { qid: 'global/catalyst-chrome', rev: 'abc' }), '/modules/global/catalyst-chrome/styles.css?rev=abc')
   assert.equal(sheetHref({ company: 'global', slug: 'toybox', rev: null }, null), '/modules/global/toybox/styles.css')
   assert.equal(sheetHref(null, null), null)
+  // by digest (step 7 ship C): the bundle's compiled chrome-only sheet, immutable, no cache-buster
+  assert.equal(sheetHref(null, { qid: 'portal/catalyst-chrome', rev: 'd'.repeat(64), base: `/_chrome/${'d'.repeat(64)}` }), `/_chrome/${'d'.repeat(64)}/chrome.css`)
+  assert.equal(sheetHref({ company: 'acme', slug: 'todo', rev: 3 }, { qid: 'portal/catalyst-chrome', base: '/_chrome/x' }), '/modules/acme/todo/styles.css?rev=3', 'an app keeps its own sheet')
   assert.equal(sheetHref({ company: 'a b', slug: 'x', rev: 1 }, null), '/modules/a%20b/x/styles.css?rev=1')
 })
 
