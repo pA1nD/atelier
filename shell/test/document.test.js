@@ -131,6 +131,8 @@ test('the chrome by digest (step 7 ship C, decision 5): `base` puts every chrome
   assert.equal(rowShape.sheet, '/modules/portal/catalyst-chrome/styles.css')
 })
 
+// self-skips without the `step5` ref: a shallow or ref-less checkout (CI on a clone without that branch) loses this proof
+// silently — run it from a full checkout when the null-digest path is touched (review 2026-09-02, Opus lens 2)
 test('a null digest is step 5\'s document byte for byte: the same inputs through the step5 document.mjs (git show step5:shell/document.mjs) and this one compose identical html', async (t) => {
   let src
   try { src = execFileSync('git', ['-C', REPO, 'show', 'step5:shell/document.mjs'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) } catch { t.skip('no git / no step5 ref here'); return }
