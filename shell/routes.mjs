@@ -38,7 +38,7 @@ import { SLUG_RE, companyTopic, isReservedTopic } from '../protocol/index.js'
 import { renderDocument, relativeImports, appAsset } from './document.mjs'
 import { proxyRequest, json as sendJson } from './proxy.mjs'
 import { CONTENT_TYPE as METRICS_CONTENT_TYPE } from './metrics.mjs'
-import { wakingHtml, wakingHeaders, hostState, hostKey } from './waking.mjs'
+import { wakingHtml, wakingHeaders, hostState, hostKey, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from './waking.mjs'
 import { newNonce } from './document.mjs'
 import { visibleRows } from './presence.mjs'
 
@@ -172,7 +172,7 @@ export async function laneDocument(ctx) {
   const nonce = newNonce()
   if (state.waking) {
     ctx.log(`document: ${company}${app ? '/' + app.slug : ''} waking (${state.reason})`)
-    return r('document', 503, { body: wakingHtml({ company, slug: app ? app.slug : null, nonce }), headers: wakingHeaders({ nonce }) })
+    return r('document', 503, { body: wakingHtml({ company, slug: app ? app.slug : null, nonce, giveUpMs: ctx.cfg.mode === 'fleet' ? WAKE_GIVE_UP_FLEET_MS : WAKE_GIVE_UP_MS }), headers: wakingHeaders({ nonce }) })
   }
   const doc = await composeFor(ctx, { company, slug: ctx.route.slug, person: id.person, epoch: id.epoch, nonce })
   ctx.metrics?.bootstrap(company, doc.bootstrapBytes)
@@ -313,7 +313,7 @@ export async function laneProxy(ctx) {
   // unknown `/_atelier/<name>` is 404 already, so the route is not even an existence oracle.
   if (name === 'metrics' && ctx.method === 'GET') {
     if (!ctx.metrics || !(ctx.cfg.mode === 'local' || ctx.op)) return jsonR('proxy', 404, {})
-    const body = ctx.metrics.render({ events: ctx.events, bus, registry })
+    const body = ctx.metrics.render({ events: ctx.events, bus, registry, waker: ctx.waker })
     return r('proxy', 200, { body, headers: { 'content-type': METRICS_CONTENT_TYPE, 'cache-control': 'no-store' } })
   }
   if (name === 'whoami' && ctx.method === 'GET') return jsonR('proxy', 200, { id: ctx.person.id, name: ctx.person.name, anonymous: false })
@@ -344,6 +344,25 @@ export async function laneProxy(ctx) {
     const row = slug && SLUG_RE.test(slug) ? await registry.resolve(company, slug) : null
     const app = row && (await registry.present(ctx.person.id, row.instance)) ? row : null
     const state = await hostState({ registry, hostLink, bus, company, app, marks: ctx.marks, now: ctx.now })
+    // A computer that is not serving is WOKEN, not only probed (step 7) — NEVER A DRAINING ONE (review 2026-09-02, C1: the
+    // drain is a decision — a rollout, the 24 h sleep — and a 2 s poll must not fight it; probe only, whatever drained it
+    // brings it back). The target is the DIAL ROW's chat (`state.hostRow`, the routing seam), the app row's own `chat`
+    // when the spine knows no computer for it (no-host). PRESENCE FIRST for the wake as for the probe (C5): on the app
+    // path the person is present on the app (above); on the app-less path the host is the company's freshest, a room
+    // the person may not be in — woken only when they are present on THAT chat (`registry.presentOnChat`), else probe
+    // only. `by` is the caller's portal session (the spine resolves the actor and refuses a stranger too); a poll with
+    // no session id never wakes. The waker holds one call per chat per 30 s and one in flight, and never changes the
+    // answer: `ok` is the probe's; the page keeps polling until the host answers. FIRED, NOT AWAITED: the door can hold
+    // (the portal's client bounds it at 15 s) — awaiting would sit the 2 s poll on that hop. createWaker catches every
+    // throw; the `.catch` here is the last net (a log transport that throws is not an unhandled rejection)
+    if (state.waking && state.reason !== 'draining' && ctx.waker) {
+      const chat = state.hostRow?.chat ?? app?.chat ?? null
+      const mayWake = app ? true : !!chat && !!(await registry.presentOnChat?.(ctx.person.id, company, chat))
+      if (mayWake) {
+        const sid = ctx.providers.identity.session?.(ctx.req) ?? null
+        void ctx.waker.wake({ chat, company, reason: state.reason, by: sid ? `session:${sid}` : null }).catch(() => {})
+      }
+    }
     return jsonR('proxy', 200, { ok: !state.waking, ...(state.waking ? { reason: state.reason } : {}) })
   }
   if (name === 'report' && ctx.method === 'POST') {

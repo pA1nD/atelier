@@ -8,7 +8,7 @@ import { companyTopic } from '../protocol/index.js'
 import { dispatch } from './routes.mjs'
 import { createAssets } from './assets.mjs'
 import { createEventsSocket } from './events.mjs'
-import { createWakingMarks } from './waking.mjs'
+import { createWakingMarks, createWaker } from './waking.mjs'
 import { createMetrics } from './metrics.mjs'
 
 export const LISTENER_DRAIN_MS = 25_000
@@ -43,6 +43,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   const events = createEventsSocket({ bus, registry, log, now, metrics })
   const entryCache = new Map()
   const marks = createWakingMarks()
+  const waker = createWaker({ registry, now, log })
   const watches = new Map()
   const ensureWatch = (company) => {
     if (watches.has(company)) return
@@ -52,7 +53,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   server.on('upgrade', (req, socket, head) => upgrade(req, socket, head))
   server.keepAliveTimeout = 65_000
 
-  const base = (req) => ({ req, cfg, providers, gate, assets, events, metrics, log, now, entryCache, marks, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, op: false, upgrade: false })
+  const base = (req) => ({ req, cfg, providers, gate, assets, events, metrics, log, now, entryCache, marks, waker, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, op: false, upgrade: false })
 
   function finish(ctx, out, t0) {
     const res = ctx.res

@@ -35,19 +35,23 @@ export function fakeHost({ epoch = 'e1', company = 'acme', rows } = {}) {
   return { server, seen, state, start: (port = 0) => listen(server, port), stop: () => new Promise((r) => server.close(r)) }
 }
 
-// fakeRegistry({mode, companies: {acme: {apps: [...], host: {...}}}, chrome, present})
+// fakeRegistry({mode, companies: {acme: {apps: [...], host: {...}}}, chrome, present, presentOnChat, wakeAnswer})
 //   an app row may carry its own `host: {port, token, epoch, heartbeatAt, drainingAt}` — a second computer of the same
 //   company (the fleet: one host per chat the company owns); a row without one is given the company's `host` AT THE ROW
 //   (as the spine puts `host` on every row, v36) — `hostOf(row)` itself is the production rule, `row.host` or null,
 //   never a fallback to the company's host (review 2026-08-30, C14: an explicit `host: null` is a computer the spine
 //   does not know, and the seam must say no-host rather than coin-toss another pod)
-export function fakeRegistry({ mode = 'local', companies, chrome = { qid: 'global/catalyst-chrome', digest: 1700 }, present = async () => true, domain = 'portal.pa1nd.de', now = Date.now } = {}) {
+export function fakeRegistry({ mode = 'local', companies, chrome = { qid: 'global/catalyst-chrome', digest: 1700 }, present = async () => true, presentOnChat = async () => true, wakeAnswer = () => ({ ok: true, state: 'waking', status: 202 }), domain = 'portal.pa1nd.de', now = Date.now } = {}) {
   const watchers = new Map()
   const probes = new Map()
   const all = () => Object.entries(companies).flatMap(([id, c]) => (c.apps ?? []).map((a) => ({ company: id, hasFrontend: true, primary: false, meta: {}, ...a, host: a.host === undefined ? (c.host ?? null) : a.host })))
-  const shape = (h, p) => ({ hostId: h.hostId ?? 'local', epoch: p?.epoch ?? h.epoch ?? null, token: h.token ?? 'dev', ip: '127.0.0.1', port: h.port, tls: null, heartbeatAt: h.heartbeatAt !== undefined ? h.heartbeatAt : (p?.heartbeatAt ?? now()), drainingAt: h.drainingAt ?? null })
+  const shape = (h, p) => ({ hostId: h.hostId ?? 'local', chat: h.chat ?? null, epoch: p?.epoch ?? h.epoch ?? null, token: h.token ?? 'dev', ip: '127.0.0.1', port: h.port, tls: null, heartbeatAt: h.heartbeatAt !== undefined ? h.heartbeatAt : (p?.heartbeatAt ?? now()), drainingAt: h.drainingAt ?? null })
+  const wakes = [], wakeCalls = []
   return {
     kind: mode,
+    // the wake verb as the providers have it: the fleet's (the spine door, recorded here — `wakes` the chats, `wakeCalls`
+    // the {chat, by} pairs; `wakeAnswer(chat, opts)` the verdict the portal's client would answer), none locally
+    ...(mode === 'fleet' ? { wakes, wakeCalls, async wake(chat, opts = {}) { wakes.push(chat); wakeCalls.push({ chat, by: opts.by ?? null }); return wakeAnswer(chat, opts) }, presentOnChat } : {}),
     company(host) { const h = String(host ?? '').replace(/:\d+$/, ''); return mode === 'fleet' && h.endsWith('.' + domain) ? h.slice(0, -(domain.length + 1)) : null },
     companies() { return mode === 'fleet' ? [] : Object.keys(companies).map((id) => ({ id, name: id, href: `/${id}/` })) },
     async apps(company) { return all().filter((a) => a.company === company) },

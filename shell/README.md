@@ -113,11 +113,11 @@ shell/
   proxy.mjs          protocol/headers both ways, counted bodies (413 past the cap), DIAL/TIMEOUT → 503 {waking:true}
   minter.mjs         one Ed25519 pair per process; header() = protocol/identity mint (30 s, fresh nonce, closed person set)
   events.mjs         /_atelier/ws: sub/resume/gap on cursor lag, pong{at} → ping{at} echo, ws.ping 10 s × 2 misses, budget 8 → 4001
-  waking.mjs         the 503 waking page, /_atelier/wake, hostState() (heartbeat/draining in the fleet, a 1 s probe in both modes)
+  waking.mjs         the 503 waking page (60 s give-up locally, 180 s in the fleet; probes aborted at the deadline; a tab coming back probes again), /_atelier/wake (probe + the wake call, fleet: registry.wake(chat, {by: the caller's session}) once per chat per 30 s per replica and one in flight, never a draining computer, never a room the caller is not in; the verdict logged), hostState() (heartbeat/draining in the fleet, a 1 s probe in both modes)
   metrics.mjs        GET /_atelier/metrics: proxy p50/p99 per host, frames/s + gaps, resume ms, bootstrap bytes, cache age — operator or local only
   config.mjs         cfg from atelier.config.json + env (local) / env (fleet); the ignored-settings lines
   providers/         identity- gate- registry- bus- hostlink- ×{local,fleet}.mjs (+ hostlink-base.mjs)
-  test/              node --test shell/test/*.test.js   (65 tests, ~16 s, no host process; fixtures.mjs = the fakes)
+  test/              node --test shell/test/*.test.js   (70 tests, ~16 s, no host process; fixtures.mjs = the fakes)
   drill/smoke.mjs    the shell with local providers in front of the REAL host on this Mac (one background task, VERDICT)
 ```
 
@@ -159,7 +159,7 @@ bash shell/drill/smoke.sh > /tmp/shell-smoke.log        # + the real host: docum
   client `ping`, so the echo is named this way; a `pong` also marks the socket live for the budget.
 - `GET /_atelier/topics/<instance>` → `{stream, seq, rev, error}` (`error` is `{message, hint, file, line, col, rev, kind}` locally, always `null`
   in the fleet); `GET /_atelier/rail?company=<c>` (fleet: no query) → `{stream, seq, modules:[bootstrap rows], chrome:{qid,digest}, chromeRev}`;
-  `GET /_atelier/wake?company=<c>` → `{ok}`; `POST /_atelier/report` ≤ 64 KiB, signed with `app = body.instance`.
+  `GET /_atelier/wake?company=<c>[&app=<s>]` → `{ok}` (the probe; a miss also wakes the computer in the fleet — as the caller, for a chat they are present on, never a draining one — DESIGN §3.5); `POST /_atelier/report` ≤ 64 KiB, signed with `app = body.instance`.
 - `GET /_atelier/metrics` is not the client's: Prometheus text exposition of the PLAN §4.5 rows the shell owns (proxy p50/p99 and
   outcomes per host, document-socket frames/s + gaps per topic, resume ms, open sockets, bus ingest, bootstrap bytes per company,
   registry cache age). Admitted to an **operator session** or to **local mode**; to anyone else it is 404, the same answer a
