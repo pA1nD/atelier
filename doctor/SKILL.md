@@ -1,73 +1,65 @@
 ---
 name: atelier-app
-description: Build or change an atelier app — a folder under apps/ that is live the moment it is saved. Use for ANY request to build an app, page, tool, list, timer, poll, board, dashboard or game for the people in this chat. Covers module.json, backend.js routes, frontend.jsx (global React), and checking that a save went LIVE.
+description: Build, change, deploy, roll back or restore an atelier app — a folder under /work/apps you develop in a private DEV slot and release to the chat with `atelier deploy`. Use for ANY request to build an app, page, tool, list, timer, poll, board, dashboard or game for the people in this chat, and for changing one that exists. Covers module.json, backend.js routes, frontend.jsx (global React), the deploy hook (migrations), test and smoke scripts, releases and backups.
 ---
 
-# Building an atelier app
+# Building and deploying an atelier app
 
-An app is one folder: `apps/<slug>/` with `module.json`, `frontend.jsx`, `backend.js` (and optionally `styles.css`).
-**Saving is deploying.** The host watches `apps/`, rebuilds on every save, and the people in the chat see the new
-version immediately — there is no build step, no server to start, no deploy command. A save that does not build
-changes nothing for users (they stay on the last good version) and the error comes back to you.
+An app is one folder, `/work/apps/<slug>/`: `module.json`, `frontend.jsx`, `backend.js` (optionally `styles.css`), plus a git
+repo the host keeps for you. It has two slots. **DEV** is yours: every save rebuilds it within a second, you check it with curl
+and screenshots, nobody in the chat can see it. **PROD** is what the chat uses; only `atelier deploy <slug> -m "<what changed,
+one line>"` (or `rollback` / `restore`, below) changes it. A new app does not exist for the chat until its first green deploy. A
+save that does not build changes nothing anywhere; a deploy that goes red deploys nothing. An app belongs to its chat alone.
 
-**Order of work (four tool calls is the norm):** `mkdir -p apps/<slug>`, then write `backend.js` and `frontend.jsx`,
-and `module.json` LAST — module.json is the switch that turns the folder into a live app, so nothing builds (and
-nobody sees a half-written app) until it exists; a module.json written before the other files makes every save in
-between a FAILED "file missing" verdict. Then one Bash call with every curl check; then answer the chat. Write and
-change files only with the Write/Edit tools — a file written from a shell command (`cat >`, python, sed) still goes
-live but its verdict never reaches you. Do not copy `apps/hello` (in the fleet a copied `.instance` file is refused);
-its three files are exactly the templates below, so there is nothing to read first. The slug is the URL and must be a
-lowercase DNS label (`shopping-list`, not `Shopping List`). Keep the app small — one folder, a few files.
+**Order of work (build → check → deploy → tell):** `mkdir -p /work/apps/<slug>`, write `backend.js` and `frontend.jsx`, then
+`module.json` LAST — it is the switch that makes the folder an app; written first, every save in between fails "file missing".
+Then ONE Bash call with every curl check against DEV, then `atelier deploy`, then answer the chat. Do not copy `apps/hello`
+(a copied `.instance` file is refused). The slug is the URL: a lowercase DNS label.
 
 ## module.json — the folder is not an app until this exists
 
 ```json
-{ "name": "Shopping list", "icon": "shopping-cart" }
+{ "name": "Shopping list", "icon": "shopping-cart", "deploy": "node migrate.js", "test": "node test.js",
+  "smoke": "curl -sf --unix-socket \"$ATELIER_SOCK\" \"$BASE_URL/items\" >/dev/null", "healthz": "/items" }
 ```
 
-Keys, all optional except `name` and `icon`: `name` (rail label), `icon` (a lucide icon name, e.g. `timer`,
-`list-checks`, `bar-chart-3`), `group` (rail section), `primary` (boolean — the landing app), `color`. No other
-keys — the registrar drops anything else silently.
-An app belongs to its chat: everyone in the conversation sees it, nobody else. There is no visibility switch to
-set; a company-wide app is a dyno app, which is not something module.json expresses.
+`name` (rail label) and `icon` (a lucide name: `timer`, `list-checks`, `bar-chart-3`) are required; `group` (rail section),
+`primary` (the landing app), `color` are optional. Four release keys, optional, run by the deploy alone (§ Deploy): `deploy` — sh,
+migrations, ≤ 60 s; `test` — sh, ≤ 60 s; `smoke` — sh against the rehearsal worker, ≤ 30 s (`$ATELIER_SOCK` its Unix socket,
+`$BASE_URL` its API base); `healthz` — a mount-relative GET path answering < 500 (default `/`). No other keys — the rest is
+dropped. Each release key names a script you wrote (`migrate.js` is § Migrations' example): a key without its file is a red deploy.
 
 ## backend.js — routes, relative to the app's mount
 
 ```js
-import fs from 'node:fs'
-import path from 'node:path'
 export default {
   mountRoutes(router, ctx) {
     router.get('/items', (req, res) => res.json(read()))          // served at /api/<company>/<slug>/items
     router.post('/items', async (req, res) => {
       const { text } = await req.json()                            // parsed JSON body (10 MB cap)
-      if (!text) return res.json({ error: 'text required' }, 400)
       write([...read(), { id: Date.now(), text, by: req.user.name }])
       ctx.broadcast({ type: 'changed' })                            // push to every open tab of this app
       res.json({ ok: true })
     })
-    router.delete('/items/:id', (req, res) => { remove(req.params.id); ctx.broadcast({ type: 'changed' }); res.json({ ok: true }) })
   },
 }
 ```
 
-- Paths are **relative**; the host mounts them at `/api/<company>/<slug>`. Never write that prefix in backend.js.
-- Router: `get/post/put/patch/delete/options/all(pattern, handler)`; patterns: exact, `:param`, trailing `/*`
-  (rest in `req.params['*']`), bare `/`. First registered match wins — specific before wildcard.
-- `req.params`, `req.query`, `await req.json()`, `req.user` = `{ id, name }` of the person calling (trusted — the host
-  set it); `res.json(data, status = 200)`; or use the raw Node `res` for anything else (streams, SSE, files).
-- `ctx` (frozen): `id`, `workspace` (the company), `qualifiedId`, `baseUrl` (the app's public API URL — the only
-  source of it), `host` and `port` (the PUBLIC origin's hostname and port — the address users reach the app at, for
-  composing URLs; never something to bind), `dataDir` (a private, persistent folder for this app's files — keep
-  state there, e.g. a JSON file or SQLite via `node:sqlite`), `log(...)`, `broadcast(event)`, `module(id)`.
-- State: module-level variables are lost on every save; persist in `ctx.dataDir`, load lazily.
-- `mountRoutes` must only register routes; heavy or failing work belongs inside handlers. It may return a teardown
-  function (timers, watchers) that runs before the next revision replaces this one.
-- **npm packages:** `npm install <pkg>` inside the app folder (its own `package.json`), then load with
-  `const require = createRequire(import.meta.url); const x = require('<pkg>')` (`import { createRequire } from 'node:module'`).
-  A static `import x from '<pkg>'` is refused. Prefer `node:` builtins — most apps need none.
-- Never `listen()` on a port or open your own server: the host is the only door; a port would be unreachable.
-- A pure-frontend app still ships `backend.js`: `export default { mountRoutes() {} }`.
+- Paths are **relative**; the host mounts them at `/api/<company>/<slug>` — never write that prefix. Router:
+  `get/post/put/patch/delete/options/all(pattern, handler)`; patterns: exact, `:param`, trailing `/*` (rest in
+  `req.params['*']`), bare `/`. First registered match wins — specific before wildcard.
+- `req.params`, `req.query`, `await req.json()`, `req.user` = `{ id, name }` of the caller (trusted — the host set it);
+  `res.json(data, status = 200)`; or the raw Node `res` for anything else (streams, SSE, files).
+- `ctx` (frozen): `id`, `workspace` (the company), `qualifiedId`, `baseUrl` (the app's public API URL), `host` and `port` (the
+  PUBLIC origin — for composing URLs, never something to bind), `dataDir` (a private, persistent folder for this app's files —
+  keep state there: a JSON file, or SQLite via `node:sqlite`; DEV and PROD get DIFFERENT folders), `log(...)`, `broadcast(event)`.
+- Module-level variables are lost on every save and every deploy; persist in `ctx.dataDir`, load lazily. `mountRoutes` must
+  only register routes; heavy or failing work belongs inside handlers. It may return a teardown function (timers, watchers).
+- **npm packages:** `npm install <pkg>` inside the app folder (its own `package.json` + `package-lock.json` — the deploy
+  installs PROD from the lockfile), then `const require = createRequire(import.meta.url); const x = require('<pkg>')`
+  (`import { createRequire } from 'node:module'`). A static `import x from '<pkg>'` is refused. Prefer `node:` builtins.
+- Never `listen()` — the host is the only door; a port would be unreachable. A pure-frontend app still ships `backend.js`:
+  `export default { mountRoutes() {} }`.
 
 ## frontend.jsx — global React, classic JSX
 
@@ -79,52 +71,90 @@ export default function Module() {
   const [items, setItems] = useState([])
   const load = () => fetch(self.api + '/items').then(r => r.json()).then(setItems)
   useEffect(() => { load(); return self.subscribe(frame => { if (frame.type === 'changed') load() }) }, [])
-  const { path, navigate } = window.__atelier.useRoute()       // optional sub-routes: '' at the root, navigate('x/1')
   return <div className="flex flex-col gap-3">…</div>
 }
 ```
 
-- The file is compiled with the **classic** JSX transform against the global `React` (`React.createElement`).
-  `import React from 'react'` breaks the app; so does any `react-dom` import. Hooks: `const { useState } = React`.
-- Imports that resolve in the browser: relative files next to frontend.jsx (`./util.js`) and `@atelier/kit`.
-  No npm packages in the frontend — put the logic in backend.js or inline it.
-- Kit (this is the whole prop sheet — the chrome's source is not on this computer, do not go looking for it):
-  `Button` (`color="blue|red|green|amber|zinc|…"`, `outline`, `plain`, `disabled`, `onClick`, `href`) · `Badge`
-  (`color`) · `Input` / `Textarea` / `Select` (native props: `type value onChange placeholder`) · `Switch`
-  (`checked onChange color`) · `Field` > `Label` + control · `Heading`, `Subheading`, `Text`, `Strong`, `Code`,
-  `Divider`, `Link` (`href`) · `Table, TableHead, TableBody, TableRow, TableHeader, TableCell` · `Dialog`
-  (`open onClose size`) + `DialogTitle, DialogBody, DialogActions`. All take `className`. Tailwind utilities work
-  (`className="flex gap-2 text-sm"`). Do not add a card/frame around the app — it already sits inside padding.
-- `self.api` is the app's API base; `self.subscribe(handler)` receives every `ctx.broadcast` frame from this app's
-  backend (returns an unsubscribe fn — return it from `useEffect`). For initial state fetch a snapshot, then keep
-  in sync via the subscription. `self.qid` is `<company>/<slug>`.
-- Must `export default` one component. It must render once with empty state before any fetch resolves.
-- Sub-navigation only through `window.__atelier.useRoute()`; no `history.*`, no `<a href="/...">` to other apps.
+- **Classic** JSX transform against the global `React`: `import React from 'react'` breaks the app, so does any `react-dom`
+  import; hooks `const { useState } = React`. Browser imports: relative files (`./util.js`) and `@atelier/kit` only — no npm.
+- Kit (the whole prop sheet; its source is not on this computer): `Button` (`color="blue|red|green|amber|zinc|…"`, `outline`,
+  `plain`, `disabled`, `onClick`, `href`) · `Badge` (`color`) · `Input` / `Textarea` / `Select` (native props) · `Switch`
+  (`checked onChange color`) · `Field` > `Label` + control · `Heading`, `Subheading`, `Text`, `Strong`, `Code`, `Divider`, `Link`
+  (`href`) · `Table, TableHead, TableBody, TableRow, TableHeader, TableCell` · `Dialog` (`open onClose size`) + `DialogTitle,
+  DialogBody, DialogActions`. All take `className`; Tailwind utilities work. `styles.css` (optional): plain CSS, your own classes.
+- `self.api` is the app's API base; `self.subscribe(handler)` receives every `ctx.broadcast` frame (returns an unsubscribe fn —
+  return it from `useEffect`). Fetch a snapshot first, then keep in sync. `self.qid` = `<company>/<slug>`. Must `export default`
+  one component that renders once with empty state before any fetch resolves. Sub-routes only through `const { path, navigate }
+  = window.__atelier.useRoute()`; no `history.*`, no `<a href="/...">` to other apps.
 
-## styles.css (optional)
+## Check every save — DEV, and only you
 
-Plain CSS, scoped by your own class names. Tailwind utilities need no file.
+`T=$(cat /run/atelier/session/dev.token)`; the dev shell is `http://127.0.0.1:1844`, every request carries `?token=$T`, and
+everything it serves is the DEV slot. After the last save of a batch, in ONE Bash call:
 
-## Check every save — the tool result tells you
+```sh
+curl -s "127.0.0.1:1844/_atelier/apps?token=$T" | jq -c '.[]|select(.slug=="<slug>")'   # {instance, company, dev_rev, dev_state, prod_rev, prod_state, deployed_rev, …}
+curl -s "127.0.0.1:1844/api/<company>/<slug>/items?token=$T"                              # your DEV backend
+curl -s -X POST "127.0.0.1:1844/api/<company>/<slug>/items?token=$T" -H 'content-type: application/json' -d '{"text":"milk"}'
+curl -s "127.0.0.1:1844/_atelier/events?app=<instance>&token=$T"                          # the app's recent errors, newest last
+```
 
-After each Write/Edit inside `apps/<slug>/`, the tool result carries one line starting with `atelier:`:
+`dev_state: "live"` with a `dev_rev` that moved = the save built. A save that does not build reaches you as an app-error, second line
+`<file>:<line>:<col> dev: <message>` (then `fix: <file>:<line>:<col> <message> — <fix>`) — nobody else saw it; fix and save again.
 
-- `atelier: LIVE rev N <slug> in 40 ms — <url> (api: <api url>)` — users have this version now.
-- `atelier: FAILED <slug> (users still on rev N) <file>:<line>:<col> <message> — <fix>` — nothing changed for users;
-  apply the fix and save again. A verdict names every broken file at once (module.json, frontend, css, backend).
-- `atelier: idle` or no line — the save did not trigger a build (a file outside an app, or `module.json` missing).
+Screenshot the DEV document with horse-browser at `http://127.0.0.1:1844/<company>/<slug>?token=$T` — your screenshot is the
+preview. Act as a second person with `-H 'x-atelier-user: u2' -H 'x-atelier-name: Bea'`. Delete test data after. No servers.
 
-Then exercise the backend in ONE Bash call with curl against the `api:` URL in the LIVE line, e.g.
-`curl -s <api>/items` and `curl -s -X POST <api>/items -H 'content-type: application/json' -d '{"text":"milk"}'`;
-pass `-H 'x-atelier-user: u2' -H 'x-atelier-name: Bea'` to act as a second person. Delete your test data after.
-Broadcast frames the backend emitted are listed at `<host>/_atelier/events?app=<slug>` (host = the origin of the
-`api:` URL). A 500 from a handler is also reported in the next verdict as a runtime error.
+**Data.** `ctx.dataDir` differs for DEV and PROD. Dev starts empty; never touch prod's data folder by hand — the rehearsal
+copies it for you. The host wrote `.gitignore` (`data/`, `.env`, `.env.*`, `node_modules/`, `CLAIM-REFUSED.txt`, `.atelier`);
+keep no state under the app folder. Secrets never enter git (`.env` is ignored): the operator sets an app's configuration on
+the spine, and it arrives as `process.env.<KEY>` in `backend.js` and in the deploy hook.
 
-You have no browser here; the render smoke in the verdict covers the first paint. Do not start servers, do not
-`npm run` anything, do not create package.json unless you install a package. When the LIVE line shows and the API
-answers, the app is done: tell the chat the app's name and what it does, in one or two lines.
+## Deploy — the chat sees it
+
+`atelier deploy <slug> -m "<what changed, one line>"` commits your DEV tree (the message is the commit message), REHEARSES the
+commit against a copy of prod's data — export, install from the lockfile, build, the `deploy` hook, boot, probe (`healthz`),
+`test`, `smoke` — and only when everything is green gates the app's routes (requests are held ≤ 10 s, then get the waking 503
+the client retries), stops the old worker, backs prod's data up, runs the hook on prod's data, starts the new worker, probes it
+and releases (a minute or two, up to ~6 min; the steps stream as they run). It ends with ONE line — read it, then tell the chat:
+
+- `deploy green: <slug> rev <N> commit <c12> live — <url>` — the chat has this version now (exit 0); the host says nothing — you do.
+- `deploy RED at <step>: <error> — nothing deployed, <slug> stays on rev <N> (<c12>)` — the rehearsal failed at that step; prod
+  and its data are untouched. Fix and deploy again (exit 2). The chat's record gets an app-error `rehearsal red at <step>: …`.
+- `deploy FAILED at <step>: <error> — <slug> is DOWN, backup <id> kept` — rare: the rehearsal passed, prod did not come up (exit 3): tell
+  the chat at once. The app answers 503 `{"error":"app down after a failed deploy","backup":"<id>"}` until you act; nothing is restored —
+  a host restart keeps it DOWN (`boot: rev <N> stays DOWN (…) — atelier restore <slug> <id>, or fix forward and deploy`).
+- `deploy RED at backup: backup impossible: <why>` — refused before the gate. Prod data > 1 GiB or free space < 2× it: `--no-backup`
+  skips the snapshot (a failure after the gate ends `… is DOWN, no backup (--no-backup)` — ask the operator first). `could not read the
+  data dir (<why>)` / `could not measure the data dir (<why>)`: a host fault; `--no-backup` does not lift it — fix the data dir.
+- `deploy aborted: <reason> — read atelier releases <slug> before running it again` — no verdict came (exit 1): read the list first.
+- `atelier: 409 deploy in progress` (exit 1) — one is running: wait for its verdict, never run two.
+- `atelier releases <slug>` — one line per release, newest first: `<at>  <kind> <verdict> rev <N>  <c12>  "<message>"`;
+  `atelier backups <slug>` — the pre-migration snapshots the deploys kept (last 3, ≤ 1 GiB): `<id>  <MB> MB  rev <N>  <at>`.
+- `atelier rollback <slug> <commit>` — deploy an earlier commit (7–40 hex from the releases list): the same rehearsal and gate,
+  no hook, data untouched. Ends `rollback green: <slug> rev <N> commit <c12> live — <url>`, `rollback RED …` or `… FAILED …`.
+- `atelier restore <slug> <backup-id> [--yes]` — prod's data becomes that snapshot (under the gate; code stays); everything written since
+  it is gone — say so first. A LIVE app refuses without `--yes`: `atelier: 409 <slug> is live: restore replaces its prod data with backup
+  <id> (everything written since is lost) — run atelier restore <slug> <id> --yes to confirm` (exit 1); a DOWN app needs no flag. Today's
+  data is snapshot first (`snapshot ok … — <id> (<MB> MB)`, one more backup row). Ends `restore green: <slug> rev <N> data from backup
+  <id> live — <url>`, `restore RED at <step>: <error> — nothing restored, <slug> unchanged, backup <id> untouched` (refused before the
+  gate) or `restore FAILED at <step>: … — <slug> is DOWN, backup <id> kept`.
+
+## Migrations — the `deploy` hook (forward-only, expand/contract)
+
+The hook runs twice per deploy: on the rehearsal COPY, then on prod's data — worker uid, cwd = the export (read-only for it — write only
+under `$DATA_DIR`; a temp file beside the code fails EACCES), `DATA_DIR` = the data folder, config on stdin, ≤ 60 s. **Idempotent and
+additive**: add what is missing (tables, columns, files, backfills), never drop, rename or rewrite in place. Reads switch to the new
+shape in the deploy AFTER the one that added it; drops come two deploys later. A rollback runs NO hook and touches no data — the old code
+must still find data it understands. No long uploads or SSE while deploying: the gate drains 2 s, then stops the worker.
+
+    import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync(process.env.DATA_DIR + '/app.db')   // migrate.js
+    db.exec('CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, text TEXT, by TEXT)')
+    try { db.exec('ALTER TABLE items ADD COLUMN done INTEGER DEFAULT 0') } catch (e) { if (!/duplicate column/.test(e.message)) throw e }
 
 ## Do not
 
-- `import React` / `from 'react'` · a literal `/api/<slug>` path · a static `import` of an npm package in backend.js ·
-  `listen()` · a missing `module.json` · state in module-level variables · keys in module.json beyond the five above.
+`import React` / `from 'react'` · a literal `/api/<slug>` path · a static `import` of an npm package in backend.js · `listen()` ·
+a missing `module.json` · state in module-level variables · module.json keys beyond the nine above · announcing an app before its
+first green deploy · a hook that drops, renames or rewrites data · `git push`, deleting `.git`, committing `.env` or `data/` ·
+touching prod's data folder by hand · a second `atelier deploy` while one runs.
