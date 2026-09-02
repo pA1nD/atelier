@@ -167,10 +167,13 @@ export function createDeployer(i) {
   const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.() })
   const prodRev = (row) => row.prod?.rev ?? 0
 
-  // --- root-side helpers (cp/rm/du as root with group 19999; plain processes on a laptop) ---
-  async function copyInto(src, dst, ms) { const r = await run(os, cpSpec(src, dst, hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `cp -a: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
-  async function rmrf(p, ms = 60_000) { if (!exists(p)) return; const r = await run(os, rmSpec(p, hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `rm -rf: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
-  async function dirBytes(p) { if (!exists(p)) return 0; const r = await run(os, duSpec(p, hostEnv), { timeoutMs: 30_000 }); const kb = parseKb(r.stdout); return kb == null ? 0 : kb * 1024 }
+  // --- root-side helpers (cp/rm/du as root with group 19999; plain processes on a laptop). A CHILD never sees the
+  // host's `/proc/self/fd/N/…` form (fd N is not the dirfd in its table — DESIGN I1.13): every path handed to one is
+  // `i.realPath`'d; the host's own reads and writes keep the dirfd form.
+  const real = (p) => i.realPath(p)
+  async function copyInto(src, dst, ms) { const r = await run(os, cpSpec(real(src), real(dst), hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `cp -a: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
+  async function rmrf(p, ms = 60_000) { if (!exists(p)) return; const r = await run(os, rmSpec(real(p), hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `rm -rf: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
+  async function dirBytes(p) { if (!exists(p)) return 0; const r = await run(os, duSpec(real(p), hostEnv), { timeoutMs: 30_000 }); const kb = parseKb(r.stdout); return kb == null ? 0 : kb * 1024 }
   const dirEmpty = (p) => { try { return fs.readdirSync(p).length === 0 } catch { return true } }
   function applyPlan(row, plan, what) {
     if (!i.jail) { for (const s of plan) if (s.op === 'mkdir') { try { fs.mkdirSync(s.path, { recursive: true, mode: s.mode & 0o777 }) } catch {} } return }
@@ -182,7 +185,7 @@ export function createDeployer(i) {
   // --- the export (rows A + T): git archive as uid 1000 piped into tar -x as root, then chmod-then-chown 0:<uid>
   async function exportCommit(row, commit, dest) {
     const git = os.spawn(archiveSpec({ appDir: row.dir, commit, home: i.cfg.gitHome }))
-    const tar = os.spawn(extractSpec(dest, hostEnv))
+    const tar = os.spawn(extractSpec(real(dest), hostEnv))
     let gerr = '', terr = ''
     git.stderr?.on?.('data', (d) => { gerr += d }); tar.stderr?.on?.('data', (d) => { terr += d })
     git.stdout.on('error', () => {}); tar.stdin.on('error', () => {}); tar.stdout?.resume?.()

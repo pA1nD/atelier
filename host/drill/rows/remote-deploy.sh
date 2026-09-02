@@ -97,7 +97,7 @@ grep -q '^deploy green: locker rev [0-9]* commit [0-9a-f]\{12\} live — ' $OUT/
 C1=$(appfield locker deployed_rev); C12=${C1:0:12}
 [ "${#C1}" = 40 ] || rowfail 9a "deployed_rev is not 40 hex: '$C1'"
 EXP=/work/.atelier/prod/$INST/$C12
-TREE=$(X "find $EXP -printf '%m %u:%g %y %p\n' | sort"); echo "$TREE" > $OUT/export-tree.txt; echo "$TREE" | head -8 | sed 's/^/    | /'
+TREE=$(X "find $EXP -printf '%m %U:%G %y %p\n' | sort"); echo "$TREE" > $OUT/export-tree.txt; echo "$TREE" | head -8 | sed 's/^/    | /'
 echo "$TREE" | grep -q "^750 0:$WUID d $EXP\$" || rowfail 9a "the export dir is not 0:$WUID 0750: $(echo "$TREE" | grep " $EXP\$")"
 echo "$TREE" | grep " f " | grep -vq "^640 0:$WUID f " && rowfail 9a "an export file is not 0:$WUID 0640: $(echo "$TREE" | grep ' f ' | grep -v "^640 0:$WUID f " | head -2)"
 E1000=$(X "$AS1000 cat $EXP/backend.js 2>&1 | grep -c 'Permission denied'"); EW=$(X "$AS_WORKER head -c 40 $EXP/backend.js 2>&1 | grep -c 'Permission denied'")

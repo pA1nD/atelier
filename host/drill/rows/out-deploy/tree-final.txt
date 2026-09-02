@@ -1,0 +1,39 @@
+find: ‘/work/.atelier/tmp/i-a70daab0b7f843a5’: Permission denied
+find: ‘/work/.atelier/tmp/i-12143996ffade520’: Permission denied
+find: ‘/work/.atelier/data-dev/i-a70daab0b7f843a5’: Permission denied
+find: ‘/work/.atelier/data-dev/i-12143996ffade520’: Permission denied
+2770 20001:19999 /work/.atelier/data-dev/i-12143996ffade520
+2770 20002:19999 /work/.atelier/data-dev/i-a70daab0b7f843a5
+600 root:root /work/.atelier/i-12143996ffade520/registered.json
+600 root:root /work/.atelier/i-12143996ffade520/revision.json
+600 root:root /work/.atelier/i-12143996ffade520/slug
+600 root:root /work/.atelier/i-12143996ffade520/uid
+600 root:root /work/.atelier/i-a70daab0b7f843a5/registered.json
+600 root:root /work/.atelier/i-a70daab0b7f843a5/releases.jsonl
+600 root:root /work/.atelier/i-a70daab0b7f843a5/revision.json
+600 root:root /work/.atelier/i-a70daab0b7f843a5/slug
+600 root:root /work/.atelier/i-a70daab0b7f843a5/uid
+640 root:node /work/.atelier/agent.log
+700 20001:20001 /work/.atelier/tmp/i-12143996ffade520
+700 20002:20002 /work/.atelier/tmp/i-a70daab0b7f843a5
+711 root:root /work/.atelier
+711 root:root /work/.atelier/backup
+711 root:root /work/.atelier/data
+711 root:root /work/.atelier/data-dev
+711 root:root /work/.atelier/i-12143996ffade520
+711 root:root /work/.atelier/i-a70daab0b7f843a5
+711 root:root /work/.atelier/last-good
+711 root:root /work/.atelier/prod
+711 root:root /work/.atelier/rehearsal
+711 root:root /work/.atelier/scratch
+711 root:root /work/.atelier/tmp
+750 root:20001 /work/.atelier/last-good/i-12143996ffade520
+750 root:20001 /work/.atelier/last-good/i-12143996ffade520/rev-1
+750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5
+750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-1
+750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-2
+750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-3
+750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-4
+750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-5
+777 root:root /work/.atelier/i-12143996ffade520/current-dev
+777 root:root /work/.atelier/i-a70daab0b7f843a5/current-dev
