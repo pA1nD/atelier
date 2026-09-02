@@ -1,7 +1,7 @@
 // host/supervisor/lastgood.mjs — the last-good revision store (PLAN §4.3 "Last-good", DESIGN §3, §6.1).
 //
 // Layout under the `.atelier` dirfd (every path is `os.at(dirfd, rel)` — never re-resolved by name):
-//   <inst>/revision.json   {rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug, prod}
+//   <inst>/revision.json   {rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug, prod:{…, chrome?}}
 //                          `rev` = the counter (bumped by dev and prod builds alike, LIVE and FAILED,
 //                          persisted BEFORE the worker starts); `live` = the DEV rev `current-dev`
 //                          names; `fingerprint` = the watcher fingerprint of the source the dev rev was
@@ -113,14 +113,17 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       }, 0o600)
       link(inst, 'current-dev', rev)
     },
-    // commitProd(inst, rev, prod) — the PROD release: `revision.json.prod = {rev, commit, deployedAt, message, legacy?}`
-    // + the `current` symlink. The counter is bumped to `rev` when a deploy minted it. `chrome` (step 7 ship C: the
-    // chrome release digest the prod sheet was built with) stamps `revision.json.chrome` when given.
+    // commitProd(inst, rev, prod) — the PROD release: `revision.json.prod = {rev, commit, deployedAt, message, legacy?,
+    // chrome?}` + the `current` symlink. The counter is bumped to `rev` when a deploy minted it. `chrome` (step 7 ship C:
+    // the chrome the PROD sheet was built with — a release digest, else the folder's name) stamps `prod.chrome` when
+    // given; the top-level `chrome` stays the DEV build's (`commit`), so the two slots are told apart — an adopt or a
+    // rollback names none, and a prod sheet of unknown chrome is rebuilt at the next beat (supervisor rebuildAll).
     commitProd(inst, rev, { commit, deployedAt = new Date(os.now()).toISOString(), message = null, legacy = false, chrome }) {
       const cur = store.revision(inst) ?? {}
       const prod = { rev, commit, deployedAt, message }
       if (legacy) prod.legacy = true
-      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev: Math.max(cur.rev ?? 0, rev), ...(chrome !== undefined ? { chrome } : {}), prod }, 0o600)
+      if (chrome !== undefined) prod.chrome = chrome
+      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev: Math.max(cur.rev ?? 0, rev), prod }, 0o600)
       link(inst, 'current', rev)
     },
     // prodPatch(inst, patch) — merges fields into the `prod` block (a key set to undefined is removed): the DOWN

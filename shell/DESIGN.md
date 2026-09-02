@@ -481,8 +481,8 @@ from §1–§3 as built, each a stated choice:
    company origin by the Host company's host — PLAN §4.1: the chrome is not an app). Both are signed
    with the chrome's registry row on the Host company (locally the staged row, `isChrome`, hidden
    from the rail and the bootstrap): the host verifies the assertion's `app` against the row's
-   instance, so a synthetic id is a 401 on the protocol lane. No row → 404 with a log line; the
-   shell serving a pinned chrome digest in the fleet (PLAN §10 item 6) is not built.
+   instance, so a synthetic id is a 401 on the protocol lane. No row → 404 with a log line. The
+   chrome by digest is lane 4a + `chromeShape` (§1.2, §2.1–2.2; step 7 ship C).
 6. **Unknown company locally → 404** on document routes (the fleet's Host gate does this in lane 2;
    locally the registry's workspace list decides) — without it every typo was a waking page.
 7. **The loop breaker** (§10 item 14), two layers: `__Host-tried=1` (Max-Age 30) set with the 302; a

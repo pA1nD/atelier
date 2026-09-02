@@ -31,8 +31,8 @@
 //     [{instance, updated}]` from the heartbeat reply and hands each stamp to `onConfigStamp` (D16),
 //     returns the answer, and reads `chrome: {digest, version} | null` — the computer's EFFECTIVE chrome
 //     (step 7 ship C) — from the register AND heartbeat answers into `onChrome` (host/chrome/fetch.mjs
-//     fetches it); the heartbeat body carries `chrome_digest` = the digest the host HOLDS (`chromeDigest()`,
-//     null = no cache yet). `chromeFetch(digest)` = `GET /v1/host/chrome/<digest>` through `call()`.
+//     fetches it); the heartbeat body carries `chrome_digest` = the digest every prod sheet is BUILT with
+//     (`chromeDigest()` → the cache's `built()`; null = none yet). `chromeFetch(digest)` = `GET /v1/host/chrome/<digest>` through `call()`.
 import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'

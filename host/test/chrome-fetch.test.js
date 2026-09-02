@@ -168,3 +168,36 @@ test('writeBundle / pruneChrome: a bundle already there is left alone (false); p
   assert.deepEqual(pruneChrome(cache, [dA]), ['b'.repeat(64)])
   assert.deepEqual(fs.readdirSync(cache).sort(), [dA, 'notes.txt'].sort())
 })
+
+test('built(): the REPORTED digest moves only when onSwap/onHold settle complete (review 2026-09-02, S2) — an incomplete swap keeps reporting the previous digest while the new one is held, every later want at the held digest retries through onHold, onBuilt fires once per move; a hook that throws changes nothing', async () => {
+  const cache = path.join(tmp(), 'chrome')
+  const A = bundle('a'), B = bundle('b')
+  const dA = digestOf(A), dB = digestOf(B)
+  const t = fakeTransport({ [dA]: answerOf(A), [dB]: answerOf(B) })
+  let verdict = { complete: true }
+  const swaps = [], holds = [], builts = [], logs = []
+  const cc = createChromeCache({ cache, transport: t, log: (l) => logs.push(l), onSwap: (d, p) => { swaps.push([d, p]); return verdict }, onHold: (d, p) => { holds.push([d, p]); return verdict }, onBuilt: (d, p) => builts.push([d, p, cc.built()]) })
+  assert.equal(cc.built(), null)
+  cc.want({ digest: dA }); await cc.settle()
+  assert.equal(cc.digest(), dA); assert.equal(cc.built(), dA); assert.deepEqual(builts, [[dA, null, dA]]); assert.deepEqual(swaps, [[dA, null]]); assert.deepEqual(holds, [])
+  // B lands but the rebuild is incomplete (a row skipped): B is held, A is reported — D over a PREV sheet cannot happen
+  verdict = { complete: false }
+  cc.want({ digest: dB }); await cc.settle()
+  assert.equal(cc.digest(), dB); assert.equal(cc.base(), `/_chrome/${dB}`); assert.equal(cc.built(), dA, 'held B, reporting A'); assert.equal(builts.length, 1)
+  // the next beats name B again: onHold retries with the reported digest as `prev`; still incomplete → still A
+  cc.want({ digest: dB }); await cc.settle()
+  cc.want({ digest: dB }); await cc.settle()
+  assert.deepEqual(holds, [[dB, dA], [dB, dA]]); assert.equal(cc.built(), dA); assert.equal(t.calls.length, 2, 'no refetch of a held digest')
+  verdict = undefined   // "nothing to say" is complete
+  cc.want({ digest: dB }); await cc.settle()
+  assert.equal(cc.built(), dB); assert.deepEqual(builts, [[dA, null, dA], [dB, dA, dB]])
+  // everything built: onHold still runs (a row can fall behind later — adopted, rolled back), built stays, onBuilt is silent
+  cc.want({ digest: dB }); await cc.settle()
+  assert.equal(holds.length, 4); assert.equal(builts.length, 2); assert.equal(cc.built(), dB)
+  // a hook that throws: logged, nothing moves
+  const cc2 = createChromeCache({ cache: path.join(tmp(), 'chrome'), transport: fakeTransport({ [dA]: answerOf(A) }), log: (l) => logs.push(l), onSwap: () => { throw new Error('boom') }, onHold: () => { throw new Error('hold-boom') } })
+  cc2.want({ digest: dA }); await cc2.settle()
+  assert.equal(cc2.digest(), dA); assert.equal(cc2.built(), null)
+  cc2.want({ digest: dA }); await cc2.settle()
+  assert.equal(cc2.built(), null); assert.ok(logs.some((l) => l.includes('after swap') && l.includes('boom')) && logs.some((l) => l.includes('after hold') && l.includes('hold-boom')), logs.join('\n'))
+})

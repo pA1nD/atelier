@@ -10,11 +10,15 @@
 //   ensureChrome({digest, transport, cache, fs, log, fetchMs, now}) → {dir, digest, fetched, error?}
 //     dir/digest = what `current` points at AFTER the call (the wanted digest on success; the previous one, or null, on
 //     a failure); fetched = the bytes were fetched and verified by this call
-//   createChromeCache({cache, fixedDir, transport, fs, log, onSwap}) → { dir(), digest(), base(), version(), want(answer), settle() }
+//   createChromeCache({cache, fixedDir, transport, fs, log, onSwap, onHold, onBuilt}) → { dir(), digest(), built(), base(), version(), want(answer), settle() }
 //     dir(): the cache's `current` when it holds a bundle, else `fixedDir` (ATELIER_CHROME_DIR — local mode, the system
-//     host's /opt/chrome while the spine names no release); digest(): the held digest (what the heartbeat reports);
-//     base(): `/_chrome/<digest>` when a digest is held (the sheet build's url() base); want(answer): the register /
-//     heartbeat answer's `chrome` — serialized, coalesced, never throws; onSwap(digest, prev) after a swap.
+//     host's /opt/chrome while the spine names no release); digest(): the HELD digest (the sheets compile against it);
+//     built(): the digest the heartbeat REPORTS — the last one `onSwap`/`onHold` settled complete, i.e. every prod sheet
+//     is built against it (review 2026-09-02, S2: a report of D over a sheet built with PREV is impossible — a rebuild
+//     that skips a row keeps reporting PREV, and the next beat retries); base(): `/_chrome/<digest>` when a digest is
+//     held (the sheet build's url() base); want(answer): the register / heartbeat answer's `chrome` — serialized,
+//     coalesced, never throws; onSwap(digest, prev) after a swap and onHold(digest, built) at every want naming the held
+//     digest, both → `{complete}` (undefined/true = complete); onBuilt(digest, prev) once `built()` moves.
 import nodeFs from 'node:fs'
 import path from 'node:path'
 import { DIGEST_RE, CHROME_REQUIRED_FILES, validChromePath, chromeDigestOf, sha256Hex } from '../../protocol/index.js'
@@ -131,6 +135,8 @@ export async function ensureChrome({ digest, transport, cache, fs = nodeFs, log 
   const held = (error) => ({ dir: cur?.dir ?? null, digest: cur?.digest ?? null, fetched: false, ...(error ? { error } : {}) })
   if (typeof digest !== 'string' || !DIGEST_RE.test(digest)) return held(`not a digest: ${String(digest).slice(0, 24)}`)
   if (cur?.digest === digest) return { dir: cur.dir, digest, fetched: false }
+  // EEXIST is not re-checked for its owner here: the cache lives under root's 0711 `.atelier`, and index.mjs `ensureDirs`
+  // refused to boot on a cache dir root does not own — the fence is that parent, this mkdir is for a cache never made
   try { fs.mkdirSync(cache, { mode: DIR_MODE }); fs.chmodSync(cache, DIR_MODE) } catch (e) { if (e.code !== 'EEXIST') return held(`cache: ${e.code ?? e.message}`) }
   let fetched = false
   const have = (() => { try { return fs.statSync(path.join(cache, digest, 'manifest.json')).isFile() } catch { return false } })()
@@ -154,30 +160,41 @@ export async function ensureChrome({ digest, transport, cache, fs = nodeFs, log 
 /**
  * createChromeCache({cache, fixedDir, transport, fs, log, onSwap, fetchMs})
  */
-export function createChromeCache({ cache, fixedDir = null, transport, fs = nodeFs, log = () => {}, onSwap = () => {}, fetchMs = FETCH_MS }) {
+export function createChromeCache({ cache, fixedDir = null, transport, fs = nodeFs, log = () => {}, onSwap = () => {}, onHold = null, onBuilt = () => {}, fetchMs = FETCH_MS }) {
   sweepTmp(cache, fs)   // a `.tmp-*` a previous host life left mid-write; the bundles stay (current + previous) until the next swap prunes
   let cur = currentOf(cache, fs)
   let version = null
+  let built = null      // reported: the last digest settled COMPLETE (null until the first settle of this host life — a boot
+                        // with `current` on disk reports it after the first want, once every prod sheet is found built against it)
   let chain = Promise.resolve(), wanted = null, running = false
   const dir = () => cur?.dir ?? (fixedDir ? path.resolve(fixedDir) : null)
+  // settle(hook, digest, prev): the hook's `{complete}` (undefined/true = complete) moves `built`; a throw is logged, never unhandled
+  async function settle(hook, what, digest, prev) {
+    let r
+    try { r = await hook(digest, prev) } catch (e) { log(`chrome: after ${what} ${digest.slice(0, 12)}…: ${e?.stack ?? e}`); return }
+    const complete = r === undefined || r === true || (r !== null && typeof r === 'object' && r.complete !== false)
+    if (!complete || built === digest) return
+    const was = built; built = digest
+    try { await onBuilt(digest, was) } catch (e) { log(`chrome: built ${digest.slice(0, 12)}…: ${e?.stack ?? e}`) }
+  }
   async function run() {
     running = true
     try {
       while (wanted) {
         const w = wanted; wanted = null
-        if (w.digest === cur?.digest) { version = w.version ?? version; continue }
+        if (w.digest === cur?.digest) { version = w.version ?? version; if (onHold) await settle(onHold, 'hold', w.digest, built); continue }
         const prev = cur?.digest ?? null
         const r = await ensureChrome({ digest: w.digest, transport, cache, fs, log, fetchMs })
         if (r.error || r.digest !== w.digest) continue
         cur = { digest: r.digest, dir: r.dir }; version = w.version ?? null
-        try { await onSwap(r.digest, prev) } catch (e) { log(`chrome: after swap ${r.digest.slice(0, 12)}…: ${e?.stack ?? e}`) }
+        await settle(onSwap, 'swap', r.digest, prev)
       }
     } finally { running = false }
   }
   const manifests = new Map()
   return {
     cache,
-    dir, digest: () => cur?.digest ?? null, version: () => version, base: () => (cur ? `/_chrome/${cur.digest}` : null),
+    dir, digest: () => cur?.digest ?? null, built: () => built, version: () => version, base: () => (cur ? `/_chrome/${cur.digest}` : null),
     // open(digest, p) → Buffer | null: a cached bundle's file, when its manifest names it (the dev shell's `/_chrome/<digest>/<p>`
     // lane — Bayard's browser resolves the sheet's `/_chrome/…` urls against the dev origin)
     open(digest, p) {

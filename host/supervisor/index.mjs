@@ -110,6 +110,10 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   })
   const devMsg = (slot, m) => (slot.name === 'prod' ? String(m) : MESSAGES.devBuild.message(m))
   const reportRev = (row) => row.prod?.rev ?? 0   // EVERY dev/rehearsal report carries the PROD rev (the spine keeps one running rev per instance)
+  // a PROD worker's report carries the SLOT's rev while it is the slot's live worker — a chrome swap mints a new rev of the
+  // same code under the running worker (commitChromeSheet), and a report at the worker's birth rev would be `stale-rev` at
+  // the collector and the spine (review 2026-09-02, Grok 2); a retiring worker (another one is the slot's) keeps its own
+  const prodRev = (row, slot, live) => (slot.name === 'prod' ? (slot.live === live ? slot.rev : live.rev) : reportRev(row))
 
   // --- worker spec (§4.1 WorkerSpec) ----------------------------------------------------------
   async function workerSpec(row, slot, rev, codeDir, { appDir, dataDir, sockFile } = {}) {
@@ -163,8 +167,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         case 'ready': st.ready = msg; break
         case 'load-failed': st.failed = msg; break
         case 'suspendable': st.suspendable = true; if (slot.live === live) { slot.suspendable = true; armIdle(row, slot) } break
-        case 'error': report('backend', row.instance, slot.name === 'prod' ? rev : reportRev(row), { message: devMsg(slot, msg.message), stack: msg.stack, file: msg.file, line: msg.line, col: msg.col, sample: msg.sample }); break
-        case 'http5xx': report('http', row.instance, slot.name === 'prod' ? rev : reportRev(row), { message: devMsg(slot, msg.message), file: msg.file, line: msg.line, col: msg.col, sample: { request: { method: msg.method, path: msg.path, status: msg.status } } }); break
+        case 'error': report('backend', row.instance, prodRev(row, slot, live), { message: devMsg(slot, msg.message), stack: msg.stack, file: msg.file, line: msg.line, col: msg.col, sample: msg.sample }); break
+        case 'http5xx': report('http', row.instance, prodRev(row, slot, live), { message: devMsg(slot, msg.message), file: msg.file, line: msg.line, col: msg.col, sample: { request: { method: msg.method, path: msg.path, status: msg.status } } }); break
         case 'broadcast': if (slot.name !== 'rehearsal') onBroadcast(appRow(row), msg.event, slot.name); break
       }
     }
@@ -380,9 +384,10 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   }
   function crashed(row, slot, live, code, signal) {
     if (row.installing) { slot.live = null; slot.state = 'stopped'; emit(`[${row.slug}] rev ${live.rev} stopped by the install's freeze`); return }   // freeze.py SIGKILLs the worker uid
+    const rev = prodRev(row, slot, live)
     slot.live = null; slot.state = 'failed'
     const why = signal ? `signal ${signal}` : `exit ${code}`
-    report('worker', row.instance, slot.name === 'prod' ? live.rev : reportRev(row), { message: devMsg(slot, `worker died: ${why}`) })
+    report('worker', row.instance, rev, { message: devMsg(slot, `worker died: ${why}`) })
     emit(`[${row.slug}] rev ${live.rev} KILLED ${why}${slot.name === 'dev' ? ' (dev)' : ''}`)
     if (slot.name === 'prod') restartLater(row, slot)   // dev is resumed on demand (D18), never respawned on a ladder
   }
@@ -495,37 +500,47 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   const deployer = createDeployer({
     os, dirfd, fs, cfg, T, emit, report, registrar, store, metrics, hostEnv, jail, install, hook, treeOk, company, origin,
     rel, dot, realPath, workerSpec, startWorker, stopLive, buildArtefacts, prune, prodSlot, exportDir, withInstalling, later,
-    onSwap, armIdle: (row, slot) => armIdle(row, slot), withGroupSync, checkModuleJson: (dir) => checkModuleJson(dir, fs),
+    onSwap, armIdle: (row, slot) => armIdle(row, slot), withGroupSync, checkModuleJson: (dir) => checkModuleJson(dir, fs), chromeNameOf,
   })
-  // chromeRelease(row, label): the prod slot's sheet rebuilt against the chrome the host now holds — a new rev of the SAME
-  // code (store.clone), the `current` pointer moved, the previous rev kept for the window, `onSwap` → modulesChanged.
-  // The prod worker keeps running (its code did not change); the next resume starts from the new rev. Never during a
-  // deploy (that release builds against the new chrome itself), never on a down or undeployed slot.
-  async function chromeRelease(row, label) {
-    const slot = row.prod
-    if (!slot || slot.rev == null || slot.adoptPending || slot.state === 'down' || row.deploying) return null
-    if (!treeOk()) return null
+  // --- the chrome swap (step 7 ship C, decision 8; review 2026-09-02, S2) ------------------------------------------
+  // A prod slot is DEPLOYED when it has a rev, is adopted and is not down; its sheet is BUILT against the held chrome when
+  // `revision.json.prod.chrome` names it (stamped by a deploy, a rollback and a chrome commit; an adopt names none). The
+  // heartbeat reports the digest every deployed prod sheet is built with (chrome.built()), never the one merely held —
+  // so the rebuild is all or nothing: phase 1 compiles every sheet that is behind (nothing moves); one sheet refused (a
+  // css failure, a row mid-deploy, the host in fault) and NOTHING commits — the computer keeps reporting the previous
+  // digest and the next beat tries again (`onHold`); every sheet compiled and phase 2 commits each as a NEW rev of the
+  // SAME code (store.clone — the worker keeps running, its code did not change, the next resume starts from the new
+  // rev; `current` moves, the previous rev stays for the window, one `onSwap` → modulesChanged per row). `row.deploying`
+  // is held for the commit alone (milliseconds): a deploy landing inside it answers 409 `deploy in progress`.
+  const deployed = (slot) => !!slot && slot.rev != null && !slot.adoptPending && slot.state !== 'down'
+  const prodChromeOf = (row) => store.revision(row.instance)?.prod?.chrome ?? null
+  async function compileChromeSheet(row, slot, label, held) {
+    try { return await withGroup(row.uid, () => buildSheet({ chromeDir: chromeDirOf(), appDir: slot.appDir, fs, chromeBase: chromeBaseOf() })) } catch (e) {
+      const hint = e?.problems ? formatHint(e.problems[0]) : (e?.code ?? e?.message ?? String(e))
+      const key = `${held}\0${hint}`
+      if (row.chromeSkip !== key) { row.chromeSkip = key; emit(`[${row.slug}] chrome ${label}: prod sheet NOT rebuilt (${hint}) — rev ${slot.rev} keeps its sheet; retried at each beat`) }   // once per (chrome, reason), not once per beat
+      return { error: `css: ${hint}` }
+    }
+  }
+  async function commitChromeSheet(row, slot, sheet, label, held) {
+    if (row.deploying) return { skipped: 'deploying' }
+    if (!deployed(slot)) return { skipped: 'undeployed' }
+    if (prodChromeOf(row) === held) return { built: true }   // a deploy landed between the phases, against this chrome
     const cur = store.current(row.instance)
-    if (!cur) return null
+    if (!cur) return { skipped: 'no current rev' }
     const p = (async () => {
-      let sheet
-      try { sheet = await withGroup(row.uid, () => buildSheet({ chromeDir: chromeDirOf(), appDir: slot.appDir, fs, chromeBase: chromeBaseOf() })) } catch (e) {
-        const hint = e?.problems ? formatHint(e.problems[0]) : (e?.code ?? e?.message ?? String(e))
-        emit(`[${row.slug}] chrome ${label}: prod sheet NOT rebuilt (${hint}) — rev ${slot.rev} keeps its sheet`)
-        return null
-      }
       let rev
-      try { rev = store.nextRev(row.instance) } catch (e) { emit(`[${row.slug}] chrome ${label}: ${e.code ?? e.message}`); return null }
+      try { rev = store.nextRev(row.instance) } catch (e) { emit(`[${row.slug}] chrome ${label}: ${e.code ?? e.message}`); return { skipped: `write: ${e.code ?? e.message}` } }
       row.counter = rev
-      try { store.clone(row.instance, cur.rev, rev, row.uid, { css: sheet.css }) } catch (e) { emit(`[${row.slug}] chrome ${label}: snapshot write failed (${e.code ?? e.message})`); try { store.remove(row.instance, rev) } catch {} return null }
+      try { store.clone(row.instance, cur.rev, rev, row.uid, { css: sheet.css }) } catch (e) { emit(`[${row.slug}] chrome ${label}: snapshot write failed (${e.code ?? e.message})`); try { store.remove(row.instance, rev) } catch {} return { skipped: `write: ${e.code ?? e.message}` } }
       const prev = slot.rev
-      store.commitProd(row.instance, rev, { commit: slot.commit, message: `chrome ${label}`, legacy: !!slot.legacy, chrome: chromeNameOf() })
+      store.commitProd(row.instance, rev, { commit: slot.commit, message: `chrome ${label}`, legacy: !!slot.legacy, chrome: held })
       slot.rev = rev
       if (prev != null && prev !== rev) { slot.kept.push({ rev: prev, until: os.now() + T.keepMs }); later(T.keepMs + 50, () => prune(row)) }
       if (sheet.chrome) { metrics.tailwind(row.slug, sheet.ms, { cold: !row.tailwindWarm }); row.tailwindWarm = true }
       try { onSwap(row.instance, rev) } catch {}
       emit(`[${row.slug}] rev ${rev} chrome ${label} (prod sheet rebuilt from rev ${prev})`)
-      return rev
+      return { rev }
     })()
     row.deploying = p
     try { return await p } finally { if (row.deploying === p) row.deploying = null }
@@ -631,13 +646,33 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       return d
     },
 
-    // rebuildAll(label) → {prod:[[instance, rev]], dev:[instance]}: after a chrome swap (host/chrome/fetch.mjs onSwap)
+    // rebuildAll(label) → {prod:[[instance, rev]], dev:[instance], skipped:[[instance, why]], complete}: every deployed prod
+    // sheet not built against the held chrome, all or nothing (above) — `complete` = every deployed prod sheet is now built
+    // against it (the digest the heartbeat may report); idempotent, cheap when nothing is behind (one revision.json read
+    // per row), called at a swap AND at every beat that names the held digest (host/chrome/fetch.mjs onSwap/onHold), so a
+    // row that falls behind later — adopted, rolled back, its deploy over — is caught within a beat. The dev slot follows
+    // once per chrome (`revision.json.chrome` is the last dev build's): rebuilt when claimed, else the first scan builds it.
     async rebuildAll(label = 'swap') {
-      const out = { prod: [], dev: [] }
+      const held = chromeNameOf()
+      const out = { prod: [], dev: [], skipped: [], complete: true }
+      if (!treeOk()) { out.skipped.push(['host', 'host-fault']); out.complete = false; return out }
+      const plan = []
       for (const row of [...rows.values()]) {
-        if (!row.linked) continue
-        const rev = await chromeRelease(row, label).catch((e) => { emit(`[${row.slug}] chrome ${label}: ${e?.stack ?? e}`); return null })
-        if (rev != null) out.prod.push([row.instance, rev])
+        if (!row.linked || !deployed(row.prod) || prodChromeOf(row) === held) continue
+        if (row.deploying) { out.skipped.push([row.instance, 'deploying']); continue }
+        const sheet = await compileChromeSheet(row, row.prod, label, held)
+        if (sheet.error) out.skipped.push([row.instance, sheet.error]); else plan.push({ row, slot: row.prod, sheet })
+      }
+      if (!out.skipped.length) {
+        for (const { row, slot, sheet } of plan) {
+          const r = await commitChromeSheet(row, slot, sheet, label, held).catch((e) => { emit(`[${row.slug}] chrome ${label}: ${e?.stack ?? e}`); return { skipped: 'crashed' } })
+          if (r.rev != null) out.prod.push([row.instance, r.rev]); else if (r.skipped) out.skipped.push([row.instance, r.skipped])
+        }
+      }
+      if (out.skipped.length) out.complete = false
+      for (const row of [...rows.values()]) {
+        if (!row.linked || row.devChrome === held || (store.revision(row.instance)?.chrome ?? null) === held) continue
+        row.devChrome = held   // one dev rebuild per chrome: a failed one is the next save's to retry, not the next beat's
         if (row.dir && row.claimed) { out.dev.push(row.instance); rebuild(row) }
         else { row.attempted = null; row.fingerprint = null }   // a boot row not yet claimed: the first scan rebuilds it (needsBuild reads null as never built)
       }
@@ -664,11 +699,12 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       const slot = slotName === 'rehearsal' ? row.rehearsal : slotName ? row[slotName] : (row.prod?.live ? row.prod : row.dev)
       if (!slot?.live) return
       const live = slot.live
+      const rev = prodRev(row, slot, live)
       live.stopping = true
       try { live.handle.kill('SIGKILL') } catch {}
       slot.live = null; slot.state = 'failed'
       // a rehearsal worker's kill is not its own report: the rehearsal step it was serving goes red and THAT is the chat's one message (N4)
-      if (slot.name !== 'rehearsal') report('worker', row.instance, slot.name === 'prod' ? live.rev : reportRev(row), { message: devMsg(slot, reason) })
+      if (slot.name !== 'rehearsal') report('worker', row.instance, rev, { message: devMsg(slot, reason) })
       emit(`[${row.slug}] rev ${live.rev} KILLED ${reason}${slot.name !== 'prod' ? ` (${slot.name})` : ''}`)
       if (slot.name === 'prod') restartLater(row, slot)
     },

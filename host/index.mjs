@@ -198,19 +198,29 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const rcfg = { ...cfg, podIp: ip, hostBind: local ? '127.0.0.1' : (ip ?? '0.0.0.0') }   // the protocol port: the pod IP alone in the fleet (no loopback path for a worker), loopback on a laptop
   if (!local && !ip) hostLog('no pod IP found — the protocol port binds 0.0.0.0')
   const chromeRef = { current: null }
-  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().filter((w) => w.slot === 'prod').map((w) => w.instance) ?? [], chromeDigest: () => chromeRef.current?.digest() ?? null })
+  // the heartbeat reports the digest every prod sheet is BUILT with (`chrome.built()`, review 2026-09-02 S2), never the one
+  // merely held: the shell composes an app document's JS from the reported digest and its CSS is the sheet the host built
+  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().filter((w) => w.slot === 'prod').map((w) => w.instance) ?? [], chromeDigest: () => chromeRef.current?.built() ?? null })
   // the chrome cache (DESIGN §6.4, step 7 ship C): the register/heartbeat answer names the computer's effective release
-  // (`registrar.onChrome`), the cache fetches and verifies it AFTER `registered` resolves — never on the boot path — and a
-  // swap reports the held digest at once (one beat) and rebuilds every app's sheet against it, once the supervisor has booted
+  // (`registrar.onChrome`), the cache fetches and verifies it AFTER `registered` resolves — never on the boot path. A swap,
+  // and every later beat naming the held digest, rebuilds what is behind (`supervisor.rebuildAll`, all or nothing, once the
+  // supervisor has booted); the digest is reported (one beat, at once) only when every prod sheet is built against it
   let bootDone; const booted = new Promise((r) => { bootDone = r })
+  let lastChromeLine = null
+  const settle = async (digest, prev) => {
+    await booted
+    const r = await supervisorRef.current?.rebuildAll(digest.slice(0, 12))
+    if (!r) return { complete: false }
+    if (r.prod.length || r.dev.length || r.skipped.length) {
+      const line = `host: chrome ${prev && prev !== digest ? `${prev.slice(0, 12)}… → ` : ''}${digest.slice(0, 12)}… — ${r.prod.length} prod sheet(s) rebuilt, ${r.dev.length} dev rebuild(s)${r.skipped.length ? `; ${r.skipped.map(([i, why]) => `${slugOf(i) ?? i} ${why.split(':')[0]}`).join(', ')} — nothing moved, still reporting ${prev ? prev.slice(0, 12) + '…' : 'no chrome'}, retry at the next beat` : ''}`
+      if (line !== lastChromeLine) { lastChromeLine = line; log.line(line) }   // a stuck row is one line, not one per beat
+    }
+    return { complete: r.complete }
+  }
   const chrome = createChromeCache({
     cache: `${cfg.work}/.atelier/${CACHE_REL}`, fixedDir: cfg.chromeDir, transport: { chrome: (d) => registrar.chromeFetch(d) }, log: hostLog,
-    onSwap: async (digest, prev) => {
-      await booted
-      await registrar.beat()
-      const r = await supervisorRef.current?.rebuildAll(digest.slice(0, 12))
-      log.line(`host: chrome ${prev ? `${prev.slice(0, 12)}… → ` : ''}${digest.slice(0, 12)}… — ${r?.prod.length ?? 0} prod sheet(s) rebuilt, ${r?.dev.length ?? 0} dev rebuild(s)`)
-    },
+    onSwap: settle, onHold: settle,
+    onBuilt: async () => { await registrar.beat() },   // report it now, not at the interval's next tick
   })
   chromeRef.current = chrome
   registrar.onChrome = (c) => chrome.want(c)

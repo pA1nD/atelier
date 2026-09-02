@@ -588,7 +588,8 @@ export function createDeployer(i) {
         })
         if (!g.ok) return await failedAfterGate({ step: g.step, error: g.error, prevRev: prevSnapshot?.rev ?? 0 }, rehearsalMs)
         // ---- 4. record
-        try { store.commitProd(inst, rev, { commit, message, deployedAt: nowIso(os.now()) }) } catch (e) {
+        const chrome = i.chromeNameOf?.() ?? null   // the chrome buildArtefacts just compiled the prod sheet against (rebuildAll reads it back); none = no key
+        try { store.commitProd(inst, rev, { commit, message, deployedAt: nowIso(os.now()), ...(chrome ? { chrome } : {}) }) } catch (e) {
           // the pointer did not land (ENOSPC, EIO): the new worker serves, but a restart would boot the OLD rev over the migrated
           // data — the honest state is DOWN (the marker write may fail too; the in-flight marker then still says so at boot)
           const failure = { step: 'record', error: `revision.json: ${e?.code ?? e?.message ?? e}` }
