@@ -4,6 +4,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PassThrough } from 'node:stream'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { unprivileged } from '../adapters/os.mjs'
 import { createAuth } from '../protocol/auth.mjs'
 import { createDevShell } from '../protocol/devshell.mjs'
@@ -125,4 +130,19 @@ test('main() against a dev shell: the stream\'s step lines land on stderr as the
     assert.equal(await main(['deploy', 'todo', '-m', 'x'], { stdout: out.s, stderr: err.s, token: 'dev-secret', url }), 1)
     assert.match(err.text(), /^deploy aborted: ECONN[A-Z]+ .* — read atelier releases todo before running it again\n$/)
   } finally { try { await dev.close() } catch {} }
+})
+
+test('the entry guard resolves symlinks: the CLI run THROUGH a symlink in a temp dir (the image\'s /usr/local/bin/atelier → host/devcli.mjs) with no args prints the usage and exits 1 — never a silent exit 0 (2026-09-02: `process.argv[1]` is the symlink, a bare path compare never matched); run by its real path the same', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-cli-'))
+  const file = fileURLToPath(new URL('../devcli.mjs', import.meta.url))
+  const link = path.join(dir, 'atelier')
+  fs.symlinkSync(file, link)
+  try {
+    for (const entry of [link, file]) {
+      const r = spawnSync(process.execPath, [entry], { encoding: 'utf8', env: { ...process.env, ATELIER_DEV_TOKEN_FILE: path.join(dir, 'no-token') } })
+      assert.equal(r.status, EXIT.usage, `${entry}: exit ${r.status} stdout=${JSON.stringify(r.stdout)} stderr=${JSON.stringify(r.stderr)}`)
+      assert.ok(r.stderr.includes(USAGE), `${entry}: ${r.stderr}`)
+      assert.equal(r.stdout, '')
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })

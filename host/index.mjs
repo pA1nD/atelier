@@ -5,11 +5,15 @@
 // `local`, no uid drop). Boot order is load-bearing (OR8): last-good snapshots are served and
 // `host-ready` is written before the first folder scan, the first build or any spine round trip
 // completes — in fleet mode `host-ready` waits for the registrar's epoch, local mode has no wait.
+// The one exception is a SEEDED host (cfg.seededApps — the portal's system host, whose whole job is
+// the two folders its image seeds and whose /work has no last-good at birth): there `host-ready`
+// follows the first scan, so Ready never means "listening, 404 for everything the company asks for"
+// (readyAfter; bounded, so a broken seeded folder still lets the pod come up and report).
 import fs from 'node:fs'
 import path from 'node:path'
 import { networkInterfaces } from 'node:os'
+import { isMain } from './entry.mjs'
 import { randomBytes } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
 import { linuxRoot, unprivileged } from './adapters/os.mjs'
 import { createSupervisor } from './supervisor/index.mjs'
 import { buildSheet } from './supervisor/tailwind.mjs'
@@ -59,7 +63,27 @@ export function config(env) {
     gitCommit: env.ATELIER_GIT_COMMIT !== '0',
     gitHome: env.ATELIER_GIT_HOME ?? (spineUrl ? '/work' : (env.HOME ?? '/work')),   // row G's HOME: /work in the fleet, the developer's on a laptop
     appsLinks: env.ATELIER_APPS_LINKS === '1' && !spineUrl,   // symlinked app folders (shell/ local mode, DESIGN §8 H1); refused in the fleet
+    // the seeded road (DESIGN §10.3 "seeded rows") is opened by the HOST's configuration, never by a file in a folder the
+    // agent owns: only the portal-host image sets ATELIER_SEEDED_APPS=1 (its Containerfile ENV); the per-folder
+    // `.atelier-seeded` marker then says WHICH folders. On every other host the marker is inert — a folder carrying it
+    // boots dev-only like any new folder (review 2026-09-02 B2: an agent could otherwise mint a PROD release with
+    // `touch .atelier-seeded`, past the gate, the rehearsal, the backup and git)
+    seededApps: env.ATELIER_SEEDED_APPS === '1',
   }
+}
+
+/** SEEDED_READY_MS — the bound on a seeded host's wait for its first scan before `host-ready` (review 2026-09-02 S1). */
+export const SEEDED_READY_MS = 60_000
+/** readyAfter(cfg, firstScan, {timeoutMs}) → 'now' | 'scanned' | 'timeout': when `host-ready` may be written. A normal host: at
+ *  once (OR8 — snapshots are served, the scan is not waited for). A seeded host (cfg.seededApps): after the first scan settled —
+ *  its seeded rows are built and LIVE inside that scan — or after timeoutMs, whichever first; a scan that rejected counts as
+ *  settled (the pod comes up and the failure is reported). */
+export function readyAfter(cfg, firstScan, { timeoutMs = SEEDED_READY_MS } = {}) {
+  if (!cfg.seededApps) return Promise.resolve('now')
+  let timer
+  const scanned = Promise.resolve(firstScan).then(() => 'scanned', () => 'scanned')
+  const late = new Promise((r) => { timer = setTimeout(() => r('timeout'), timeoutMs); timer.unref?.() })
+  return Promise.race([scanned, late]).finally(() => clearTimeout(timer))
 }
 
 /** The pod IP the heartbeat reports: the first non-internal IPv4 address (null on a laptop with none). */
@@ -303,18 +327,14 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   await dev.listen()
   if (!local) await registered
   const ready = `${cfg.run}/host-ready`
-  try { fs.unlinkSync(ready) } catch {}
-  fs.writeFileSync(ready, `${process.pid}\n`, { mode: 0o644, flag: 'wx' })   // exclusive: a pre-existing entry is never adopted
-  try { os.chmod(ready, 0o644) } catch {}
-  log.line(`host: ready pid ${process.pid} ${local ? 'local' : `host=${registrar.hostId} epoch=${registrar.epoch}`}`)
   // discovery: one scan now, one per change of the apps root (a new or removed folder; debounced —
   // saves inside an app are the per-app watcher's), one per event in a folder still without module.json
   // (pendingWatches), and one every RESCAN_MS as the safety net. Scans are serialized; a change during
-  // a scan queues exactly one more.
+  // a scan queues exactly one more. `rescan()` hands back the chain, settled when that scan is done.
   const appsDir = `${cfg.work}/apps`
   let scanChain = Promise.resolve(), scanQueued = false
   const rescan = () => {
-    if (scanQueued || fault) return
+    if (scanQueued || fault) return scanChain
     scanQueued = true
     scanChain = scanChain.then(async () => {
       scanQueued = false
@@ -322,6 +342,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
       const d = await supervisor.scan().catch((e) => { hostLog(`scan: ${e?.stack ?? e}`); return null })
       pending.sync((d?.skipped ?? []).filter((x) => x.reason === 'no-module-json').map((x) => x.dir))
     })
+    return scanChain
   }
   let appsTimer = null
   let appsWatch = null
@@ -329,10 +350,18 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const pending = pendingWatches({ onEvent: debounced, log: hostLog })
   try { appsWatch = fs.watch(appsDir, { persistent: false }, debounced) } catch (e) { hostLog(`apps watch: ${e.code ?? e.message} (periodic rescan only)`) }
   appsWatch?.on?.('error', (e) => hostLog(`apps watch error: ${e.code ?? e.message}`))
-  rescan()
+  const firstScan = rescan()
   const rescanTimer = setInterval(rescan, RESCAN_MS); rescanTimer.unref?.()
   watchdog.start()
   registrar.heartbeat(HEARTBEAT_MS)
+  // host-ready: at once on a normal host (OR8: the snapshots serve, the scan is not waited for); on a seeded host after the
+  // first scan built its seeded rows — bounded — so Ready never means "listening, 404 for the company's two apps" (S1)
+  const why = await readyAfter(cfg, firstScan)
+  if (fault) return null
+  try { fs.unlinkSync(ready) } catch {}
+  fs.writeFileSync(ready, `${process.pid}\n`, { mode: 0o644, flag: 'wx' })   // exclusive: a pre-existing entry is never adopted
+  try { os.chmod(ready, 0o644) } catch {}
+  log.line(`host: ready pid ${process.pid} ${local ? 'local' : `host=${registrar.hostId} epoch=${registrar.epoch}`}${why === 'now' ? '' : ` (seeded host: ${why === 'scanned' ? 'after the first scan' : `the first scan did not settle within ${SEEDED_READY_MS / 1000} s`})`}`)
   // the fault: 503 on both listeners, no scan, no build, no resume; host-ready unlinked (the kube probe
   // goes red, the launcher's restart does not help — the operator restores the tree); one `worker` event
   // per app so the agent and the spine hear it (OR16); the log line repeats every DIRFD_CHECK_MS
@@ -382,6 +411,6 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   return { cfg, os, dirfd, supervisor, registrar, server, dev, events, collector, watchdog, metrics, chrome, teardown, fault: () => fault, enterFault }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {   // real paths (entry.mjs): a symlinked entry must not be a silent no-op
   main().catch((e) => { process.stderr.write(`[host] fatal: ${e?.stack ?? e}\n`); process.exit(2) })
 }

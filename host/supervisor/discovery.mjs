@@ -12,6 +12,10 @@ import path from 'node:path'
 import { SLUG_RE, allowMeta } from '../../protocol/index.js'
 
 export const IGNORED_NAME_RE = /^[._\- ]/
+/** The seeded marker (DESIGN §10.3 "seeded rows"): a folder carrying it is a RELEASE the image put there (the portal's system
+ *  host seeds `home` and `catalyst-chrome` at boot) — the supervisor builds its prod slot straight from the folder and gives it
+ *  no dev slot; a dotfile, so the watcher's fingerprint and the content id both ignore it. */
+export const SEEDED_MARKER = '.atelier-seeded'
 
 /** @typedef {{file:'module.json', line:number, col:number, message:string, hint:string}} ModuleJsonProblem */
 
@@ -64,7 +68,7 @@ export function checkModuleJson(dir, fs = nodeFs) {
  * discover(appsDir, fs) → {apps, refused, skipped, problems, unreadable}
  *   unreadable: true when the apps root itself could not be listed (EACCES/ENOENT/not mounted yet) —
  *               the caller must not treat the empty `apps` as "every folder is gone" (reconcile(null))
- *   apps:     [{slug, dir, meta, requested, dropped, invalid}]   claimable rows (registrar.claim input)
+ *   apps:     [{slug, dir, meta, requested, dropped, invalid, seeded}]   claimable rows (registrar.claim input); `seeded` = SEEDED_MARKER present
  *   refused:  [{slug, dir, code:'bad-slug', error}]              the registrar writes CLAIM-REFUSED.txt
  *   skipped:  [{name, dir, reason:'ignored-name'|'claim-refused'|'not-a-dir'|'no-module-json'}]
  *   problems: [{slug, dir, error: ModuleJsonProblem}]             module.json present but invalid → build report
@@ -85,7 +89,7 @@ export function discover(appsDir, fs = nodeFs, { links = false } = {}) {
     if (!SLUG_RE.test(name)) { out.refused.push({ slug: name, dir, code: 'bad-slug', error: `folder name '${name}' is not a slug (one DNS label: [a-z][a-z0-9-]*, no leading/trailing -)` }); continue }
     const c = checkModuleJson(dir, fs)
     if (!c.ok) { out.problems.push({ slug: name, dir, error: c.error }); continue }
-    out.apps.push({ slug: name, dir, meta: c.meta, requested: c.requested, dropped: c.dropped, invalid: c.invalid })
+    out.apps.push({ slug: name, dir, meta: c.meta, requested: c.requested, dropped: c.dropped, invalid: c.invalid, seeded: fs.existsSync(path.join(dir, SEEDED_MARKER)) })
   }
   return out
 }

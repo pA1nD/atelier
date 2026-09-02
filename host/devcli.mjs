@@ -17,8 +17,8 @@
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { MESSAGES } from './supervisor/deploy.mjs'
+import { isMain } from './entry.mjs'
 import { commit12 } from './supervisor/slots.mjs'
 
 export const TOKEN_FILE = '/run/atelier/session/dev.token'
@@ -136,6 +136,9 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// The entry guard (the test suite imports `main`, so the file must not run on import) compares REAL paths (entry.mjs): the
+// image runs this file through the `/usr/local/bin/atelier` symlink, and `process.argv[1]` is the symlink — a bare
+// `path.resolve` never matched, so the CLI was a silent no-op (exit 0, nothing printed) in every pod (2026-09-02).
+if (isMain(import.meta.url)) {
   main(process.argv.slice(2)).then((code) => process.exit(code), (e) => { process.stderr.write(`atelier: ${e?.stack ?? e}\n`); process.exit(EXIT.usage) })
 }

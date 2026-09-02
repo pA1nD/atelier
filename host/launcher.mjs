@@ -13,6 +13,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isMain } from './entry.mjs'
 import { randomBytes } from 'node:crypto'
 import { constants as osConstants } from 'node:os'
 import { linuxRoot, unprivileged } from './adapters/os.mjs'
@@ -326,4 +327,4 @@ function main() {
   }).boot()
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main()
+if (isMain(import.meta.url)) main()   // real paths (entry.mjs): a symlinked entry must not be a silent no-op

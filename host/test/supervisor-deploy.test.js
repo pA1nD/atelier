@@ -74,7 +74,7 @@ test('green: commit → rehearsal → gate → record: prod serves the released 
     const rel = w.releases[0]
     assert.deepEqual(Object.keys(rel).sort(), ['at', 'backup', 'by', 'changelog', 'commit', 'error', 'id', 'instance', 'kind', 'message', 'rehearsal', 'rev', 'verdict'])
     assert.match(rel.id, /^r-[0-9a-f]{16}$/); assert.equal(rel.instance, inst); assert.equal(rel.kind, 'deploy'); assert.equal(rel.commit, v.commit); assert.equal(rel.message, 'first release'); assert.equal(rel.by, 'agent:p-agent'); assert.equal(rel.verdict, 'green'); assert.equal(rel.rev, 2); assert.equal(rel.backup, null); assert.equal(rel.error, null); assert.equal(rel.changelog, null)
-    assert.match(rel.at, /^\d{4}-\d{2}-\d{2}T/); assert.equal(rel.rehearsal.partial, false); assert.ok(rel.rehearsal.ms > 0); assert.deepEqual(rel.rehearsal.steps.map((s) => s.name).slice(0, 4), ['commit', 'copy', 'export', 'install']); assert.ok(rel.rehearsal.steps.every((s) => Number.isInteger(s.ms) && s.ok === true))
+    assert.ok(Number.isInteger(rel.at) && Math.abs(Date.now() - rel.at) < 60_000, `the posted row's at is a ms epoch (the spine's door validates it as one): ${JSON.stringify(rel.at)}`); assert.equal(rel.rehearsal.partial, false); assert.ok(rel.rehearsal.ms > 0); assert.deepEqual(rel.rehearsal.steps.map((s) => s.name).slice(0, 4), ['commit', 'copy', 'export', 'install']); assert.ok(rel.rehearsal.steps.every((s) => Number.isInteger(s.ms) && s.ok === true))
     assert.deepEqual(sup.releases(inst), [rel]); assert.deepEqual(sup.backups(inst), [])
     assert.equal(JSON.parse(fs.readFileSync(dot(w, inst, 'releases.jsonl'), 'utf8').trim()).id, rel.id)
     assert.equal(w.reports.length, 0, 'green sends no report')
@@ -405,7 +405,7 @@ test('D14 adopt: a pre-release layout (revision.json without `prod`, `current` �
     assert.equal(readlink(dot(w, inst, 'current-dev')), `../last-good/${inst}/rev-1`, 'the dev pointer is minted for the dev slot')
     assert.ok(!fs.existsSync(dot(w, 'prod', inst)), 'no export: it serves from the folder until its first deploy')
     assert.equal(sup.rows.get(inst).prod.appDir, dir)
-    assert.equal(w.releases.length, 1); assert.equal(w.releases[0].kind, 'adopt'); assert.equal(w.releases[0].verdict, 'green'); assert.equal(w.releases[0].rev, 1); assert.equal(w.releases[0].commit, r.deployed_rev); assert.equal(w.releases[0].by, 'host')
+    assert.equal(w.releases.length, 1); assert.equal(w.releases[0].kind, 'adopt'); assert.equal(w.releases[0].verdict, 'green'); assert.equal(w.releases[0].rev, 1); assert.equal(w.releases[0].commit, r.deployed_rev); assert.equal(w.releases[0].by, 'host'); assert.ok(Number.isInteger(w.releases[0].at) && Math.abs(Date.now() - w.releases[0].at) < 60_000, 'the adopt row posts a ms epoch too')
     assert.ok(w.lines.some((l) => l === `[legacy] adopt: rev 1 (${r.deployed_rev.slice(0, 12)}) committed — prod = the legacy tree until its first deploy`))
     assert.deepEqual(w.modules, [], 'adopt never calls modulesChanged: the registry already holds the prod rev')
     assert.equal((await api(sup, row, '/rev', prod)).status, 200, 'nothing went dark')

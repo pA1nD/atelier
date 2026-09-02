@@ -55,6 +55,36 @@ export function fingerprint(dir, fs = nodeFs) {
   return { hash: createHash('sha1').update(rows.join('\n')).digest('hex'), files: rows.length, dirs }
 }
 
+/**
+ * treeId(dir, fs) → 40 hex | null — the CONTENT id of a folder: sha256 over the fingerprint's set PLUS the manifests
+ * (package.json / package-lock.json: the watcher leaves them out because their change is the install trigger, but a seeded
+ * folder is never installed into — its deps came with the image — and a re-seed that changes only a dependency must be a
+ * new rev; review 2026-09-02 S3), each as `<rel>\0<bytes>\0` in path order, cut to 40 hex so it has a git sha's shape.
+ * Out: dotfiles (the marker, `.image-stamp`), `data/`, `node_modules/`, `_*`, `CLAIM-REFUSED.txt`. A seeded row's `commit` (DESIGN §10.3 "seeded rows"): the system host has no git and a
+ * fresh /work on every pod — the same image bytes must give the same id on every boot (the spine replays `adopt-<c12>`),
+ * and mtimes (which every `cp` rewrites) must not move it. null when the folder cannot be read.
+ */
+export function treeId(dir, fs = nodeFs) {
+  const files = []
+  const walk = (d, rel) => {
+    let ents
+    try { ents = fs.readdirSync(d, { withFileTypes: true }) } catch { return false }
+    for (const ent of ents) {
+      const r = rel ? rel + '/' + ent.name : ent.name
+      if (excludedSegment(ent.name) || ent.name === 'CLAIM-REFUSED.txt') continue
+      const p = path.join(d, ent.name)
+      if (ent.isDirectory()) { if (!walk(p, r)) return false; continue }
+      if (ent.isFile()) files.push([r, p])
+    }
+    return true
+  }
+  if (!walk(dir, '')) return null
+  files.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  const h = createHash('sha256')
+  try { for (const [r, p] of files) h.update(r).update('\0').update(fs.readFileSync(p)).update('\0') } catch { return null }
+  return h.digest('hex').slice(0, 40)
+}
+
 /** manifestHash(dir, fs) — a hash over the CONTENT of the install manifests (package.json +
  *  package-lock.json), '' for an absent file. onInstall fires only when this changes, so the
  *  two-phase install's own byte-identical lockfile rewrite does not re-trigger the installer. */

@@ -21,6 +21,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { archiveSpec, commitAll, resolveCommit } from './lastgood.mjs'
 import { formatHint, classifyWorkerFailure } from './bundle.mjs'
+import { treeId } from './watcher.mjs'
 import { REL, commit12, backupId, parseBackupId, newReleaseId, copySpecs, rmSpec, duSpec, lsSpec, extractSpec, parseKb, ownTree, pruneBackups, backupFeasible, mb, deferred, RELEASES_KEEP, COMMIT_RE, DATA_CAP_BYTES, sockName } from './slots.mjs'
 import { run } from '../worker/install.mjs'
 import { backupPlan, rehearsalPlan, prodPlan, dataPlan, applyJail, jailPlan } from '../worker/jail.mjs'
@@ -121,6 +122,9 @@ export const MESSAGES = {
     red:     (slug, c12, step, error, N) => `[${slug}] deploy ${c12} RED at ${step}: ${error} — prod stays on rev ${N}`,
     failed:  (slug, c12, step, error, id) => `[${slug}] deploy ${c12} FAILED at ${step}: ${error} — DOWN, backup ${id ?? 'none'}`,
     adopt:   (slug, N, c12) => `[${slug}] adopt: rev ${N} (${c12}) committed — prod = the legacy tree until its first deploy`,
+    seeded:  (slug, N, c12) => `[${slug}] seeded: rev ${N} (${c12}) is the release — prod from the folder, no dev slot`,
+    seededFail: (slug, N, hint) => `[${slug}] rev ${N} FAILED (seeded) ${hint}`,                                                    // the folder's answer until its bytes change
+    seededRetry: (slug, N, why) => `[${slug}] rev ${N} FAILED (seeded) ${why} — a host-side failure, retried at the next scan`,   // reported once, retried every scan
     config:  (slug, N, at) => `[${slug}] config release: rev ${N} restarted under the gate (config updated ${at})`,
     restore: (slug, id, ms) => `[${slug}] restore ${id} done in ${ms} ms`,
     restoreRed: (slug, id, step, error) => `[${slug}] restore ${id} RED at ${step}: ${error} — nothing restored`,
@@ -131,11 +135,12 @@ export const MESSAGES = {
   // ── git
   git: {
     adoptMessage: (N) => `adopt: the tree serving rev ${N}`,
+    seededMessage: (N) => `seeded: the image's tree serving rev ${N}`,
     gitignore: ['data/', '.env', '.env.*', 'node_modules/', 'CLAIM-REFUSED.txt', '.atelier'].join('\n') + '\n',
   },
   // ── the list verbs (one row per line, newest first)
   list: {
-    release: (r) => `${r.at}  ${r.kind.padEnd(8)} ${r.verdict.padEnd(6)} rev ${String(r.rev ?? '-').padStart(3)}  ${(r.commit ?? '').slice(0, 12)}  ${r.message ? JSON.stringify(r.message) : ''}${r.backup ? `  backup ${r.backup}` : ''}${r.error ? `  ${r.error}` : ''}`,
+    release: (r) => `${iso(r.at)}  ${r.kind.padEnd(8)} ${r.verdict.padEnd(6)} rev ${String(r.rev ?? '-').padStart(3)}  ${(r.commit ?? '').slice(0, 12)}  ${r.message ? JSON.stringify(r.message) : ''}${r.backup ? `  backup ${r.backup}` : ''}${r.error ? `  ${r.error}` : ''}`,
     releasesNone: (slug) => `${slug}: no releases yet — atelier deploy ${slug} -m "first release"`,
     backup: (b) => `${b.id}  ${String(b.mb).padStart(6)} MB  rev ${b.rev}  ${b.at}`,
     backupsNone: (slug) => `${slug}: no backups (a backup is taken by every deploy that reaches the gate)`,
@@ -155,6 +160,10 @@ export const HOST_MESSAGES = Object.freeze({
 
 const tail = (s, n = 3) => String(s ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-n).join(' | ')
 const nowIso = (ms) => new Date(ms).toISOString()
+// A release row's `at` is a MS EPOCH (`os.now()`): the spine's release door validates it as one inside a window and
+// answered `400 at must be a ms epoch` to the ISO string the first live deploy posted (2026-09-02) — every row was
+// refused, `deployed_rev` never moved. The ISO form is for eyes only: the log lines and the CLI's list (`iso`).
+const iso = (at) => (typeof at === 'number' ? new Date(at).toISOString() : String(at))
 const c12 = (c) => (c ? commit12(c) : 'none')
 const gb = (bytes) => (bytes / 1024 / 1024 / 1024).toFixed(1)
 const childWhy = (r) => tail(r.stderr) || (r.signal ? `killed by ${r.signal}` : `rc=${r.code}`)
@@ -168,6 +177,7 @@ const childWhy = (r) => tail(r.stderr) || (r.signal ? `killed by ${r.signal}` : 
  *   .restore(row, backupId, {by, yes, onStep}) → the verdict (refused unless the app is DOWN or `yes`)
  *   .configRelease(row) → the verdict (D16)
  *   .adopt(row) → the release row (D14)
+ *   .seeded(row) → the release row (DESIGN §10.3 "seeded rows": the folder is the release; every scan calls it)
  *   .releases(row) → [rows, newest first]   .backups(row) → [{id, at, rev, commit, bytes}, newest first]
  * Every app-error report here carries rev = row.prod?.rev ?? 0 — the PROD rev (the spine's coalescer keeps ONE running
  * rev per instance and drops lower ones as stale; a dev/rehearsal counter would silence every later prod error).
@@ -416,7 +426,7 @@ export function createDeployer(i) {
     const finish = async (outcome, extra = {}) => {
       await pruneExports(row, keptExports())
       const cur = current(row)
-      const rel = { id, instance: inst, kind, commit: commit ?? (wanted ? String(wanted) : null), message, at: nowIso(os.now()), by, verdict: outcome, rev: outcome === 'green' ? rev : (cur?.rev ?? null), rehearsal: { ms: extra.rehearsalMs ?? 0, partial, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: backup?.id ?? null, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
+      const rel = { id, instance: inst, kind, commit: commit ?? (wanted ? String(wanted) : null), message, at: os.now(), by, verdict: outcome, rev: outcome === 'green' ? rev : (cur?.rev ?? null), rehearsal: { ms: extra.rehearsalMs ?? 0, partial, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: backup?.id ?? null, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
       await recordRelease(row, rel)
       outcomeMetric(row, t0, outcome)
       const v = { t: 'verdict', outcome, kind, slug, url: url(row), api: api(row), release: id, ms: Math.round(os.now() - t0), rehearsal: { ms: rel.rehearsal.ms, ...(partial ? { partial: true } : {}) }, attempted: commit ? { commit } : null }
@@ -642,7 +652,7 @@ export function createDeployer(i) {
     const cur = store.current(inst)
     let snap = null
     const finish = async (outcome, extra = {}) => {
-      const rel = { id, instance: inst, kind: 'restore', commit: row.prod.commit, message: `restore ${backup}`, at: nowIso(os.now()), by, verdict: outcome, rev: row.prod.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
+      const rel = { id, instance: inst, kind: 'restore', commit: row.prod.commit, message: `restore ${backup}`, at: os.now(), by, verdict: outcome, rev: row.prod.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
       await recordRelease(row, rel)
       const v = { t: 'verdict', outcome, kind: 'restore', slug, commit: row.prod.commit, rev: row.prod.rev, url: url(row), api: api(row), backup, release: id, ms: Math.round(os.now() - t0) }
       if (snap) v.snapshot = snap.id
@@ -708,7 +718,7 @@ export function createDeployer(i) {
         if (!cur) return null
         const g = await underGate(row, R, { rev: cur.rev, commit: row.prod.commit, codeDir: cur.dir, appDir: row.prod.appDir, body: async () => {}, onFail: (f) => report(MESSAGES.configFailed.kind, inst, prodRev(row), { message: MESSAGES.configFailed.message(slug, f.step, f.error), hint: MESSAGES.configFailed.hint(slug) }) })
         const outcome = g.ok ? 'green' : 'failed'
-        const rel = { id, instance: inst, kind: 'config', commit: row.prod.commit, message: `config ${stamp ?? ''}`.trim(), at: nowIso(os.now()), by, verdict: outcome, rev: cur.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: null, error: g.ok ? null : MESSAGES.configFailed.message(slug, g.step, g.error), changelog: null }
+        const rel = { id, instance: inst, kind: 'config', commit: row.prod.commit, message: `config ${stamp ?? ''}`.trim(), at: os.now(), by, verdict: outcome, rev: cur.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: null, error: g.ok ? null : MESSAGES.configFailed.message(slug, g.step, g.error), changelog: null }
         await recordRelease(row, rel)
         if (g.ok) { try { i.onSwap(inst, cur.rev) } catch {} ; emit(MESSAGES.log.config(slug, cur.rev, stamp ?? '-')) }
         return { t: 'verdict', outcome, kind: 'config', slug, commit: row.prod.commit, rev: cur.rev, release: id, ...(g.ok ? {} : { step: g.step, error: g.error }) }
@@ -736,7 +746,7 @@ export function createDeployer(i) {
       store.commitProd(row.instance, rev, { commit: c.commit, message, deployedAt: nowIso(os.now()), legacy: true })
       if (!store.currentDev(row.instance)) store.link(row.instance, 'current-dev', row.dev.rev ?? rev)
       slot.commit = c.commit; slot.legacy = true; slot.appDir = row.dir; slot.adoptPending = false
-      const rel = { id: `adopt-${commit12(c.commit)}`, instance: row.instance, kind: 'adopt', commit: c.commit, message, at: nowIso(os.now()), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+      const rel = { id: `adopt-${commit12(c.commit)}`, instance: row.instance, kind: 'adopt', commit: c.commit, message, at: os.now(), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
       slot.announced = true
       await recordRelease(row, rel)
       emit(MESSAGES.log.adopt(row.slug, rev, commit12(c.commit)))
@@ -756,7 +766,7 @@ export function createDeployer(i) {
     if (slot.announcing) return slot.announcing
     const known = registrar?.apps?.()?.get(row.instance)?.deployed_rev ?? null
     if (known === slot.commit || !registrar?.release) { slot.announced = true; return Promise.resolve(null) }
-    const rel = { id: `adopt-${commit12(slot.commit)}`, instance: row.instance, kind: 'adopt', commit: slot.commit, message: MESSAGES.git.adoptMessage(slot.rev), at: nowIso(os.now()), by: 'host', verdict: 'green', rev: slot.rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+    const rel = { id: `adopt-${commit12(slot.commit)}`, instance: row.instance, kind: 'adopt', commit: slot.commit, message: MESSAGES.git.adoptMessage(slot.rev), at: os.now(), by: 'host', verdict: 'green', rev: slot.rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
     slot.announcing = (async () => {
       try {
         const r = await withBudget(Promise.resolve(registrar.release(rel)), D().recordMs).catch((e) => { emit(`[${row.slug}] announce: ${e?.error ?? e?.message ?? e}`); return null })
@@ -768,5 +778,110 @@ export function createDeployer(i) {
     return slot.announcing
   }
 
-  return { deploy, restore, configRelease, adopt, announce, releases, backups, pruneOldBackups }
+  // ---------------------------------------------------------------------------------------------
+  // A SEEDED row — the folder carries discovery's SEEDED_MARKER (`.atelier-seeded`; the portal's system host seeds `home`
+  // and `catalyst-chrome` from its image at every boot — DESIGN §10.3 "seeded rows"): the folder IS the release. Nobody
+  // edits it, the pod has no git and a fresh /work every life, so the prod slot is built straight from the folder in the
+  // legacy shape (the bundle from the rev dir, static files and createRequire from the folder), its commit is the folder's
+  // CONTENT id (watcher.mjs treeId: the same bytes give the same id on every boot, so the spine replays `adopt-<c12>`), the
+  // worker starts at once and ONE `adopt` row goes to the spine. No dev slot, no watcher: nothing D18 can idle-stop out from
+  // under the company (2026-09-02: both seeded apps came up `(dev)` and stopped ten minutes later; the portal was dark).
+  // Every scan calls it: the same id → the boot announce (which converges a row the spine never recorded); a new id (a
+  // re-seed over a kept /work) → a new rev the same way, the old worker retired after the swap. Two failure classes
+  // (review 2026-09-02, B1/N1): the FOLDER'S answer (its module.json, a build problem, a worker that failed to load its
+  // bytes) is one rev and one report until the bytes change (the sweep rule of §6.1: never a rev every 30 s for one broken
+  // tree); a HOST-SIDE failure (the rev counter, the snapshot store, the spawn, the jail, the record) is retried at every
+  // scan — reported once per (bytes, reason), never left as a row nothing will ever build again.
+  // Every read of the folder holds the app's gid (§6.2): on the real pod the folder is `1000:<uid> 2750` after the claim and
+  // the host is userns root WITHOUT DAC_OVERRIDE — an ungrouped read is EACCES, and an EACCES on module.json read as
+  // "module.json missing" reproduced the outage on the first scan of the pod (review 2026-09-02, B1).
+  function seeded(row) {
+    const inst = row.instance, slug = row.slug
+    const id = i.withGroupSync(row.uid, () => treeId(row.dir, fs))
+    if (!id) { emit(`[${slug}] seeded: folder unreadable — retried on the next scan`); return Promise.resolve(null) }
+    if (row.prod?.commit === id && !row.prod.adoptPending) return announce(row)
+    if (row.deploying) return row.deploying
+    if (row.seededAttempted === id) return Promise.resolve(null)   // the folder's answer stands until its bytes change
+    const t0 = os.now()
+    row.deploying = (async () => {
+      let rev = null
+      // one report per (bytes, kind, reason): a host-side failure retried at every scan reaches the chat once
+      const once = (kind, message, hint, where) => {
+        const key = `${id}\0${kind}\0${message}`
+        if (row.seededReported === key) return
+        row.seededReported = key
+        report(kind, inst, prodRev(row), { message, ...(hint ? { hint } : {}), ...where })
+      }
+      const drop = () => { if (rev != null) { try { store.remove(inst, rev) } catch {} } if (row.prod && !row.prod.live) row.prod.state = 'stopped' }   // a re-seed's old rev resumes on the next request
+      // the folder's answer: its bytes are the problem — not retried until they change
+      const fail = (kind, message, hint, where = {}) => {
+        row.seededAttempted = id
+        once(kind, message, hint, where)
+        emit(MESSAGES.log.seededFail(slug, rev ?? '?', hint ?? message))
+        drop()
+        return null
+      }
+      // a host-side failure: this folder is asked again at the next scan
+      const retry = (kind, message, hint = null, where = {}) => {
+        once(kind, message, hint, where)
+        emit(MESSAGES.log.seededRetry(slug, rev ?? '?', message))
+        drop()
+        return null
+      }
+      try { rev = store.nextRev(inst) } catch (e) { return retry('build', `snapshot write failed: ${e?.code ?? e?.message ?? e}`) }
+      row.counter = rev
+      const mj = i.withGroupSync(row.uid, () => i.checkModuleJson(row.dir))
+      if (!mj.ok) return fail('build', mj.error.message, formatHint(mj.error), { file: mj.error.file, line: mj.error.line, col: mj.error.col })
+      if (JSON.stringify(mj.meta) !== JSON.stringify(row.meta)) {   // a re-seed that renamed the app or changed its icon: the registry's meta follows (as build() does)
+        row.meta = mj.meta
+        try { await registrar?.claim?.({ slug, meta: mj.json, dir: row.dir }) } catch (e) { emit(`[${slug}] meta update: ${e.message}`) }
+      }
+      let built
+      try { built = await i.buildArtefacts(row, { appDir: row.dir, rev }) } catch (e) {
+        if (e?.problems) { const p = e.problems[0]; return fail('build', p.message, formatHint(p), { file: p.file, line: p.line, col: p.col }) }
+        return retry('build', `snapshot write failed: ${e?.code ?? e?.message ?? e}`)
+      }
+      // load-beside: a re-seed's old worker keeps serving until the new one is READY (a request meanwhile resumes the old rev).
+      // The two workers share ONE data dir — a named exception to D13 (prod never overlaps) for a folder nobody deploys to —
+      // so a MOUNT-ERROR beside the old worker gets build()'s one-shot retry: stop the old worker, start once more.
+      const slot = row.prod ?? i.prodSlot(row, { rev: null, commit: null, legacy: true })
+      let next, retried = false
+      for (;;) {
+        try { next = await i.startWorker(row, slot, rev, built.written.dir); break } catch (e) {
+          if (e.failed?.code === 'MOUNT-ERROR' && slot.live && !retried) {
+            retried = true
+            emit(`[${slug}] rev ${rev} mount failed beside rev ${slot.live.rev} — retrying once after the old worker exits`)
+            const old = slot.live; slot.live = null; slot.state = 'loading'
+            await i.stopLive(row, slot, old, 'mount-retry')
+            continue
+          }
+          const p = e.failed ? i.withGroupSync(row.uid, () => classifyWorkerFailure(e.failed, { appDir: row.dir, fs, map: built.map })) : null
+          const message = p?.message ?? `${e.error}: ${e.msg}`, hint = p ? formatHint(p) : null, where = p ? { file: p.file, line: p.line, col: p.col } : {}
+          return ['spawn-eagain', 'jail', 'host-fault'].includes(e.error) ? retry('worker', message, hint, where) : fail('worker', message, hint, where)
+        }
+      }
+      const chrome = i.chromeNameOf?.() ?? null   // the sheet was compiled against it (rebuildAll reads it back)
+      try { store.commitProd(inst, rev, { commit: id, message: MESSAGES.git.seededMessage(rev), deployedAt: nowIso(os.now()), legacy: true, ...(chrome ? { chrome } : {}) }) } catch (e) {
+        try { await i.stopLive(row, slot, next.live, 'seeded-record-failed') } catch {}
+        return retry('build', `revision.json: ${e?.code ?? e?.message ?? e}`)
+      }
+      const old = slot.live
+      slot.live = next.live; slot.rev = rev; slot.state = 'live'; slot.commit = id; slot.legacy = true; slot.appDir = row.dir
+      slot.resources = next.resources; slot.suspendable = next.suspendable; slot.restarts = 0; slot.down = null; slot.adoptPending = false
+      row.prod = slot
+      if (old) { slot.kept.push({ rev: old.rev, until: os.now() + T.keepMs }); slot.retiring.add(old); i.later(T.swapStopMs, () => i.stopLive(row, slot, old, 'reseed')); i.later(T.keepMs + 50, () => i.prune(row)) }   // retiring: teardown stops it too
+      try { i.onSwap(inst, rev) } catch (e) { emit(`[${slug}] onSwap: ${e?.message ?? e}`) }
+      i.armIdle(row, slot)   // R14: prod idle-stops only on empty resources, resumed on the next request with requests held
+      emit(MESSAGES.log.live(slug, rev, commit12(id), Math.round(os.now() - t0)))
+      emit(MESSAGES.log.seeded(slug, rev, commit12(id)))
+      // the release row; `announced` is NOT set here — a spine that refused or was unreachable is asked again by the next
+      // scan's announce (idempotent by id), and a spine that recorded it already holds the commit (registrar.release notes it)
+      const rel = { id: `adopt-${commit12(id)}`, instance: inst, kind: 'adopt', commit: id, message: MESSAGES.git.seededMessage(rev), at: os.now(), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+      await recordRelease(row, rel)
+      return rel
+    })().catch((e) => { emit(`[${slug}] seeded crashed: ${e?.stack ?? e}`); return null }).finally(() => { row.deploying = null })
+    return row.deploying
+  }
+
+  return { deploy, restore, configRelease, adopt, announce, seeded, releases, backups, pruneOldBackups }
 }

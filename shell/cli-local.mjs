@@ -17,6 +17,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { isMain } from '../host/entry.mjs'
 import { resolveRoot, loadConfig, isWorkspaceDir, CONFIG_FILENAME } from '../discovery.js'
 import { discover, ensureModuleJson } from './local/discover.mjs'
 import { stage } from './local/stage.mjs'
@@ -129,8 +130,8 @@ function openBrowser(url) {
   try { nodeSpawn(cmd, [url], { stdio: 'ignore', detached: true }).unref() } catch {}
 }
 
-// runs when this file is the entry, or when cli.js dispatched here (a test imports `main` with fakes)
-const entry = process.argv[1] ? path.resolve(process.argv[1]) : ''
-if (entry === fileURLToPath(import.meta.url) || entry === path.join(REPO_ROOT, 'cli.js')) {
+// runs when this file is the entry, or when cli.js dispatched here (a test imports `main` with fakes) — REAL paths
+// (host/entry.mjs): `npx atelier` runs the bin symlink, and a bare resolve compare made it a silent no-op
+if (isMain(import.meta.url) || isMain(path.join(REPO_ROOT, 'cli.js'))) {
   main().catch((e) => { process.stderr.write(`atelier: ${e?.stack ?? e}\n`); process.exit(2) })
 }

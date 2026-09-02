@@ -88,7 +88,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   function mkRow({ instance, slug, uid, company: co, dir }) {
     const row = {
       instance, slug, uid, company: co, dir, meta: null,
-      linked: false, claimed: false,
+      linked: false, claimed: false, seeded: false,
       tmpDir: rel(`tmp/${instance}`), sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
       counter: 0, fingerprint: null, attempted: null,
       building: null, pending: false, broken: null, watcher: null, installing: null, installPending: false, git: Promise.resolve(), gitInit: null, gitReady: false,
@@ -446,13 +446,17 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     const row = rows.get(res.instance) ?? mkRow({ instance: res.instance, slug: app.slug, uid: res.uid, company: company(), dir: app.dir })
     row.claimed = true; row.linked = true
     row.slug = app.slug; row.uid = res.uid; row.dir = app.dir; row.dev.appDir = app.dir; row.meta = app.meta ?? {}
+    // discovery's SEEDED_MARKER names the folder as a release (deployer.seeded: no watcher, no dev slot, no git) ONLY on a host
+    // configured for it (cfg.seededApps ← ATELIER_SEEDED_APPS=1, the portal-host image alone): the marker sits in a folder the
+    // agent owns, so on any other host it is inert and the folder takes the new-folder road (review 2026-09-02 B2)
+    row.seeded = cfg.seededApps === true && !!app.seeded
     if (!row.dev.live) row.dev.state = row.dev.rev != null ? 'stopped' : 'loading'
     store.ensure(row.instance, row.uid)
     store.writeMarker(row.instance, 'slug', row.slug)
     if (jail?.claimRoundTrip) { try { jail.claimRoundTrip(os, row.dir, row.uid) } catch (e) { emit(`[${row.slug}] claim round trip: ${e.code ?? e.message}`) } }
     // D7: the repo + .gitignore, once, as uid 1000 (a no-op on a repo; the agent's own .gitignore stays) — kicked off here,
     // awaited by whoever needs the repo first (ensureGit: the deploy's commit step, the adopt)
-    if (cfg.gitCommit !== false) ensureGit(row).catch(() => {})
+    if (cfg.gitCommit !== false && !row.seeded) ensureGit(row).catch(() => {})
     return row
   }
   // ensureGit(row) → {ok, step?, error?}: ONE `git init` in flight per row — the claim starts it, the deploy's commit step and
@@ -637,17 +641,20 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         try { await registrar.claim({ slug: r.slug, meta: {}, dir: r.dir }) } catch {}
         emit(`[${r.slug}] refused: ${r.error}`)
       }
+      const seededBuilds = []   // the seeded rows build side by side; the scan settles when every one has (host-ready waits for it on a seeded host)
       for (const app of d.apps) {
         let row = rowBySlug(app.slug)
         if (!row?.claimed) {
           row = await claimFolder(app, row)
           if (!row) continue
         }
+        if (row.seeded) { seededBuilds.push(deployer.seeded(row)); continue }   // the folder is the release (DESIGN §10.3 "seeded rows"): prod built from it, never a dev slot, no watcher
         watchRow(row)
         if (row.prod?.adoptPending) await deployer.adopt(row)
         else if (row.prod?.commit && !row.prod.announced) await deployer.announce(row)   // the boot announce (DESIGN §10.3): the spine learns the prod commit this host holds
         if (needsBuild(row)) rebuild(row)
       }
+      await Promise.all(seededBuilds)
       // boot reconcile (PLAN §4.3): the registrar tombstones rows with no folder on disk — the DISCOVERED
       // folders are its input (a boot row restored from last-good is not a folder); every row it
       // unlinked leaves the table (snapshot kept, served no more)
@@ -683,7 +690,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       }
       if (out.skipped.length) out.complete = false
       for (const row of [...rows.values()]) {
-        if (!row.linked || row.devChrome === held || (store.revision(row.instance)?.chrome ?? null) === held) continue
+        if (!row.linked || row.seeded || row.devChrome === held || (store.revision(row.instance)?.chrome ?? null) === held) continue   // a seeded row has no dev slot to rebuild
         row.devChrome = held   // one dev rebuild per chrome: a failed one is the next save's to retry, not the next beat's
         if (row.dir && row.claimed) { out.dev.push(row.instance); rebuild(row) }
         else { row.attempted = null; row.fingerprint = null }   // a boot row not yet claimed: the first scan rebuilds it (needsBuild reads null as never built)

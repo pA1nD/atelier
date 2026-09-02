@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { config, hostDirs, audit, podIp } from '../index.mjs'
+import { config, hostDirs, audit, podIp, readyAfter } from '../index.mjs'
 import { mountRelative } from '../supervisor/serve.mjs'
 import { unprivileged } from '../adapters/os.mjs'
 
@@ -20,6 +20,10 @@ test('config: defaults are DESIGN §1.2; fleet iff ATELIER_SPINE_URL; dirfd only
   assert.equal(c.appsLinks, false)
   assert.equal(config({ ATELIER_APPS_LINKS: '1' }).appsLinks, true)
   assert.equal(config({ ATELIER_APPS_LINKS: '1', ATELIER_SPINE_URL: 'http://spine:7331' }).appsLinks, false)
+  // ATELIER_SEEDED_APPS (DESIGN §10.3 "seeded rows"): the host-level gate of the seeded road — off unless the image says `1`
+  assert.equal(c.seededApps, false); assert.equal(f.seededApps, false)
+  assert.equal(config({ ATELIER_SEEDED_APPS: '1' }).seededApps, true)
+  assert.equal(config({ ATELIER_SEEDED_APPS: 'true' }).seededApps, false)
 })
 
 test('hostDirs: fleet adds $run (chmod of the 1777 tmpfs), .atelier/tmp, $run/w, the release rows (data-dev, prod, rehearsal, backup) and the chrome cache to the launcher plan; local carries the launcher rows too', () => {
@@ -70,4 +74,20 @@ test('mountRelative: /api/<company>/<slug> is stripped once, query kept, bare mo
 test('podIp: first non-internal IPv4, null without one', () => {
   assert.equal(podIp({ lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }], eth0: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '10.42.0.7', family: 'IPv4', internal: false }] }), '10.42.0.7')
   assert.equal(podIp({ lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] }), null)
+})
+
+test('readyAfter (S1, review 2026-09-02): a normal host writes host-ready at once, its scan not waited for (OR8); a seeded host waits for the first scan to settle — resolved or rejected — and no longer than the bound, so a broken seeded folder still lets the pod come up', async () => {
+  let settle
+  const pending = new Promise((r) => { settle = r })
+  assert.equal(await readyAfter({ seededApps: false }, pending), 'now')
+  const seeded = readyAfter({ seededApps: true }, pending, { timeoutMs: 5000 })
+  let done = false; seeded.then(() => { done = true })
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(done, false, 'waits for the scan')
+  settle(null)
+  assert.equal(await seeded, 'scanned')
+  assert.equal(await readyAfter({ seededApps: true }, Promise.reject(new Error('scan crashed')), { timeoutMs: 5000 }), 'scanned', 'a rejected scan counts as settled')
+  const t0 = Date.now()
+  assert.equal(await readyAfter({ seededApps: true }, new Promise(() => {}), { timeoutMs: 40 }), 'timeout')
+  assert.ok(Date.now() - t0 >= 35 && Date.now() - t0 < 1000)
 })

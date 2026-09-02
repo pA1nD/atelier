@@ -86,15 +86,21 @@ const dev = createDevShell({ cfg, os, supervisor, collector, registrar, principa
 await registrar.register()          // bootstrap → token+epoch (or local identity)
 await supervisor.boot()             // serve every last-good snapshot BEFORE scanning folders
 await server.listen(); await dev.listen()
+const firstScan = supervisor.scan(); watchdog.start(); registrar.heartbeat(10_000)
+await readyAfter(cfg, firstScan)    // a normal host: at once; a seeded host: the first scan, bounded 60 s
 writeSentinel(os, cfg.run + '/host-ready')                           // the kube readiness probe
-supervisor.scan(); watchdog.start(); registrar.heartbeat(10_000)
 process.on('SIGTERM', () => teardown(/* order §2.3 */))
 ```
 
 Boot order is load-bearing (OR8): snapshots are served and `host-ready` written before the first
 folder scan, first build or any spine round trip completes (registration failure = serve
 snapshots, retry registration with backoff, no `host-ready` until the registrar has an epoch
-in fleet mode; local mode has no registrar wait).
+in fleet mode; local mode has no registrar wait). The one exception is a SEEDED host
+(`cfg.seededApps`, §10.3 "seeded rows"): its /work has no last-good at birth and its whole job is
+the folders its image seeds, so `host-ready` follows the first scan — the seeded rows are built
+side by side inside it and the scan settles when every one is LIVE — bounded by
+`SEEDED_READY_MS` (60 s) so a broken seeded folder still lets the pod come up and report; the
+`host: ready` line says which of the two it was.
 
 ### 1.2 Configuration (`config(env)` in `index.mjs`; env only, set by the launcher)
 
@@ -207,7 +213,7 @@ spread from `process.env` anywhere. `SECRETS = [ATELIER_BOOTSTRAP, CHANNEL_TOKEN
 | row | who spawns | argv (before wrapper) | uid:gid / groups | env (exact) | umask | cwd | stdio |
 |---|---|---|---|---|---|---|---|
 | H host | launcher | `node /app/host/index.mjs` | 0:0 / inherited (root's) | pod env minus `SECRETS` minus `CHANNEL_*`, plus `ATELIER_DIRFD=3`, `ATELIER_RUN`, `ATELIER_WORK`, `ATELIER_CONTROL`, `ATELIER_SPINE_URL` (= pod `CHANNEL_URL`), `HOME=/root`, `NODE_ENV=production` | 077 | `/` | `['ignore','inherit','inherit', dirfd]` |
-| S session supervisor | launcher | `node /app/session-supervisor.mjs` | 1000:1000 / `[19999]` via `setpriv --groups` | pod env minus `ATELIER_BOOTSTRAP` (keeps `CHANNEL_TOKEN`, `CHANNEL_URL`, `CHANNEL_CHAT`, `PERSONA*`, `STORY_TEXT`, `TERM`, `LANG`, `ANTHROPIC_*`, `DISABLE_AUTOUPDATER`, `PATH`), plus `HOME=/work` | 022 (it sets 077 itself for its own writes) | `/work` | `['ignore','inherit','inherit']` |
+| S session supervisor | launcher | `node /app/session-supervisor.mjs` | 1000:1000 / `[19999]` via `setpriv --groups` | pod env minus `ATELIER_BOOTSTRAP` (keeps the whole `CHANNEL_*` family by prefix — `CHANNEL_CHAT_KIND` and any member the spine adds reach claude and the door plugin without a launcher change — `PERSONA*`, `STORY_TEXT`, `TERM`, `LANG`, `ANTHROPIC_*`, `DISABLE_AUTOUPDATER`, `PATH`), plus `HOME=/work` | 022 (it sets 077 itself for its own writes) | `/work` | `['ignore','inherit','inherit']` |
 | X control helper | launcher | `sh -c 'cat >> /control/.host-crash'` (stdin = the line) | 1000:1000 / `[]` | `{PATH}` | 077 | `/` | `['pipe','ignore','inherit']` |
 | W worker | host | `node --max-old-space-size=<cap−576 MB, min 256> host/worker/runtime.mjs` (args: none; everything via env + fd 3) | `20000+i` : same / `[]` | `{PATH, NODE_ENV, APP_ID=<instance>, HOME=<scratch>/<inst>/home, HOST, PORT, BASE_URL, ATELIER_WORKER=<json §4.1>}` + the app's spine-held config keys (OR14) | 002 | `/` (the worker `chdir`s to its app dir itself) | `['ignore','pipe','pipe','pipe']` — fd 3 = control lane |
 | I install | host | `npm install --no-audit --no-fund` | `20000+i` : same / `[]` | `{PATH, NODE_ENV, APP_ID, HOME=<scratch>/<inst>/home, npm_config_cache=$HOME/.npm-cache}` | 022 | `<scratch>/<inst>/build` | `['ignore','pipe','pipe']` |
@@ -255,6 +261,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/apps/<slug>` | `1000:<uid> 2750` | agent (mkdir); host round trip §6.2(a) at claim | the worker reads its sources through appgid; peers EACCES |
 | `/work/apps/<slug>/node_modules` | `1000:<uid>` dirs 0750 files 0640 (`|050`/`|040` normalised) | freeze.py | never written by root; installed in scratch, renamed in as uid 1000 |
 | `/work/apps/<slug>/CLAIM-REFUSED.txt` | `1000:1000 0644` | registrar via row G-style uid-1000 write | the only host write into an app folder, as uid 1000, `O_NOFOLLOW`, `wx` |
+| `/work/apps/<slug>/.atelier-seeded` | `1000:1000 0644` | the image's entrypoint (the portal's system host, as uid 1000, beside its own `.image-stamp`) | the folder is a RELEASE (§10.3 "seeded rows") — on a host configured `ATELIER_SEEDED_APPS=1` (the portal-host image's ENV) ONLY: prod is built from it, its content id is the commit, no dev slot, no watcher, no git; on every other host the marker is inert (the agent owns the folder — a file there is a signal, never an authority); a dotfile — ignored by the fingerprint and the content id |
 | `/work/apps/<slug>/.git` | `1000:1000` | git as 1000 (row G) | one commit per RELEASE (`atelier deploy`), one `adopt:` commit for a pre-release row; `.gitignore` (`data/ .env .env.* node_modules/ CLAIM-REFUSED.txt .atelier`) written once, never over the agent's |
 | `/work/.atelier` | `0:0 0711` | launcher | the dirfd root; markers below are `at(dirfd, …)` writes; a worker cannot enumerate its peers' instance ids |
 | `/work/.atelier/agent.log` | `0:1000 0640` | host (`errors/agentlog.mjs`) | agent reads; workers cannot (groups cleared) |
@@ -280,7 +287,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/run/atelier/bootstrap.token` | `0:0 0400` | launcher | read once by the host, exchanged at registration |
 | `/run/atelier/dev.token` | `0:0 0400` | launcher | the host's copy |
 | `/run/atelier/session/` | `1000:1000 0700` | launcher (populated before chown) | `dev.token` `1000:1000 0400` — the agent's copy |
-| `/run/atelier/host-ready` | `0:0 0644` | host after the audit passed and both listeners are up (fleet: after registration) | the kube readiness probe (step 5); unlink + exclusive create (`wx`) — a pre-existing entry is never adopted; unlinked by the launcher on host exit, by the host at teardown and on a host fault |
+| `/run/atelier/host-ready` | `0:0 0644` | host after the audit passed and both listeners are up (fleet: after registration; a seeded host: after its first scan, bounded) | the kube readiness probe (step 5); unlink + exclusive create (`wx`) — a pre-existing entry is never adopted; unlinked by the launcher on host exit, by the host at teardown and on a host fault |
 | `/run/atelier/dev/` | `0:1000 0710` | launcher | |
 | `/run/atelier/dev/shell.sock` | `0:1000 0660` | host (dev shell) | agent connects; workers EACCES |
 | `/run/atelier/w/<inst>/` | `0:<uid> 0730` at spawn → `0710` once the LAST spawn of the instance in flight is READY | host at spawn (`jailPlan`, re-set before every spawn) / `lockSockDir` from the supervisor (`row.spawning` counts the spawns in flight — the dir is shared by the dev, prod and rehearsal workers, so one worker's READY never drops the bit under another's `listen`; drill row 9e found the prod resume doing exactly that to the rehearsal worker) | socket dir: the worker binds, cannot list; after READY it cannot write there either (no filling the `/run/atelier` tmpfs for life) |
@@ -492,7 +499,12 @@ the app folder as the current user and skips freeze (logged).
 - Discovery: a folder under `/work/apps` is an app iff `module.json` parses; names not matching
   `SLUG_RE` (protocol/registry) → `CLAIM-REFUSED.txt` `bad slug`; `_*`, `.*`, `-*`, space-prefixed
   ignored; a folder with `CLAIM-REFUSED.txt` is skipped until the file is deleted. Meta read =
-  `allowMeta(json)`; unknown keys (incl. `visibility`) dropped silently.
+  `allowMeta(json)`; unknown keys (incl. `visibility`) dropped silently. A folder carrying
+  `.atelier-seeded` (`SEEDED_MARKER`) is a seeded row (§10.3) on a host whose config says so
+  (`cfg.seededApps` ← `ATELIER_SEEDED_APPS=1`, set by the portal-host image alone): no watcher, no dev
+  build, no git — the scan hands it to `deployer.seeded` every time. Unconfigured, the marker is inert
+  and the folder is a new folder like any other. `row.seeded` is read at the claim: a marker added to or
+  removed from a claimed folder takes effect at the next host life.
 - Watcher: ONE recursive watch per app folder, exclusion list `node_modules/`, `data/`, `.atelier`,
   dotfiles, `_*`, `package.json`, `package-lock.json`, `CLAIM-REFUSED.txt`; quiescence = two
   fingerprints (path+size+mtime of the non-excluded set) 100 ms apart identical; overflow or
@@ -825,7 +837,7 @@ Deviations from §2.1–§2.2 as built, current state (details in `host/drill/la
 4. **Env rows are explicit key lists** (`scrub` never spreads): H = `PATH LANG LC_ALL TERM TZ ATELIER_*`
    plus the launcher-set keys (`ATELIER_DIRFD=3`, `ATELIER_RUN/WORK/CONTROL`, `ATELIER_SPINE_URL` =
    pod `CHANNEL_URL`, `HOME=/root`, `NODE_ENV=production`); S = `PATH LANG LC_ALL TERM TZ CHAT_ID PERSONA*
-   STORY_TEXT CHANNEL_URL CHANNEL_TOKEN CHANNEL_CHAT ANTHROPIC_* DISABLE_AUTOUPDATER HORSE_BROWSER_*
+   STORY_TEXT CHANNEL_* ANTHROPIC_* DISABLE_AUTOUPDATER HORSE_BROWSER_*
    FLEET_EGRESS* PIP_USER NPM_CONFIG_PREFIX` plus `HOME=/work` (what k8s.ts `buildSessionPod` and the
    Containerfile set); X = `PATH`. `ATELIER_BOOTSTRAP` is never copied by `scrub` under any list. The
    adapter's `sh -c` wrapper adds `PWD`, `SHLVL`, `_` to every child.
@@ -1240,6 +1252,40 @@ before (the bundle from the rev dir, static files and `createRequire` from the f
 onto an export; the `prod` block is the idempotence marker across restarts. At every boot the host re-announces the
 prod commit it holds to the spine (`adopt-<c12>`, skipped when the register reply already carries that
 `deployed_rev`) so a migrated registry (`deployed_rev = "legacy"`) converges.
+
+**Seeded rows** (`supervisor/deploy.mjs seeded`; the 2026-09-02 incident). The portal's SYSTEM host seeds `home` and
+`catalyst-chrome` into `/work/apps` from its image at every boot and marks each folder `.atelier-seeded` (discovery's
+`SEEDED_MARKER`). The road is opened by the HOST's configuration — `ATELIER_SEEDED_APPS=1`, an ENV of the portal-host
+image that no session pod carries — and the marker only says which folders: the agent owns `/work/apps`, so a file it
+can `touch` must never carry release authority (it would mint a PROD row past the gate, the rehearsal, the backup and
+git); on an agent host the marker is inert and the folder boots dev-only as before. Configured, such a folder IS the release: nobody edits it, the pod has no git (`ATELIER_GIT_COMMIT=0`, git purged from
+the image) and `/work` is an emptyDir — so it never takes the new-folder road (dev-only until a first deploy that never
+comes; D18 then idle-stopped the dev worker ten minutes after boot and the shell's `/modules/portal/catalyst-chrome/*`
+answered 404 for every signed-in user). Instead the first scan builds the three artefacts from the folder into a new rev,
+starts the PROD worker at once (load-beside on a re-seed), records `prod = {rev, commit, legacy: true, chrome}` +
+`current`, fires `onSwap` (the registry's `rev`, the invalidate) and posts ONE `{kind:'adopt', id: adopt-<c12>}` row. The
+commit is the folder's CONTENT id — `watcher.mjs treeId`, sha256 over the fingerprint's set PLUS the manifests
+(`package.json`/lockfile: a re-seed that bumps only a dependency is a new rev; dotfiles, `data/`, `node_modules/`, `_*`
+and `CLAIM-REFUSED.txt` are out) as `<rel>\0<bytes>\0` in path order cut to 40 hex: the same image bytes give the same
+id on every boot (mtimes, which every `cp` rewrites, do not move it), so the spine replays the id and `deployed_rev`
+converges from `legacy`. No dev slot, no watcher, no `.git`: the
+folder is served in the legacy shape (bundle from the rev dir, static files and `createRequire` from the folder); prod
+keeps the R14 idle rule (resume on the next request, requests held; the bundle and the folder's static files answer from the
+rev dir and the folder while the worker is stopped — `asset()` never dials it, so the document's JS/CSS cannot 404; a resume
+that THROWS answers `503 {error: 'app not ready'}` without the waking header — a hard error the shell shows, not a retry loop
+on a worker that cannot load) — nothing D18 can stop. Every scan recomputes the
+id: equal → the boot announce only (a spine that refused or was unreachable is asked again; `announced` is not set by the
+seeded build itself); different (a re-seed over a kept `/work`) → a new rev the same way, the old worker retired
+`swapStopMs` after the swap. Two failure classes: the FOLDER's answer (its `module.json`, a build problem, a backend that
+fails to load) is one rev and one report until its bytes change (the §6.1 sweep rule) — a FIRST seeded build that failed
+leaves the row with no prod slot (404 `not deployed`) rather than a slot nothing can resume, a failed re-seed leaves the
+old worker serving; a HOST-SIDE failure (the rev counter, the snapshot store, a spawn EAGAIN, the jail, the record) is
+retried at every scan and reported once per (bytes, reason). Every read of the folder holds the app's gid (§6.2): on the pod
+it is `1000:<uid> 2750` after the claim and the host has no DAC_OVERRIDE — an ungrouped `module.json` read is EACCES and
+reads as "missing" (the outage, reproduced by its own first fix; drill row 9s pins it on the real pod). A re-seed's new
+worker is started BESIDE the old one against the same `data/<inst>` — a named exception to D13 (prod never overlaps) for
+a folder nobody deploys to, with `build()`'s one-shot MOUNT-ERROR retry (stop the old worker, start once more).
+A normal agent folder is untouched by all of this. Test: `supervisor-seeded.test.js`.
 
 **The socket dir under two spawns.** `w/<inst>` is one dir for the dev, prod and rehearsal sockets; its write bit is
 opened before every bind and dropped after READY — by the supervisor when `row.spawning` (spawns of the instance in
