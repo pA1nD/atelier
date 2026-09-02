@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { release, bundleChrome, parseArgs, rewriteFontUrls, relativeUrls, payloadFor } from '../chrome.js'
+import { release, bundleChrome, parseArgs, rewriteFontUrls, relativeUrls, sheetImports, payloadFor } from '../chrome.js'
 import { chromeDigestOf, sha256Hex, DIGEST_RE } from '../protocol/registry.js'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -77,6 +77,13 @@ test('bundleChrome refuses a styles.css whose relative url() names a path the bu
   fs.writeFileSync(path.join(d2, 'x.css'), '.x{color:red}\n')
   fs.writeFileSync(path.join(d2, 'frontend.jsx'), `import React from 'react'\nimport './x.css'\nexport function chrome() { return <div /> }\n`)
   await assert.rejects(bundleChrome(d2), /Cannot import "x\.css" into a JavaScript file without an output path/)
+  // N6: one sheet — a host compiles the bundle's styles.css where only the bundle is, so a local @import (or a package other
+  // than tailwindcss) that resolves here can never resolve there; refused at publish time
+  assert.deepEqual(sheetImports(`@import 'tailwindcss';\n@import "./parts/rail.css" layer(x);\n@import url(../tokens.css);\n@import url("tailwindcss/utilities.css");\n@import tw-animate-css;`), ['tailwindcss', './parts/rail.css', '../tokens.css', 'tailwindcss/utilities.css', 'tw-animate-css'])
+  const d3 = chromeDir(path.join(root, 'three'))
+  fs.mkdirSync(path.join(d3, 'parts')); fs.writeFileSync(path.join(d3, 'parts', 'rail.css'), '.rail { display: flex }\n')
+  fs.writeFileSync(path.join(d3, 'styles.css'), `@import 'tailwindcss';\n@import './parts/rail.css';\n@import "tailwindcss/theme.css";\n`)
+  await assert.rejects(bundleChrome(d3), /styles\.css imports \.\/parts\/rail\.css — the bundle carries one sheet/)
 })
 
 test('release(): the payload {version, changelog, agent_notes, breaking, notice, digest, files:{path: base64}} written to --out and nowhere else; --digest re-releases without files; the argument rules', async () => {

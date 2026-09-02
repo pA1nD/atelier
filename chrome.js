@@ -7,11 +7,12 @@
  *
  * Builds the bundle the fleet serves by digest — `frontend.js` + `kit.js` (esbuild exactly as the host's dev shell and
  * portal/host/vendor.sh: one file each, react* aliased to atelier's shims, nothing left external), `styles.css` (the
- * chrome's sheet SOURCE, every font url rewritten to `fonts/…`), `chrome.css` (the chrome-only compiled sheet,
+ * chrome's sheet SOURCE — one sheet, `@import 'tailwindcss'` alone; every font url rewritten to `fonts/…`), `chrome.css` (the chrome-only compiled sheet,
  * host/supervisor/tailwind.mjs buildSheet over the chrome alone — an app-less document's sheet) and `fonts/*.woff2` —
  * computes the digest (protocol/registry.js: sha256 over the sorted `<path>\n<sha256(bytes)>\n` lines) and writes the
  * release payload `{version, changelog, agent_notes, breaking, notice, digest, files:{path: base64}}` to `--out`.
- * No network: ops/chrome-release.sh ships the payload to the spine's loopback door (`POST /v1/chromes`) over ssh.
+ * No network: design/atelier2/ops/chrome-release.sh (the fleet's ops folder, beside postdeploy-e2e.sh) ships the payload
+ * to the spine's loopback door (`POST /v1/chromes`) over ssh.
  * Deterministic: the same dir twice is the same digest (esbuild and tailwind are pinned exact; the chrome's sources are
  * walked in name order). Across MACHINES the digest also depends on @tailwindcss/oxide's native build — the publishing
  * machine's digest is authoritative, every consumer verifies against it, and a rollback re-releases by `--digest`.
@@ -75,6 +76,12 @@ export function relativeUrls(css) {
   return [...out]
 }
 
+// sheetImports(css) → the @import targets of a sheet, in order (quoted, url()'d or bare)
+export function sheetImports(css) {
+  return [...String(css).matchAll(/@import\s+(?:url\(\s*)?(['"]?)([^'")\s;]+)\1/g)].map((m) => m[2])
+}
+const TAILWIND_IMPORT = (id) => id === 'tailwindcss' || id.startsWith('tailwindcss/')
+
 const exists = (p) => { try { return fs.statSync(p).isFile() } catch { return false } }
 
 // bundleChrome(dir, {shims, log}) → {files: Map<path, Buffer>, shas, digest, notes}
@@ -107,6 +114,11 @@ export async function bundleChrome(dir, { shims = path.join(HERE, 'shims'), log 
   const sheetPath = path.join(src, 'styles.css')
   if (!exists(sheetPath)) throw new Error(`no styles.css in ${dir}`)
   const source = rewriteFontUrls(fs.readFileSync(sheetPath, 'utf8'))
+  // one sheet: a host compiles the bundle's styles.css in a dir holding only the bundle (styles.css + fonts/; `tailwindcss`
+  // from the host's own copy), so an @import of anything else cannot resolve after release — refused here, not on every
+  // host at every beat (N6; the url() rebase in host/supervisor/tailwind.mjs is on the source for the same reason)
+  const foreign = sheetImports(source).filter((id) => !TAILWIND_IMPORT(id))
+  if (foreign.length) throw new Error(`styles.css imports ${foreign.join(', ')} — the bundle carries one sheet (only @import 'tailwindcss' or 'tailwindcss/…' resolves on a host)`)
   files.set('styles.css', Buffer.from(source))
   // 3. fonts/*.woff2
   const fontsDir = path.join(src, 'fonts')
