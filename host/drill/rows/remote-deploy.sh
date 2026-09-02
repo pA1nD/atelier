@@ -246,7 +246,10 @@ log "row 9e: export node_modules inodes not root-owned: $NMF; not group $DUID: $
 [ "$NMF" = 0 ] && [ "$NMG" = 0 ] && [ "$NMS" = 0 ] || rowfail 9e "the export's node_modules is not 0:$DUID |040/|050"
 X "$AS_DWORKER test -r $DEXP/node_modules/better-sqlite3/package.json" || rowfail 9e "the worker uid cannot read the export's node_modules"
 X "$AS1000 test -d /work/apps/deps/node_modules/better-sqlite3" || rowfail 9e "the dev tree lost its node_modules (take must never thaw)"
-X "$AS1000 test -s $DEXP/package-lock.json" || rowfail 9e "no package-lock.json in the export"
+# the lock lands in the export by `freeze.py --dest` (copied from build/ as 0:<uid> 0640) — read as ROOT: the export is EACCES to uid 1000 by design (row 9a)
+LOCK=$(X "stat -c '%a %u:%g %s' $DEXP/package-lock.json 2>&1" | tr -d '\r\n'); log "row 9e: export package-lock.json: $LOCK (want 640 0:$DUID <size>)"
+echo "$LOCK" | grep -q "^640 0:$DUID [1-9]" || rowfail 9e "no package-lock.json in the export as 0:$DUID 0640: $LOCK"
+X "$AS_DWORKER test -r $DEXP/package-lock.json" || rowfail 9e "the worker uid cannot read the export's package-lock.json"
 P "cd /code && node host/drill/step2/signer.mjs GET http://$IP:1845/api/acme/deps/deps --app $DINST" > $OUT/prod-deps.txt; sed 's/^/    | prod: /' $OUT/prod-deps.txt
 grep -q '^STATUS 200' $OUT/prod-deps.txt && grep -q '"sqlite":42' $OUT/prod-deps.txt && grep -q '"loot":"1.0.0"' $OUT/prod-deps.txt && grep -q '"corejs":"ok"' $OUT/prod-deps.txt && grep -q "\"cwd\":\"$DEXP\"" $OUT/prod-deps.txt || rowfail 9e "the prod worker did not resolve its deps from the export: $(tail -1 $OUT/prod-deps.txt | head -c 200)"
 fi
