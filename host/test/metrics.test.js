@@ -204,30 +204,40 @@ test('the events lane records the size of every push; the watchdog counts a trip
 
 test('save→verdict: the clock runs from the watcher quiescence to LIVE and to the app-error; a scan-driven build is no save', async () => {
   const metrics = createMetrics()
-  const w = world()
+  const w = world({ gitCommit: true })
   const dir = w.app('alpha', { 'module.json': APP_JSON('Alpha'), 'backend.js': BACKEND(1), 'frontend.jsx': FRONTEND(1), 'card.jsx': CARD })
   const sup = w.make({ metrics })
   try {
     await sup.scan()
-    const row = await waitFor(() => { const r = sup.resolve('acme', 'alpha'); return r?.state === 'live' ? r : null })
+    const row = await waitFor(() => { const r = sup.resolve('acme', 'alpha'); return r?.dev_state === 'live' ? r : null })
     assert.equal(value(metrics.exposition(), 'atelier_host_save_verdict_ms_count{app="alpha",outcome="live"}'), null, 'the first build comes from the scan, not from a save')
 
     fs.writeFileSync(path.join(dir, 'backend.js'), BACKEND(2))
-    await waitFor(() => sup.resolve('acme', 'alpha').rev === 2)
+    await waitFor(() => sup.resolve('acme', 'alpha').dev_rev === 2)
     let text = metrics.exposition()
     assert.equal(value(text, 'atelier_host_save_verdicts_total{app="alpha",outcome="live"}'), 1)
     assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="alpha",outcome="live"}'), 1)
     assert.ok(value(text, 'atelier_host_save_verdict_last_ms{app="alpha",outcome="live"}') >= 0, 'a real duration')
+
+    // the deploy row: one green release → one sample and one count under outcome="green"
+    const v = await sup.deploy(row.instance, { message: 'metrics release' })
+    assert.equal(v.outcome, 'green')
+    text = metrics.exposition()
+    assert.equal(value(text, 'atelier_host_deploy_total{app="alpha",outcome="green"}'), 1)
+    assert.equal(value(text, 'atelier_host_deploy_ms_count{app="alpha",outcome="green"}'), 1)
+    assert.ok(value(text, 'atelier_host_deploy_last_ms{app="alpha",outcome="green"}') >= 0)
 
     fs.writeFileSync(path.join(dir, 'backend.js'), 'export default { mountRoutes( {{{\n')
     await waitFor(() => value(metrics.exposition(), 'atelier_host_save_verdicts_total{app="alpha",outcome="error"}') === 1)
     text = metrics.exposition()
     assert.equal(value(text, 'atelier_host_save_verdict_ms_count{app="alpha",outcome="error"}'), 1, 'a failed save reaches a verdict too, and lands in its OWN series')
     assert.ok(w.reports.some((r) => r.kind === 'build'))
-    assert.equal(sup.resolve('acme', 'alpha').rev, 2, 'users stay on the last good rev')
-
-    // the respawn counter: kill() climbs the crash ladder, and every rung is one restart
-    sup.kill(row.instance, 'metrics drill')
+    assert.equal(sup.resolve('acme', 'alpha').dev_rev, 2, 'the dev slot stays on the last good rev')
+    // a red deploy (the broken tree rehearsed) lands under outcome="red"; prod untouched
+    assert.equal((await sup.deploy(row.instance, { message: 'broken' })).outcome, 'red')
+    assert.equal(value(metrics.exposition(), 'atelier_host_deploy_total{app="alpha",outcome="red"}'), 1)
+    // the respawn counter: kill() of the PROD worker climbs the crash ladder, and every rung is one restart
+    sup.kill(row.instance, 'metrics drill', 'prod')
     assert.equal(value(metrics.exposition(), 'atelier_host_worker_restarts_total{app="alpha"}'), 1)
   } finally { await w.done(sup) }
 })
@@ -239,23 +249,23 @@ test('the Tailwind row is cold once per app then warm; a resume from the snapsho
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(chrome, 'node_modules'))
   const w = world({ chromeDir: chrome })
   const dir = w.app('beta', { 'module.json': APP_JSON('Beta'), 'backend.js': BACKEND(1), 'frontend.jsx': FRONTEND(1), 'card.jsx': CARD })
-  const sup = w.make({ metrics, timing: { idleMs: 200 } })
+  const sup = w.make({ metrics, timing: { idleMs: 200, devIdleMs: 200 } })
   try {
     await sup.scan()
-    await waitFor(() => { const r = sup.resolve('acme', 'beta'); return r?.state === 'live' ? r : null })
+    await waitFor(() => { const r = sup.resolve('acme', 'beta'); return r?.dev_state === 'live' ? r : null })
     assert.equal(value(metrics.exposition(), 'atelier_host_tailwind_build_ms_count{app="beta",phase="cold"}'), 1)
     assert.equal(value(metrics.exposition(), 'atelier_host_tailwind_build_ms_count{app="beta",phase="warm"}'), null)
 
     fs.writeFileSync(path.join(dir, 'frontend.jsx'), FRONTEND(2))
-    await waitFor(() => sup.resolve('acme', 'beta').rev === 2)
+    await waitFor(() => sup.resolve('acme', 'beta').dev_rev === 2)
     const text = metrics.exposition()
     assert.equal(value(text, 'atelier_host_tailwind_build_ms_count{app="beta",phase="cold"}'), 1, 'cold is this app\'s first sheet of the host life, never again')
     assert.equal(value(text, 'atelier_host_tailwind_build_ms_count{app="beta",phase="warm"}'), 1)
 
-    // BACKEND() holds nothing after mount → idle-stopped, then resumed by the next request
-    await waitFor(() => sup.resolve('acme', 'beta').state === 'stopped')
+    // the dev worker idle-stops after devIdleMs (D18), then is resumed by the next dev request
+    await waitFor(() => sup.resolve('acme', 'beta').dev_state === 'stopped')
     const x = fakeExchange('GET', '/rev')
-    await sup.handle(sup.resolve('acme', 'beta'), x.req, x.res, { id: 'p1' })
+    await sup.handle(sup.resolve('acme', 'beta'), x.req, x.res, { id: 'p1' }, { slot: 'dev' })
     assert.equal((await x.finished).status, 200)
     const after = metrics.exposition()
     assert.equal(value(after, 'atelier_host_worker_resume_ms_count{app="beta"}'), 1)

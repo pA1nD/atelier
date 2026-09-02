@@ -10,6 +10,7 @@ import path from 'node:path'
 import http from 'node:http'
 import { unprivileged } from '../adapters/os.mjs'
 import { createSupervisor } from '../supervisor/index.mjs'
+import { runHook } from '../worker/hook.mjs'
 
 export const RUNTIME_SRC = `
 import http from 'node:http'
@@ -31,6 +32,7 @@ const resources = {}
 for (const r of process.getActiveResourcesInfo()) if (r !== 'PipeWrap') resources[r] = (resources[r] || 0) + 1   // stdio pipes + the IPC server excluded
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
+  if (url.pathname === '/_atelier/health') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ rev: spec.rev, uptime: 1 })) }
   const r = routes.find(([m, p]) => (m === '*' || m === req.method) && p === url.pathname)
   const rs = { json: (d, s = 200) => { res.writeHead(s, { 'content-type': 'application/json', 'x-rev': String(spec.rev) }); res.end(JSON.stringify(d)) } }
   if (!r) return rs.json({ error: 'no route' }, 404)
@@ -109,22 +111,27 @@ export function proxyRequest({ sock, req, res, user }) {
   })
 }
 
-// A world: work/apps + .atelier under a short tmp root (macOS socket path cap), a fake registrar, a recording report.
+// A world: work/apps + .atelier under a short tmp root (macOS socket path cap), a fake registrar (with the
+// release row + config stamp seams of DESIGN §10.3), a recording report. `gitCommit` (default false) turns
+// the row G git steps on — the deploy tests need them (a real `git` on this machine).
 export function world({ chromeDir = null, timing = {}, gitCommit = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join('/tmp', 'sup-')))
   const work = path.join(root, 'work'), run = path.join(root, 'run')
   fs.mkdirSync(path.join(work, 'apps'), { recursive: true })
-  fs.mkdirSync(path.join(work, '.atelier', 'last-good'), { recursive: true })
+  for (const d of ['last-good', 'data', 'data-dev', 'prod', 'rehearsal', 'backup', 'tmp']) fs.mkdirSync(path.join(work, '.atelier', d), { recursive: true })
   fs.mkdirSync(run, { recursive: true })
   const runtime = writeRuntime(root)
   const groups = []   // every os.setgroups() call (the §6.2 app-group rule: [uid] around folder reads, [] after)
   const osx = { ...unprivileged(), setgroups: (g) => { groups.push([...g]); return { skipped: true } } }
   const dirfd = osx.openDir(path.join(work, '.atelier'))
-  const reports = [], lines = [], swaps = []
+  const reports = [], lines = [], swaps = [], devSwaps = [], releases = [], modules = []
   let nextUid = 20001, nextInst = 1
   const claims = new Map()   // slug → {instance, uid}
   const registrar = {
-    company: 'acme', origin: 'http://127.0.0.1:1844', served: () => {}, unlinked: [],
+    company: 'acme', origin: 'http://127.0.0.1:1844', served: () => {}, unlinked: [], releaseImpl: null,
+    async modulesChanged(instance, rev) { modules.push([instance, rev]); return { ok: true } },
+    // the spine's release door (Lane R's seam): records the row; `releaseImpl` lets a test answer 404/5xx (never blocks)
+    async release(row) { releases.push(row); return registrar.releaseImpl ? registrar.releaseImpl(row) : { ok: true, id: row.id } },
     async claim({ slug }) {
       if (!/^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(slug)) return { refused: { code: 400, error: 'bad-slug' } }
       if (slug === 'taken') return { refused: { code: 409, error: 'claimed by c-2' } }
@@ -138,14 +145,28 @@ export function world({ chromeDir = null, timing = {}, gitCommit = false } = {})
     async reconcile(rows) { registrar.reconcileCalls.push(rows); return registrar.reconcileImpl ? registrar.reconcileImpl(rows) : { unlinked: [] } },
   }
   const make = (extra = {}) => createSupervisor({
-    os: osx, dirfd, cfg: { work, run, chromeDir, gitCommit, company: 'acme' }, log: (l) => lines.push(l),
+    os: osx, dirfd, cfg: { work, run, chromeDir, gitCommit, gitHome: root, company: 'acme' }, log: (l) => lines.push(l),
     report: (kind, instance, rev, detail) => reports.push({ kind, instance, rev, ...detail }),
-    registrar, onSwap: (instance, rev) => swaps.push([instance, rev]),
-    spawn: makeSpawn(runtime), proxy: proxyRequest, timing: { quiesceMs: 40, swapStopMs: 100, drainMs: 1000, ...timing }, ...extra,
+    registrar, onSwap: (instance, rev) => { swaps.push([instance, rev]); registrar.modulesChanged(instance, rev) }, onDevSwap: (instance, rev) => devSwaps.push([instance, rev]),
+    spawn: makeSpawn(runtime), proxy: proxyRequest, hook: runHook, hostEnv: process.env,
+    timing: { quiesceMs: 40, swapStopMs: 100, drainMs: 1000, ...timing }, ...extra,
   })
   const app = (slug, files) => { const d = path.join(work, 'apps', slug); fs.mkdirSync(d, { recursive: true }); for (const [f, c] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(d, f)), { recursive: true }); fs.writeFileSync(path.join(d, f), c) } return d }
   const done = async (sup) => { try { await sup?.teardown() } catch {} try { osx.closeFd(dirfd) } catch {} fs.rmSync(root, { recursive: true, force: true }) }
-  return { root, work, run, osx, dirfd, registrar, reports, lines, swaps, groups, make, app, done, claims }
+  return { root, work, run, osx, dirfd, registrar, reports, lines, swaps, devSwaps, releases, modules, groups, make, app, done, claims }
+}
+
+// api(sup, row, url, {slot}) → {status, headers, body} through sup.handle; the dev slot by default (what a save
+// serves); `prod` = what the company's shell reaches. deploy(sup, row, opts) → the verdict (+ the step lines).
+export async function api(sup, row, url, { slot = 'dev', user = { id: 'p1', name: 'Pat' }, method = 'GET' } = {}) {
+  const x = fakeExchange(method, url)
+  await sup.handle(row, x.req, x.res, user, { slot })
+  return x.finished
+}
+export async function deploy(sup, row, { message, ...opts } = {}) {
+  const steps = []
+  const v = await sup.deploy(row.instance, { message: message ?? (opts.commit ? undefined : 'a release'), onStep: (l) => steps.push(l), ...opts })
+  return { ...v, steps: steps.filter((l) => l.t === 'step') }
 }
 
 // A fake http exchange for sup.handle(): returns {status, headers, body}

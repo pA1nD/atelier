@@ -22,11 +22,11 @@ test('config: defaults are DESIGN §1.2; fleet iff ATELIER_SPINE_URL; dirfd only
   assert.equal(config({ ATELIER_APPS_LINKS: '1', ATELIER_SPINE_URL: 'http://spine:7331' }).appsLinks, false)
 })
 
-test('hostDirs: fleet adds $run (chmod of the 1777 tmpfs), .atelier/tmp and $run/w to the launcher plan; local carries the launcher rows too', () => {
+test('hostDirs: fleet adds $run (chmod of the 1777 tmpfs), .atelier/tmp, $run/w and the release rows (data-dev, prod, rehearsal, backup) to the launcher plan; local carries the launcher rows too', () => {
   const cfg = { work: '/w', run: '/r' }
-  assert.deepEqual(hostDirs(cfg, { local: false }), [['/r', 0o711], ['/w/.atelier/tmp', 0o711], ['/r/w', 0o711]])
+  assert.deepEqual(hostDirs(cfg, { local: false }), [['/r', 0o711], ['/w/.atelier/tmp', 0o711], ['/r/w', 0o711], ['/w/.atelier/data-dev', 0o711], ['/w/.atelier/prod', 0o711], ['/w/.atelier/rehearsal', 0o711], ['/w/.atelier/backup', 0o711]])
   const local = hostDirs(cfg, { local: true }).map(([p]) => p)
-  assert.deepEqual(local, ['/w/.atelier', '/w/.atelier/data', '/w/.atelier/last-good', '/w/.atelier/scratch', '/w/apps', '/r', '/r/dev', '/r/session', '/r', '/w/.atelier/tmp', '/r/w'])
+  assert.deepEqual(local, ['/w/.atelier', '/w/.atelier/data', '/w/.atelier/last-good', '/w/.atelier/scratch', '/w/apps', '/r', '/r/dev', '/r/session', '/r', '/w/.atelier/tmp', '/r/w', '/w/.atelier/data-dev', '/w/.atelier/prod', '/w/.atelier/rehearsal', '/w/.atelier/backup'])
 })
 
 test('audit: a world-readable token, .claude, control, last-good/<inst> or data/<inst> is listed; the tight tree is clean', () => {

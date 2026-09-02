@@ -141,6 +141,24 @@ test('unprivileged(): npm runs in the app folder as the current user, no scratch
   assert.match(lines[0], /unprivileged .* freeze skipped/)
 })
 
+test('dest (DESIGN §10.3 D8): the prod export install — the manifest copy reads the export as the worker, the freeze lands the tree there with `--dest <rel>` (root-owned, no agent step)', async () => {
+  const state = { fs: {}, fds: new Map([[3, '/work/.atelier']]) }
+  const order = []
+  const os = driven(state, (argv) => { const k = kind(argv); order.push(k); if (k === 'freeze:thaw') return { code: 0, stdout: 'FREEZE-OK thaw demo files=0 noop=1 total_ms=0.3' }; if (k === 'freeze:freeze') return { code: 0, stdout: 'FREEZE-OK freeze demo killed=0 files=120 chown_ms=3.1 rename_ms=0.4 total_ms=5.0' } })
+  const exportSpec = { ...spec, appDir: '/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp' }
+  const r = await installDeps({ os, dirfd: 3, spec: exportSpec, hostEnv, log: () => {}, dest: 'prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp' })
+  assert.deepEqual(r, { ok: true, ms: 0, files: 120 })
+  assert.deepEqual(order, ['freeze:thaw', 'cp', 'npm', 'freeze:freeze'])
+  const spawns = state.calls.filter((c) => c[0] === 'spawn').map((c) => ({ argv: c[1], spec: c[2] }))
+  assert.deepEqual(spawns[1].spec.argv.slice(-2), ['/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp', `${SCRATCH}/build`])
+  assert.equal(spawns[1].spec.uid, 20001, 'the manifest copy reads the 0:<uid> export as the worker')
+  assert.deepEqual(spawns[3].argv.slice(-9), ['freeze', 'i-0123456789abcdef', 'demo', '20001', '20001', '--dirfd', '3', '--dest', 'prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp'])
+  assert.deepEqual(spawns[3].spec.stdio, ['ignore', 'pipe', 'pipe', 3])
+  assert.equal(spawns[3].spec.uid, 0)
+  // no dest → no --dest (the dev install)
+  assert.deepEqual(freezeSpec('freeze', spec, { dirfd: 3, hostEnv }).argv.slice(-2), ['--dirfd', '3'])
+})
+
 test('parseFreeze / npmSpec / copyManifestSpec / freezeSpec (pure)', () => {
   assert.deepEqual(parseFreeze('noise\nFREEZE-OK freeze demo killed=1 files=10 chown_ms=2.5\n'), { ok: true, mode: 'freeze', stats: { killed: 1, files: 10, chown_ms: 2.5 } })
   assert.deepEqual(parseFreeze('FREEZE-ABORT thaw demo: open build: Permission denied errno=13'), { ok: false, mode: 'thaw', reason: 'open build: Permission denied errno=13' })
@@ -163,8 +181,12 @@ test('freeze.py: compiles, refuses an unknown mode, refuses a missing scratch un
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const fd = fs.openSync(root, 'r')
   const nos = spawnSync('python3', [FREEZE_PATH, 'freeze', 'i-x', 'demo', '20001', '20001', '--dirfd', '3'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', fd] })
-  fs.closeSync(fd)
   assert.equal(nos.status, 2, nos.stderr)
   assert.match(nos.stdout.trim(), /^FREEZE-ABORT freeze demo: open scratch: .*errno=2$/)
   assert.deepEqual(parseFreeze(nos.stdout), { ok: false, mode: 'freeze', reason: nos.stdout.trim().replace(/^FREEZE-ABORT freeze demo: /, '') })
+  // --dest must be dirfd-relative: an absolute or `..` path is refused before anything is opened
+  fs.mkdirSync(path.join(root, 'scratch'))
+  const badDest = spawnSync('python3', [FREEZE_PATH, 'freeze', 'i-x', 'demo', '20001', '20001', '--dirfd', '3', '--dest', '../etc'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', fd] })
+  fs.closeSync(fd)
+  assert.equal(badDest.status, 2); assert.equal(badDest.stdout.trim(), 'FREEZE-ABORT freeze demo: dest must be dirfd-relative: ../etc')
 })

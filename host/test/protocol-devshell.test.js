@@ -159,7 +159,8 @@ test('app routes are the supervisor’s (same functions as the protocol port): /
     assert.equal(res.status, 200)
     const j = JSON.parse(res.body.toString())
     assert.deepEqual(j.user, { id: 'p-agent', name: 'Bayard', claims: {} }); assert.equal(j.url, '/api/acme/todo/items?x=1'); assert.equal(j.bytes, 5)
-    assert.deepEqual(r.registrar.servedList, ['i-0123456789abcdef'])
+    assert.deepEqual(r.supervisor.handled.at(-1).slot, 'dev', 'the dev shell serves the DEV slot (D3)')
+    assert.deepEqual(r.registrar.servedList, [], 'a dev request is not a served app (the heartbeat counts the company\'s road only)')
     // the dev token in the URL never reaches the worker: stripped before supervisor.handle, the rest of the query kept
     res = await request(t, { method: 'POST', path: '/api/acme/todo/items?token=dev-secret&x=1&y=2', body: 'hi' })
     assert.equal(res.status, 200)
@@ -179,6 +180,56 @@ test('app routes are the supervisor’s (same functions as the protocol port): /
   } finally { await r.dev.close() }
 })
 
+test('the release verbs (D6): POST /_atelier/deploy streams NDJSON step lines + ONE verdict; 401 without the token, 404 unknown app (slug or instance), 409 in progress, 400 no message; rollback = commit; restore; the two lists', async () => {
+  const r = rig()
+  await r.dev.listen()
+  try {
+    const t = { socketPath: r.sock }
+    const post = (p, body, headers = tok) => request(t, { method: 'POST', path: p, headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const lines = (res) => res.body.toString().trim().split('\n').map((l) => JSON.parse(l))
+    assert.equal((await post('/_atelier/deploy', { app: 'todo', message: 'x' }, {})).status, 401)
+    let res = await post('/_atelier/deploy', { app: 'nope', message: 'x' })
+    assert.equal(res.status, 404); assert.deepEqual(JSON.parse(res.body.toString()), { error: 'unknown app' })
+    res = await post('/_atelier/deploy', { app: 'todo' })
+    assert.equal(res.status, 400)
+    res = await post('/_atelier/deploy', { app: 'todo', message: 'first release' })
+    assert.equal(res.status, 200); assert.equal(res.headers['content-type'], 'application/x-ndjson; charset=utf-8'); assert.equal(res.headers['cache-control'], 'no-store')
+    let ls = lines(res)
+    assert.deepEqual(ls.map((l) => l.t), ['step', 'step', 'verdict'])
+    assert.equal(ls.at(-1).outcome, 'green'); assert.equal(ls.at(-1).slug, 'todo'); assert.equal(ls.at(-1).rev, 4)
+    assert.deepEqual(r.supervisor.verbs.at(-1), { verb: 'deploy', instance: 'i-0123456789abcdef', message: 'first release', commit: null, noBackup: false, by: 'agent:p-agent' })
+    // by the instance id too; the act-as header names the principal
+    res = await post('/_atelier/deploy', { app: 'i-fedcba9876543210', message: 'x', noBackup: true }, { ...tok, 'x-atelier-user': 'p9' })
+    assert.equal(res.status, 200); assert.equal(r.supervisor.verbs.at(-1).by, 'agent:p9'); assert.equal(r.supervisor.verbs.at(-1).noBackup, true)
+    // rollback = the same verb with a commit
+    res = await post('/_atelier/deploy', { app: 'todo', commit: '0f3c9a1b2d4e' })
+    assert.equal(lines(res).at(-1).kind, 'rollback'); assert.equal(r.supervisor.verbs.at(-1).commit, '0f3c9a1b2d4e')
+    // 409 while one runs
+    r.supervisor.rows[0].deploying = true
+    res = await post('/_atelier/deploy', { app: 'todo', message: 'again' })
+    assert.equal(res.status, 409); assert.deepEqual(JSON.parse(res.body.toString()), { error: 'deploy in progress' })
+    r.supervisor.rows[0].deploying = false
+    // a scripted red verdict reaches the stream as the last line
+    r.supervisor.rows[0].script = { t: 'verdict', outcome: 'red', kind: 'deploy', slug: 'todo', rev: 3, commit: 'c'.repeat(40), step: 'hook', error: 'exit 1' }
+    ls = lines(await post('/_atelier/deploy', { app: 'todo', message: 'broken' }))
+    assert.deepEqual(ls.at(-1), r.supervisor.rows[0].script)
+    // restore
+    res = await post('/_atelier/restore', { app: 'todo', backup: '20260902T104702Z-rev3-0f3c9a1b2d4e' })
+    assert.equal(res.status, 200); assert.equal(lines(res).at(-1).kind, 'restore'); assert.equal(r.supervisor.verbs.at(-1).backup, '20260902T104702Z-rev3-0f3c9a1b2d4e')
+    assert.equal((await post('/_atelier/restore', { app: 'todo', backup: '../x' })).status, 404)
+    // the lists
+    r.supervisor.rows[0].releases = [{ id: 'r-1', kind: 'deploy', verdict: 'green', rev: 3, commit: 'c'.repeat(40), message: 'first', at: '2026-09-02T10:00:00.000Z', by: 'agent:p-agent' }]
+    r.supervisor.rows[0].backups = [{ id: '20260902T104702Z-rev3-0f3c9a1b2d4e', at: '2026-09-02T10:47:02.000Z', rev: 3, commit: '0f3c9a1b2d4e', bytes: 12582912 }]
+    res = await request(t, { path: '/_atelier/releases?app=todo', headers: tok })
+    assert.deepEqual(JSON.parse(res.body.toString()), { instance: 'i-0123456789abcdef', slug: 'todo', releases: r.supervisor.rows[0].releases })
+    res = await request(t, { path: '/_atelier/backups?app=i-0123456789abcdef', headers: tok })
+    assert.deepEqual(JSON.parse(res.body.toString()), { instance: 'i-0123456789abcdef', slug: 'todo', backups: r.supervisor.rows[0].backups })
+    assert.equal((await request(t, { path: '/_atelier/releases?app=nope', headers: tok })).status, 404)
+    assert.equal((await request(t, { path: '/_atelier/releases', headers: tok })).status, 404)
+    assert.equal((await request(t, { path: '/_atelier/events?app=todo', headers: tok })).status, 200, '?app= takes the slug too')
+  } finally { await r.dev.close() }
+})
+
 test('WS: /_atelier/ws needs the token; broadcast frames carry topic company/slug (last wins); reload and backend-error ride the shell topic', async () => {
   const r = rig()
   const { port } = await r.dev.listen()
@@ -190,7 +241,7 @@ test('WS: /_atelier/ws needs the token; broadcast frames carry topic company/slu
     const frames = []
     ws.on('message', (m) => frames.push(JSON.parse(m.toString())))
     r.dev.broadcast('i-0123456789abcdef', { type: 'run-started', id: 1, topic: 'forged' })
-    r.dev.invalidate('i-0123456789abcdef')
+    r.dev.invalidate('i-0123456789abcdef', { rev: 3 })
     r.dev.backendError('i-fedcba9876543210', 'mount threw')
     r.dev.broadcast('i-nope', { type: 'x' })
     await new Promise((res) => setTimeout(res, 50))
