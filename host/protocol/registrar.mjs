@@ -36,6 +36,9 @@
 //   - the heartbeat body carries `resources: {cpu, ram:{used,total}, disk:{used,total}}` (API 50 `machine.resources`,
 //     host/resources.mjs) ONLY when `resources()` answers a row — a null (no cgroup files, the first sample) or a
 //     throw sends the beat without the field, never zeros.
+//   - the register AND heartbeat answers carry `sleep: "24h" | "always-on"` (API 50, the computer's sleep mode) →
+//     `registrar.sleep`, the supervisor's seam for its own idle rules (D18 stands down on an always-on computer);
+//     `24h` before any answer, an absent or shapeless field keeps the last word.
 import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
@@ -90,7 +93,7 @@ export function writeClaimRefused(os, dir, why, now = Date.now) {
  *   resources: () => {cpu, ram, disk} | null — the heartbeat's `resources` row (host/resources.mjs `sample`); null = no field
  */
 export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}, now = Date.now, fsx = nodeFsx, backoffMs = REGISTER_BACKOFF_MS, liveWorkers = () => [], chromeDigest = () => null, resources = () => null, setTimer = setTimeout, clearTimer = clearTimeout, onConfigStamp = null, onChrome = null }) {
-  const st = { hostId: null, epoch: null, startedAt: null, company: cfg.company ?? null, origin: cfg.origin ?? null, chat: null, principal: null, token: null, pubKey: null, lastServedAt: null, chrome: null }
+  const st = { hostId: null, epoch: null, startedAt: null, company: cfg.company ?? null, origin: cfg.origin ?? null, chat: null, principal: null, token: null, pubKey: null, lastServedAt: null, chrome: null, sleep: '24h' }
   const apps = new Map()              // instance → {slug, uid, rev, meta, tombstone_at}
   const lastServed = new Map()        // instance → ms
   let settleFrom = null, hb = null, stopped = false, registering = null
@@ -110,6 +113,7 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     }
     transport.setToken?.(st.token)
     readChrome(r)
+    readSleep(r)
   }
   // the answer's `chrome` (register and heartbeat): `{digest, version}` | null; an absent field keeps the last word
   function readChrome(r) {
@@ -117,6 +121,12 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     const c = r.chrome && typeof r.chrome === 'object' && typeof r.chrome.digest === 'string' && DIGEST_RE.test(r.chrome.digest) ? { digest: r.chrome.digest, version: typeof r.chrome.version === 'string' ? r.chrome.version : null } : null
     st.chrome = c
     try { hooks.onChrome?.(c) } catch (e) { log(`registrar: chrome ${c?.digest?.slice(0, 12) ?? 'null'}: ${e?.message ?? e}`) }
+  }
+  // the answer's `sleep` (register and heartbeat, API 50): "24h" | "always-on"; an absent or shapeless field keeps the last word
+  // — `null` too, unlike `chrome` above where null is a value (the spine names no release): the spine always sends one of the
+  // two strings, and a sleep mode is never "none"
+  function readSleep(r) {
+    if (r?.sleep === '24h' || r?.sleep === 'always-on') st.sleep = r.sleep
   }
 
   // register(): bootstrap → token + epoch. Retries with backoff until it succeeds or stop().
@@ -231,6 +241,7 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
       try { hooks.onConfigStamp?.(c.instance, c.updated) } catch (e) { log(`registrar: config stamp ${c.instance}: ${e?.message ?? e}`) }
     }
     readChrome(r)
+    readSleep(r)
     return r
   }
   const hooks = { onConfigStamp, onChrome }
@@ -272,7 +283,7 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
   return {
     get hostId() { return st.hostId }, get epoch() { return st.epoch }, get startedAt() { return st.startedAt },
     get company() { return st.company }, get origin() { return st.origin }, get chat() { return st.chat },
-    get principal() { return st.principal }, get token() { return st.token }, get chrome() { return st.chrome },
+    get principal() { return st.principal }, get token() { return st.token }, get chrome() { return st.chrome }, get sleep() { return st.sleep },
     register, claim, unlink, modulesChanged, heartbeat, beat, served, reconcile, visibleApps, release,
     set onConfigStamp(fn) { hooks.onConfigStamp = fn }, get onConfigStamp() { return hooks.onConfigStamp },
     set onChrome(fn) { hooks.onChrome = fn }, get onChrome() { return hooks.onChrome },

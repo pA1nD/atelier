@@ -11,7 +11,8 @@ import { keys, memoryFsx } from './protocol-fixtures.mjs'
 // A minimal spine: computers {id, company, token, epoch}, apps rows keyed by instance; the write
 // rules are protocol/registry's (authorizeWrite + reclaimRule), so the registrar meets the real gate.
 function fakeSpine({ computer = 'computer-1', company = 'acme', bootstrap = 'boot-secret', shellKeys = keys() } = {}) {
-  const s = { calls: [], apps: new Map(), token: null, epoch: null, failRegister: 0, rows: [], releases: [], releaseDoor: 'ok', config: [], chrome: null, bundles: {} }   // chrome: the answer's `chrome`; bundles: digest → files (base64)
+  const s = { calls: [], apps: new Map(), token: null, epoch: null, failRegister: 0, rows: [], releases: [], releaseDoor: 'ok', config: [], chrome: null, bundles: {}, sleep: undefined }   // chrome: the answer's `chrome`; bundles: digest → files (base64); sleep: the answer's `sleep` (undefined = the field absent)
+  const sleep = () => (s.sleep === undefined ? {} : { sleep: s.sleep })
   const others = new Map()   // slug → computer (rows other computers hold, for 409s)
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
   const read = (req) => new Promise((r) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => r(b ? JSON.parse(b) : {})) })
@@ -25,11 +26,11 @@ function fakeSpine({ computer = 'computer-1', company = 'acme', bootstrap = 'boo
       if (s.failRegister > 0) { s.failRegister--; return json(res, 503, { error: 'busy' }) }
       s.token = randomBytes(8).toString('hex'); s.epoch = randomBytes(8).toString('hex')
       return json(res, 200, { host_id: computer, epoch: s.epoch, token: s.token, company, origin: `https://${company}.portal.pa1nd.de`, chat: 'chat-1', principal: { id: 'p-agent', name: 'Bayard' },
-        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at, deployed_rev: a.deployed_rev ?? null })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey), chrome: s.chrome })
+        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at, deployed_rev: a.deployed_rev ?? null })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey), chrome: s.chrome, ...sleep() })
     }
     if (auth !== s.token) return json(res, 401, { error: EPOCH_MOVED })
     let m
-    if (url.pathname === '/v1/host/heartbeat') return json(res, 200, { ok: true, config: s.config, chrome: s.chrome })
+    if (url.pathname === '/v1/host/heartbeat') return json(res, 200, { ok: true, config: s.config, chrome: s.chrome, ...sleep() })
     if ((m = /^\/v1\/host\/chrome\/([^/]+)$/.exec(url.pathname))) { if (!/^[0-9a-f]{64}$/.test(m[1])) return json(res, 400, { error: 'bad-digest' }); const b = s.bundles[m[1]]; return b ? json(res, 200, { digest: m[1], version: b.version ?? null, files: b.files }) : json(res, 404, { error: 'unknown-digest', digest: m[1] }) }
     if (url.pathname === '/v1/host/release') {
       if (s.releaseDoor === '404') return json(res, 404, { error: 'no-route' })
@@ -416,4 +417,39 @@ test('the chrome seams (step 7 ship C): the register and heartbeat answers\' `ch
   const os2 = memory({}); const local = localTransport({ company: 'local' }, os2.openDir('/work/.atelier'), { os: os2, fsx: memoryFsx() })
   assert.equal((await local.register()).chrome, undefined, 'the twin names no release')
   await assert.rejects(local.chrome(D), (e) => e instanceof TransportError && e.status === 404)
+})
+
+test('the sleep seam (API 50): `sleep` on the register and heartbeat answers → registrar.sleep — "24h" before any answer, a flip lands within one beat, an absent or shapeless field keeps the last word', async () => {
+  const spine = fakeSpine(); await spine.listen()
+  try {
+    const r = rig(spine)
+    assert.equal(r.registrar.sleep, '24h', 'the default before any answer')
+    await r.registrar.register()
+    assert.equal(r.registrar.sleep, '24h', 'absent on register: the default stands')
+    assert.deepEqual(await r.registrar.beat(), { ok: true, config: [], chrome: null }, 'the answer without the field, as before')
+    spine.sleep = 'always-on'
+    assert.deepEqual(await r.registrar.beat(), { ok: true, config: [], chrome: null, sleep: 'always-on' })
+    assert.equal(r.registrar.sleep, 'always-on', 'a flip at a beat')
+    spine.sleep = undefined
+    await r.registrar.beat()
+    assert.equal(r.registrar.sleep, 'always-on', 'absent keeps the last word')
+    spine.sleep = 'forever'
+    await r.registrar.beat()
+    assert.equal(r.registrar.sleep, 'always-on', 'a shapeless value keeps the last word')
+    spine.sleep = null
+    await r.registrar.beat()
+    assert.equal(r.registrar.sleep, 'always-on', 'null keeps the last word')
+    spine.sleep = '24h'
+    await r.registrar.beat()
+    assert.equal(r.registrar.sleep, '24h', 'back')
+    // on register too: a host born on an always-on computer knows it from its first answer
+    spine.sleep = 'always-on'
+    const r2 = rig(spine)
+    await r2.registrar.register()
+    assert.equal(r2.registrar.sleep, 'always-on')
+    r.registrar.stop(); r2.registrar.stop()
+  } finally { await spine.close() }
+  // the local twin names no mode: a laptop is a 24h computer
+  const os2 = memory({}); const local = localTransport({ company: 'local' }, os2.openDir('/work/.atelier'), { os: os2, fsx: memoryFsx() })
+  assert.equal((await local.register()).sleep, undefined)
 })
