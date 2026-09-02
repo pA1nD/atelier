@@ -185,8 +185,10 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
 // The per-LIVE-rev auto-commit is retired: history = releases; Bayard may commit himself.
 export const GIT_ENV = { HOME: '/work', GIT_AUTHOR_NAME: 'atelier', GIT_AUTHOR_EMAIL: 'atelier@local', GIT_COMMITTER_NAME: 'atelier', GIT_COMMITTER_EMAIL: 'atelier@local' }
 export const GITIGNORE = ['data/', '.env', '.env.*', 'node_modules/', 'CLAIM-REFUSED.txt', '.atelier'].join('\n') + '\n'   // = deploy.mjs MESSAGES.git.gitignore
+// cwd is `/`, never the app folder: node chdirs into `cwd` BEFORE the wrapper's uid drop, and userns-root without DAC
+// caps cannot enter a `1000:<uid> 2750` folder (EACCES at spawn); `git -C <appDir>` enters it as uid 1000 itself.
 export function gitSpec({ appDir, args, home = GIT_ENV.HOME, stdio = ['ignore', 'pipe', 'pipe'] }) {
-  return { argv: ['git', '-C', appDir, ...args], uid: 1000, gid: 1000, groups: [], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...GIT_ENV, HOME: home }, umask: 0o022, cwd: appDir, stdio }
+  return { argv: ['git', '-C', appDir, ...args], uid: 1000, gid: 1000, groups: [], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...GIT_ENV, HOME: home }, umask: 0o022, cwd: '/', stdio }
 }
 /** The .gitignore write: uid 1000, `set -C` (O_EXCL) so an existing file — the agent's — stays. */
 export function gitignoreSpec({ appDir, home }) {

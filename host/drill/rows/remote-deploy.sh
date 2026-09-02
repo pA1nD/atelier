@@ -70,7 +70,7 @@ DT=$(X 'cat /run/atelier/dev.token' | tr -d '\r\n')
 # ---- row 9t: the whole suite inside the pod, as uid 1000 (the same rows the Mac runs), bounded
 log "row 9t: node --test host/test/*.test.js inside the pod as uid 1000 (≤ 600 s)"
 t0=$(now)
-X "cd /code && $AS1000 env HOME=/tmp TMPDIR=/tmp timeout 600 node --test host/test/*.test.js 2>&1 | tail -12" > $OUT/pod-tests.log; sed 's/^/    | /' $OUT/pod-tests.log
+X "cd /code && $AS1000 env HOME=/tmp TMPDIR=/tmp timeout 600 node --test host/test/*.test.js 2>&1" > $OUT/pod-tests.log; grep -E '^(✖|not ok)|^ℹ (tests|pass|fail)' $OUT/pod-tests.log | head -20 | sed 's/^/    | /'
 TP=$(grep -o 'ℹ pass [0-9]*' $OUT/pod-tests.log | awk '{print $3}'); TF=$(grep -o 'ℹ fail [0-9]*' $OUT/pod-tests.log | awk '{print $3}')
 log "row 9t: pass=${TP:-?} fail=${TF:-?} in $(el $t0) s"
 [ "${TF:-1}" = 0 ] && [ -n "$TP" ] || rowfail 9t "pass=${TP:-?} fail=${TF:-?}"

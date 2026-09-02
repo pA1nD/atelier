@@ -1,0 +1,17 @@
+2026-09-02T03:57:11.000Z host: ready pid 16 host=computer-drill epoch=520ba884cf2c0284
+2026-09-02T03:57:19.713Z [hello] rev 1 LIVE (dev) in 111 ms
+2026-09-02T03:57:19.773Z [locker] rev 1 LIVE (dev) in 141 ms
+2026-09-02T03:57:21.021Z [locker] deploy none "first release": commit FAILED 2 ms — git init: spawn sh EACCES
+2026-09-02T03:57:21.021Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
+2026-09-02T03:57:23.346Z [locker] rev 2 LIVE (dev) in 213 ms
+2026-09-02T03:57:48.315Z [locker] deploy none "second release": commit FAILED 1 ms — git init: spawn sh EACCES
+2026-09-02T03:57:48.315Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
+2026-09-02T03:57:50.962Z [locker] rev 3 LIVE (dev) in 199 ms
+2026-09-02T03:58:15.075Z [locker] deploy none "release 3": commit FAILED 1 ms — git init: spawn sh EACCES
+2026-09-02T03:58:15.075Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
+2026-09-02T03:58:17.532Z [locker] rev 4 LIVE (dev) in 166 ms
+2026-09-02T03:58:41.494Z [locker] deploy none "release 4": commit FAILED 1 ms — git init: spawn sh EACCES
+2026-09-02T03:58:41.494Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
+2026-09-02T03:58:43.893Z [locker] rev 5 LIVE (dev) in 154 ms
+2026-09-02T03:59:07.800Z [locker] deploy none "release 5": commit FAILED 2 ms — git init: spawn sh EACCES
+2026-09-02T03:59:07.800Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0

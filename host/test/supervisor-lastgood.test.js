@@ -127,7 +127,8 @@ test('git as uid 1000 (row G): gitInit = init -q + .gitignore (noclobber, D7); c
   const p = gitInit({ os: mem, appDir: '/work/apps/alpha', home: '/work' })
   await tick()
   const spawned = state.spawned
-  assert.deepEqual(spawned[0].spec, { argv: ['git', '-C', '/work/apps/alpha', 'init', '-q'], uid: 1000, gid: 1000, groups: [], env: { PATH: process.env.PATH, HOME: '/work', GIT_AUTHOR_NAME: 'atelier', GIT_AUTHOR_EMAIL: 'atelier@local', GIT_COMMITTER_NAME: 'atelier', GIT_COMMITTER_EMAIL: 'atelier@local' }, umask: 0o022, cwd: '/work/apps/alpha', stdio: ['ignore', 'pipe', 'pipe'] })
+  // cwd `/`: node chdirs before the uid drop, and userns-root cannot enter the 2750 folder — `git -C` does, as 1000 (the row-9 drill's finding)
+  assert.deepEqual(spawned[0].spec, { argv: ['git', '-C', '/work/apps/alpha', 'init', '-q'], uid: 1000, gid: 1000, groups: [], env: { PATH: process.env.PATH, HOME: '/work', GIT_AUTHOR_NAME: 'atelier', GIT_AUTHOR_EMAIL: 'atelier@local', GIT_COMMITTER_NAME: 'atelier', GIT_COMMITTER_EMAIL: 'atelier@local' }, umask: 0o022, cwd: '/', stdio: ['ignore', 'pipe', 'pipe'] })
   assert.deepEqual(spawned[0].argv.slice(0, 9), ['sh', '-c', 'umask 22; exec "$@"', 'sh', 'setpriv', '--reuid=1000', '--regid=1000', '--clear-groups', '--'])
   spawned[0].exit(0); await tick()
   // .gitignore as uid 1000 with `set -C` (O_EXCL): data/, .env, .env.*, node_modules/, CLAIM-REFUSED.txt, .atelier — the agent's own file is never overwritten
