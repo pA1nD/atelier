@@ -22,6 +22,9 @@
 //                             the shell composes)
 //   cache staleness           the age of the oldest LIVE registry cache entry — how stale a read
 //                             can be when a revocation lands (`registry.cacheAgeMs()`, fleet only)
+//   wake calls                the spine's wake door as this replica drove it (`waker.stats()`,
+//                             waking.mjs): sent | up | refused | unconfirmed | failed | held, and the
+//                             calls in flight right now
 //
 // Cost: a Map lookup and one number into a preallocated ring per event; nothing is sorted, summed
 // or formatted until someone reads. Every keyed map is bounded (`MAX_KEYS`, oldest key dropped) so
@@ -105,7 +108,7 @@ function summary(out, name, help, map, label) {
  * createMetrics({ now, ring, keys, window }) → the collector
  *   the hot side: proxyHeaders(host, ms), proxyDone(host, ms, outcome), proxyOutcome(host, outcome),
  *                 frame(topic), gap(topic), resumed(ms), bootstrap(company, bytes)
- *   the read side: render({ events, bus, registry }) → the exposition text
+ *   the read side: render({ events, bus, registry, waker }) → the exposition text
  */
 export function createMetrics({ now = Date.now, ring = RING, keys = MAX_KEYS, window = RATE_WINDOW_S } = {}) {
   const headersMs = new Map()      // host → samples
@@ -132,7 +135,7 @@ export function createMetrics({ now = Date.now, ring = RING, keys = MAX_KEYS, wi
 
     // render({events, bus, registry}): everything the shell holds, read once. `events`/`bus`/`registry`
     // are read defensively — a shell built with a fake bus in a test still renders.
-    render({ events = null, bus = null, registry = null } = {}) {
+    render({ events = null, bus = null, registry = null, waker = null } = {}) {
       const out = []
       const sec = Math.floor(now() / 1000)
       const P = 'atelier_shell_'
@@ -164,6 +167,13 @@ export function createMetrics({ now = Date.now, ring = RING, keys = MAX_KEYS, wi
 
       const age = registry?.cacheAgeMs?.()
       if (age != null) gauge(out, `${P}registry_cache_age_seconds`, 'Age of the oldest live registry cache entry — how stale a read can be when a revocation lands.', [['', age / 1000]])
+
+      const w = waker?.stats?.()
+      if (w) {
+        counter(out, `${P}wake_calls_total`, 'Wake calls to the spine door by verdict: sent (202 accepted), up (200: the pod was live), refused (the spine said no), unconfirmed (no verdict inside the clock), failed (the call threw), held (inside the per-chat window or a call in flight).',
+          ['sent', 'up', 'refused', 'unconfirmed', 'failed', 'held'].map((k) => [`{outcome="${k}"}`, w[k] ?? 0]))
+        gauge(out, `${P}wake_in_flight`, 'Wake calls to the spine door in flight on this shell.', [['', w.inFlight ?? 0]])
+      }
 
       return out.length ? out.join('\n') + '\n' : ''
     },

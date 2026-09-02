@@ -13,7 +13,7 @@ import { createGateLocal } from '../providers/gate-local.mjs'
 import { createGateFleet } from '../providers/gate-fleet.mjs'
 import { createHostLinkLocal } from '../providers/hostlink-local.mjs'
 import { createHostLinkFleet } from '../providers/hostlink-fleet.mjs'
-import { ASLEEP_COPY, WAKE_GIVE_UP_MS } from '../waking.mjs'
+import { ASLEEP_COPY, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from '../waking.mjs'
 import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP, NOTES, listen } from './fixtures.mjs'
 
 const chromeRow = (company) => ({ instance: CHROME_APP, slug: 'catalyst-chrome', company, rev: 2, state: 'live', meta: {}, isChrome: true })
@@ -25,7 +25,7 @@ const apps = (company) => [
 // company's registry and served on every company origin — a chat's pod (acme's host) carries no chrome row of its own
 export const FLEET_CHROME = { qid: 'portal/catalyst-chrome', digest: 1700 }
 
-async function rig(t, { mode = 'local', present, hostUp = true, chrome, secondHost = false, now = Date.now } = {}) {
+async function rig(t, { mode = 'local', present, presentOnChat, wakeAnswer, hostUp = true, chrome, secondHost = false, now = Date.now } = {}) {
   const host = fakeHost({ company: mode === 'local' ? 'global' : 'acme' })
   const hp = await host.start()
   if (!hostUp) await host.stop()
@@ -39,7 +39,7 @@ async function rig(t, { mode = 'local', present, hostUp = true, chrome, secondHo
   const companies = mode === 'local'
     ? { global: { apps: [...apps('global'), chromeRow('global')], host: { port: hp, token: 'dev' } }, lab: { apps: [], host: { port: hp, token: 'dev' } } }
     : { portal: { apps: [chromeRow('portal')], host: { port: hp, token: 'tok', epoch: 'e1' } }, acme: { apps: [...apps('acme'), ...notes], host: { port: hp, token: 'tok', epoch: 'e1', chat: 'chat-acme' } }, beta: { apps: [], host: { port: hp, token: 'tok', epoch: 'e1' } } }
-  const registry = fakeRegistry({ mode, companies, present, chrome: chrome ?? (mode === 'fleet' ? FLEET_CHROME : undefined), now })
+  const registry = fakeRegistry({ mode, companies, present, presentOnChat, wakeAnswer, chrome: chrome ?? (mode === 'fleet' ? FLEET_CHROME : undefined), now })
   const bus = fakeBus({ registry })
   const { cfg } = createConfig({ mode, config: {}, env: { PORT: '0' } })
   const providers = mode === 'local'
@@ -190,8 +190,10 @@ test('local: the host is down → the waking page on documents (503, ≤ 1.2 s),
   assert.match(doc.text, /Waking up global/); assert.match(doc.text, /\/_atelier\/wake\?company=global/)
   // BOUNDED (C13): no <meta refresh> re-arming the poll forever; after WAKE_GIVE_UP_MS the script stops polling and says the computer is asleep
   assert.ok(!/http-equiv="refresh"/.test(doc.text), 'no meta refresh')
-  assert.ok(doc.text.includes(`until=Date.now()+${WAKE_GIVE_UP_MS}`), 'the deadline is in the page')
-  assert.ok(doc.text.includes('if(Date.now()>until){asleep();return}'), 'past the deadline the poll stops')
+  assert.ok(doc.text.includes(`G=${WAKE_GIVE_UP_MS},`), 'the local deadline (60 s) is in the page'); assert.equal(WAKE_GIVE_UP_MS, 60_000)
+  assert.ok(doc.text.includes('if(left<=0){asleep();return}'), 'past the deadline the poll stops')
+  assert.ok(doc.text.includes('setTimeout(function(){ac.abort()},left)'), 'each probe is aborted at the remaining deadline')
+  assert.ok(doc.text.includes("addEventListener('visibilitychange'") && doc.text.includes('until=Date.now()+G;'), 'a tab coming back re-arms the deadline and probes')
   assert.ok(doc.text.includes(JSON.stringify(ASLEEP_COPY)), 'the honest copy')
   // the copy is true once the poll stopped: the wake went out on the first miss (step 7), the page no longer checks, nothing reloads it — the person reloads by hand
   assert.match(ASLEEP_COPY, /unusually long/); assert.match(ASLEEP_COPY, /stopped checking/); assert.match(ASLEEP_COPY, /reload this page/)
@@ -376,6 +378,7 @@ test('fleet: a stale heartbeat or a draining host is the waking page without a d
   const origOf = reg.hostOf.bind(reg), orig = reg.host.bind(reg)
   reg.hostOf = async (row) => ({ ...(await origOf(row)), heartbeatAt: Date.now() - 31_000 })
   const stale = await r.go('/acme/todo'); assert.equal(stale.status, 503); assert.match(stale.text, /Waking up acme/); assert.match(stale.text, /\/_atelier\/wake\?company=acme&app=todo/)
+  assert.ok(stale.text.includes(`G=${WAKE_GIVE_UP_FLEET_MS},`), 'the fleet deadline (180 s: a cold pod birth) is in the page'); assert.equal(WAKE_GIVE_UP_FLEET_MS, 180_000)
   reg.hostOf = async (row) => ({ ...(await origOf(row)), drainingAt: Date.now() })
   assert.equal((await r.go('/acme/todo')).status, 503)
   assert.equal((await r.go('/acme/')).status, 200, 'the app-less document asks the company\'s freshest host, which is fine')
@@ -420,7 +423,7 @@ test('fleet: one company, two hosts — every app is proxied to ITS computer; a 
   assert.equal((await r.go('/api/acme/notes/x')).status, 200)
 })
 
-test('fleet: /_atelier/wake WAKES a computer that is not serving (step 7) — the app row\'s chat through registry.wake, once per chat per 30 s, never while the host answers; {ok} stays the probe\'s', async (t) => {
+test('fleet: /_atelier/wake WAKES a computer that is not serving (step 7) — the dial row\'s chat through registry.wake(chat, {by: the caller\'s session}), once per chat per 30 s, never while the host answers; {ok} stays the probe\'s; the verdict is logged', async (t) => {
   let clock = Date.now()
   const r = await rig(t, { mode: 'fleet', secondHost: true, now: () => clock })
   // both hosts answer: probes only
@@ -430,8 +433,9 @@ test('fleet: /_atelier/wake WAKES a computer that is not serving (step 7) — th
   // host B stops: the first miss sends the wake for notes' chat; the answer is still the probe's
   await r.host2.stop()
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
-  assert.deepEqual(r.registry.wakes, ['chat-notes'])
-  assert.ok(r.logs.some((l) => l === 'wake: acme chat-notes (DIAL)'), r.logs.filter((l) => l.startsWith('wake:')).join())
+  await new Promise((res) => setTimeout(res, 20))
+  assert.deepEqual(r.registry.wakeCalls, [{ chat: 'chat-notes', by: `session:${r.sid}` }], 'the caller\'s portal session is the actor')
+  assert.ok(r.logs.some((l) => l === 'wake: acme chat-notes (DIAL) sent'), r.logs.filter((l) => l.startsWith('wake:')).join())
   // the 2 s poll keeps probing, the wake is held for 30 s
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
   clock += 29_000
@@ -451,8 +455,9 @@ test('fleet: /_atelier/wake WAKES a computer that is not serving (step 7) — th
   assert.equal(r.registry.wakes.length, 2)
 })
 
-test('fleet: the wake call is FIRED, not awaited — /_atelier/wake answers within the probe\'s bound while registry.wake never resolves; the window is set before the call, so the next poll is held', async (t) => {
-  const r = await rig(t, { mode: 'fleet', secondHost: true })
+test('fleet: the wake call is FIRED, not awaited — /_atelier/wake answers within the probe\'s bound while registry.wake never resolves; one call in flight per chat, so the hung door is not asked again even past the window; the metrics say so', async (t) => {
+  let clock = Date.now()
+  const r = await rig(t, { mode: 'fleet', secondHost: true, now: () => clock })
   let calls = 0
   r.registry.wake = () => { calls++; return new Promise(() => {}) }       // a hung spine door: never answers, never throws
   await r.host2.stop()
@@ -463,6 +468,47 @@ test('fleet: the wake call is FIRED, not awaited — /_atelier/wake answers with
   assert.equal(calls, 1)
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
   assert.equal(calls, 1, 'inside the window: held, not a second call on the hung door')
+  clock += 31_000
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
+  assert.equal(calls, 1, 'past the window but still in flight: held — no second socket on a hung door')
+  r.stores.sessions.map.set('op-session', { person: { id: 'p9', name: 'Operator', claims: { op: true } }, epoch: 1, aud: 'acme', op: true })
+  const m = (await r.go('/_atelier/metrics', { cookie: false, headers: { cookie: '__Host-session=op-session' } })).text
+  assert.match(m, /atelier_shell_wake_calls_total\{outcome="held"\} 2\n/); assert.match(m, /atelier_shell_wake_in_flight 1\n/)
+  assert.match(m, /atelier_shell_wake_calls_total\{outcome="sent"\} 0\n/)
+})
+
+test('fleet: NEVER a wake for a DRAINING computer (a rollout, the 24 h sleep: the drain is a decision) — probe only, {ok:false, reason:draining}; nor for the app-less poll of a room the caller is not in (C5) — the freshest host is woken only for a caller present on its chat', async (t) => {
+  const r = await rig(t, { mode: 'fleet', secondHost: true, presentOnChat: async (personId, company, chat) => chat === 'chat-notes' })
+  const reg = r.registry
+  const origOf = reg.hostOf.bind(reg)
+  reg.hostOf = async (row) => ({ ...(await origOf(row)), drainingAt: Date.now() })
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'draining' })
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=todo')).json(), { ok: false, reason: 'draining' })
+  await new Promise((res) => setTimeout(res, 20))
+  assert.deepEqual(r.registry.wakes, [], 'a draining computer is not woken'); assert.ok(!r.logs.some((l) => l.startsWith('wake:')), r.logs.filter((l) => l.startsWith('wake:')).join())
+  reg.hostOf = origOf
+  // the app-less poll: acme's freshest is host A (chat-acme), a room p1 is NOT in → probed, never woken; notes' pod (chat-notes, p1's) is
+  await r.host.stop(); await r.host2.stop()
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme')).json(), { ok: false, reason: 'DIAL' })
+  await new Promise((res) => setTimeout(res, 20))
+  assert.deepEqual(r.registry.wakes, [], 'the freshest host\'s chat is not the caller\'s: probe only')
+  assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
+  await new Promise((res) => setTimeout(res, 20))
+  assert.deepEqual(r.registry.wakes, ['chat-notes'], 'the app the caller is present on is woken')
+  // the wake target is the DIAL ROW's chat first (the routing seam), the app row's only when the spine knows no computer
+  const r2 = await rig(t, { mode: 'fleet', secondHost: true })
+  const n2 = r2.registry.data.acme.apps.find((a) => a.slug === 'notes'); n2.chat = 'chat-row'; n2.host.chat = 'chat-dial'
+  await r2.host2.stop()
+  assert.deepEqual((await r2.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
+  await new Promise((res) => setTimeout(res, 20))
+  assert.deepEqual(r2.registry.wakes, ['chat-dial'])
+  // a chat that is not a chat id never reaches the door — said once
+  const r3 = await rig(t, { mode: 'fleet', secondHost: true })
+  const n3 = r3.registry.data.acme.apps.find((a) => a.slug === 'notes'); n3.host.chat = 'no such/chat'
+  await r3.host2.stop()
+  assert.deepEqual((await r3.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
+  await new Promise((res) => setTimeout(res, 20))
+  assert.deepEqual(r3.registry.wakes, []); assert.ok(r3.logs.some((l) => /wake: acme host row's chat "no such\/chat" is not a chat id \(DIAL\)/.test(l)), r3.logs.filter((l) => l.startsWith('wake:')).join())
 })
 
 test('fleet: the silent gaps are said — no wake verb on a fleet registry is logged once per process; a dial row without a chat once per company per window; no-host is not a contract break; the probe answers stay the same', async (t) => {

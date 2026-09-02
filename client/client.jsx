@@ -34,7 +34,7 @@ import { parseUrl, buildUrl } from './route.js';
 import { swapSheet, sheetHref } from './sheet.js';
 import { pickTarget, performPick } from './picker.js';
 import { createReporter } from './reporter.js';
-import { isWakingResponse, startWakePoll, wakeUrl } from './waking.js';
+import { isWakingResponse, startWakePoll, wakeUrl, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from './waking.js';
 
 const { useState, useEffect, useRef } = React;
 
@@ -168,10 +168,11 @@ async function loadModuleBundle(qid, rev) {
   }
 }
 
-// A failed import does not say why; ask the shell whether the company's computer is waking.
-async function probeWaking() {
+// A failed import does not say why; ask the shell whether the computer is waking — THAT app's (`app` = its slug: a
+// multi-pod company's probe names the computer that is asleep, and the shell wakes it), the company's freshest without one.
+async function probeWaking(app = null) {
   try {
-    const r = await window.fetch(withDevToken(wakeUrl(COMPANY)), { cache: 'no-store', credentials: 'same-origin' });
+    const r = await window.fetch(withDevToken(wakeUrl(COMPANY, app)), { cache: 'no-store', credentials: 'same-origin' });
     if (isWakingResponse(r)) return true;
     if (!r.ok) return false;
     const j = await r.json().catch(() => ({}));
@@ -205,14 +206,16 @@ function ChromeMissingFallback({ qid, err }) {
 
 // The company's computer is asleep or restarting: poll /_atelier/wake (2 s → 10 s; the shell wakes it on the first
 // miss) and reload on ok. `app` = the active app's slug, so a multi-pod company's poll names the computer that is
-// asleep. Bounded at 60 s like the shell's page: past it the copy says the wake is taking unusually long.
+// asleep. Bounded like the shell's page (60 s locally, 180 s in the fleet — a cold pod birth; `boot.portal` says which):
+// past it the copy says the wake is taking unusually long; a tab coming back to the front probes again (waking.js).
 function WakingFallback({ company, app }) {
   const [tries, setTries] = useState(0);
   const [gaveUp, setGaveUp] = useState(false);
   useEffect(() => startWakePoll({
     fetch: (u, o) => window.fetch(withDevToken(u), o),
     setTimeout: (f, ms) => window.setTimeout(f, ms), clearTimeout: (t) => window.clearTimeout(t),
-    company, app, reload: () => window.location.reload(), onTick: () => setTries((n) => n + 1), onGiveUp: () => setGaveUp(true),
+    company, app, reload: () => window.location.reload(), onTick: () => { setTries((n) => n + 1); setGaveUp(false); }, onGiveUp: () => setGaveUp(true),
+    giveUpMs: boot.portal ? WAKE_GIVE_UP_FLEET_MS : WAKE_GIVE_UP_MS, document,
   }), [company, app]);
   return React.createElement('pre', { style: PRE_STYLE }, gaveUp
     ? `atelier — the computer for '${company}' is taking unusually long to wake.\n\nThis page has stopped checking. Wait a minute, then reload it.`
@@ -346,7 +349,7 @@ function App() {
     revRef.current.set(qid, rev);
     loadModuleBundle(qid, rev).then(async (res) => {
       if (tokenRef.current.get(qid) !== token) return;   // superseded by a newer rev
-      if (res.status === 'error' && await probeWaking()) { setWaking(true); return; }
+      if (res.status === 'error' && await probeWaking(qid.split('/')[0] === COMPANY ? qid.split('/')[1] : null)) { setWaking(true); return; }
       if (res.status === 'ok') runningRef.current.set(qid, rev);
       setLoaded((l) => ({ ...l, [qid]: res }));
     });

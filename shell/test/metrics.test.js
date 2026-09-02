@@ -213,6 +213,9 @@ test('the live rows: a proxied request per host, a waking host, the bootstrap by
   assert.ok(text.includes('atelier_shell_events_sockets '))
   // no registry cache age locally: the local registry's 1 s host view is not a revocation cache
   assert.ok(!text.includes('atelier_shell_registry_cache_age_seconds'))
+  // the wake rows are there in both modes (locally there is no verb, so they read zero — a reading, not unknown)
+  for (const k of ['sent', 'up', 'refused', 'unconfirmed', 'failed', 'held']) assert.equal(value(text, `atelier_shell_wake_calls_total{outcome="${k}"}`), 0)
+  assert.equal(value(text, 'atelier_shell_wake_in_flight'), 0)
 
   // the host stops → the dial is refused: `waking` on that host, and the mark's next refusal too
   await r.host.stop()

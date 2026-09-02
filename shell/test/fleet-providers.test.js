@@ -18,7 +18,7 @@ function fakeSpine() {
     async apps(company) { calls.apps++; return rows[company] ?? [] },
     async instance(instance) { const c = Object.keys(rows).find((k) => rows[k].some((r) => r.instance === instance)); return c ? { company: c } : null },
     async host(company) { calls.host++; return company === 'acme' ? { host_id: 'c-1', chat: 'chat-a', epoch: 'e1', token: 'tok', pod_ip: '10.0.0.5', port: 1845, tls: null, heartbeat_at: 1000, draining_at: null } : null },
-    async wake(chat) { calls.wake.push(chat); return { ok: true } },
+    async wake(chat, opts) { calls.wake.push([chat, opts]); return { ok: true, state: 'waking', status: 202 } },
     chrome() { return { qid: 'global/catalyst-chrome', digest: 'sha256:abc' } },
     onCompany(fn) { listeners.add(fn); return () => listeners.delete(fn) },
     fire(company) { for (const fn of listeners) fn(company) },
@@ -44,8 +44,10 @@ test('registry-fleet: Host parse, TTL cache + company-frame invalidation, presen
   assert.equal(await reg.present('stranger', TODO), false); assert.equal(await reg.present('p1', 'i-0000000000000000'), false)
   const h = await reg.host('acme')
   assert.deepEqual(h, { hostId: 'c-1', chat: 'chat-a', epoch: 'e1', token: 'tok', ip: '10.0.0.5', port: 1845, tls: null, heartbeatAt: 1000, drainingAt: null })
-  // the wake verb (step 7) is the spine's door; the dial row on an app row carries the row's chat when the spine's `host` has none
-  await reg.wake('chat-b'); assert.deepEqual(spine.calls.wake, ['chat-b'])
+  // the wake verb (step 7) is the spine's door, the actor riding along; the dial row on an app row carries the row's chat when the spine's `host` has none
+  assert.deepEqual(await reg.wake('chat-b', { by: 'session:s-1' }), { ok: true, state: 'waking', status: 202 }); assert.deepEqual(spine.calls.wake, [['chat-b', { by: 'session:s-1' }]])
+  // presence on a CHAT (the app-less wake target): the same membership rule the rows use
+  assert.equal(await reg.presentOnChat('p1', 'acme', 'chat-a'), true); assert.equal(await reg.presentOnChat('p2', 'acme', 'chat-a'), false); assert.equal(await reg.presentOnChat('p2', 'acme', 'chat-b'), true); assert.equal(await reg.presentOnChat('p1', 'acme', null), false)
   spine.rows.acme[1].host = { host_id: 'c-2', epoch: 'e2', token: 'tok2', pod_ip: '10.0.0.6' }
   clock += 6000; assert.equal((await reg.hostOf((await reg.apps('acme'))[1])).chat, 'chat-b')
   assert.equal(createRegistryFleet({ spine: { ...spine, wake: undefined }, membership: { present: () => true } }).wake, undefined, 'no door on the spine → no verb (the poll only probes)')
