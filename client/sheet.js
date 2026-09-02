@@ -11,13 +11,16 @@
 export const SHEET_ID = 'atelier-chrome-styles'
 
 // The sheet the shell serves for a route: an app → its own sheet at its revision; no app → the
-// chrome's sheet at the chrome's revision (`?rev=` everywhere, never `?v=`).
+// chrome's sheet at the chrome's revision (`?rev=` everywhere, never `?v=`) — or, by digest
+// (`chrome.base` = `/_chrome/<digest>`, step 7 ship C), the bundle's compiled chrome-only sheet
+// `<base>/chrome.css`, immutable, no cache-buster.
 export function sheetHref(app, chrome) {
   if (app && app.company && app.slug) {
     const q = app.rev != null ? `?rev=${encodeURIComponent(app.rev)}` : ''
     return `/modules/${encodeURIComponent(app.company)}/${encodeURIComponent(app.slug)}/styles.css${q}`
   }
   if (!chrome || !chrome.qid) return null
+  if (chrome.base) return `${chrome.base}/chrome.css`
   const q = chrome.rev != null ? `?rev=${encodeURIComponent(chrome.rev)}` : ''
   return `/modules/${chrome.qid}/styles.css${q}`
 }

@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildSheet, splitLongLines, scanSources, LONG_LINE } from '../supervisor/tailwind.mjs'
+import { buildSheet, splitLongLines, scanSources, rebaseUrls, LONG_LINE } from '../supervisor/tailwind.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const CHROME_CSS = `@import 'tailwindcss';\n@custom-variant dark (&:where(.dark, .dark *));\n@theme {\n  --color-brand: #2563eb;\n  --radius-card: 10px;\n}\n.atelier-doc-prose { line-height: 1.7; }\n`
@@ -98,4 +98,30 @@ test('splitLongLines never cuts inside a token: every cut lands after a space or
   assert.equal(out.join(''), line, 'nothing lost, nothing added')
   // a window with no space or quote is cut hard (a 200-char token cannot be kept whole)
   assert.equal(splitLongLines('a'.repeat(450), 100, 200).split('\n').map((l) => l.length).join(','), '200,200,50')
+})
+
+test('chromeBase (step 7 ship C, decision 8): every RELATIVE url() of the chrome\'s source is rebased under /_chrome/<digest>/ before the compile — root-relative, absolute, data: and fragment urls untouched, a ../ prefix cannot leave the bundle; without chromeBase the sheet is byte for byte the same as before; `source` replaces the chrome\'s styles.css read', async () => {
+  const D = 'd'.repeat(64)
+  assert.equal(rebaseUrls("src: url('fonts/Inter.woff2') format('woff2')", `/_chrome/${D}`), `src: url('/_chrome/${D}/fonts/Inter.woff2') format('woff2')`)
+  assert.equal(rebaseUrls('url("./fonts/a.woff2?v=1#x")', '/_chrome/x/'), 'url("/_chrome/x/fonts/a.woff2?v=1#x")')
+  assert.equal(rebaseUrls("url( '../catalyst-chrome/fonts/a.woff2' )", '/_chrome/x'), "url('/_chrome/x/catalyst-chrome/fonts/a.woff2')")
+  assert.equal(rebaseUrls('url(../../a.png)', '/_chrome/x'), 'url(/_chrome/x/a.png)')
+  const untouched = "url('/fonts/a.woff2') url(data:font/woff2;base64,AAAA) url(https://x/a.woff2) url('#frag') url(blob:x)"
+  assert.equal(rebaseUrls(untouched, '/_chrome/x'), untouched)
+  assert.equal(rebaseUrls('url(fonts/a.woff2)', null), 'url(fonts/a.woff2)')
+  const f = fixture()
+  fs.writeFileSync(path.join(f.chrome, 'styles.css'), `@font-face { font-family: 'Inter'; src: url('fonts/Inter.woff2') format('woff2'); }\n` + CHROME_CSS)
+  const a = f.app('alpha', { 'frontend.jsx': `export default () => <div className="p-4">a</div>` })
+  const plain = await buildSheet({ chromeDir: f.chrome, appDir: a })
+  const based = await buildSheet({ chromeDir: f.chrome, appDir: a, chromeBase: `/_chrome/${D}` })
+  assert.ok(plain.css.includes("url('fonts/Inter.woff2')") || plain.css.includes('url(fonts/Inter.woff2)'), 'no base: the relative url stays')
+  assert.ok(!plain.css.includes('/_chrome/'))
+  assert.ok(based.css.includes(`/_chrome/${D}/fonts/Inter.woff2`), based.css.slice(0, 600))
+  assert.ok(based.css.includes('.p-4') && based.css.includes('.atelier-doc-prose'), 'the same rules')
+  assert.equal(based.css.replace(`/_chrome/${D}/fonts/Inter.woff2`, 'fonts/Inter.woff2'), plain.css, 'the url is the only difference')
+  const again = await buildSheet({ chromeDir: f.chrome, appDir: a })
+  assert.equal(again.css, plain.css, 'deterministic')
+  const fromSource = await buildSheet({ chromeDir: f.chrome, appDir: null, source: `@import 'tailwindcss';\n.only-from-source { color: red }\n` })
+  assert.ok(fromSource.css.includes('.only-from-source') && !fromSource.css.includes('.atelier-doc-prose'), 'source replaces the file')
+  f.done()
 })

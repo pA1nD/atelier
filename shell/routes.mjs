@@ -10,7 +10,9 @@
 //   1  https        gate.https → 301 (+ HSTS)                                               fleet
 //   2  Host         gate.hostAllowed → portal / company / 404 (never a redirect)              fleet
 //   3  ticket       gate.ticket on /_t/<opaque> — creates the session                        fleet
-//   4a assets       /assets/* — public bytes                                                  both
+//   4a assets       /assets/* — public bytes; /_chrome/<digest>/<path> — a chrome release's bytes off the
+//                   shell's read-only store (chrome-store.mjs; immutable, etag = the digest; 404 without
+//                   a store, for an unknown digest or a path its manifest does not name)               both
 //   4b documents    Host-first: Host = path company (fleet) → identity → 302-to-/go (fleet) →
 //                   the APP's host waking (its row's computer; the company's freshest for an
 //                   app-less document) → compose — the module list is the person's (presence)   both
@@ -34,7 +36,9 @@
 //   do not exist in 2.0 — gone, not skipped (§4.8 N6).
 import fs from 'node:fs'
 import path from 'node:path'
-import { SLUG_RE, companyTopic, isReservedTopic } from '../protocol/index.js'
+import { SLUG_RE, DIGEST_RE, companyTopic, isReservedTopic } from '../protocol/index.js'
+import { send } from './assets.mjs'
+import { CHROME_CACHE_CONTROL } from './chrome-store.mjs'
 import { renderDocument, relativeImports, appAsset } from './document.mjs'
 import { proxyRequest, json as sendJson } from './proxy.mjs'
 import { CONTENT_TYPE as METRICS_CONTENT_TYPE } from './metrics.mjs'
@@ -42,7 +46,7 @@ import { wakingHtml, wakingHeaders, hostState, hostKey, WAKE_GIVE_UP_MS, WAKE_GI
 import { newNonce } from './document.mjs'
 import { visibleRows } from './presence.mjs'
 
-export const RESERVED_HEADS = new Set(['api', 'assets', 'modules', '_atelier', '_host', '_t', 'favicon.ico', 'robots.txt'])
+export const RESERVED_HEADS = new Set(['api', 'assets', 'modules', '_atelier', '_chrome', '_host', '_t', 'favicon.ico', 'robots.txt'])
 export const RESERVED_MODULE_COMPANIES = new Set(['api', 'assets', 'modules', '_atelier'])
 export const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 export const REPORT_CAP = 64 * 1024
@@ -79,6 +83,11 @@ export function parseRoute(p) {
   const segs = p.split('/').slice(1)
   const head = segs[0]
   if (head === 'assets') return { kind: 'assets' }
+  if (head === '_chrome') {
+    const [, digest, ...rest] = segs
+    if (!digest || !DIGEST_RE.test(digest) || !rest.length || rest.some((x) => !x)) return { kind: 'none' }
+    return { kind: 'chrome', digest, rest: rest.join('/') }
+  }
   if (head === '_atelier') return { kind: 'atelier', name: segs[1] ?? '', rest: segs.slice(2).join('/') }
   if (head === '_t') return { kind: 'ticket' }
   if (head === 'api' || head === 'modules') {
@@ -123,10 +132,25 @@ export async function laneTicket(ctx) {
   return handled ? { lane: 'ticket', handled: true } : jsonR('ticket', 404, {})
 }
 export async function laneAssets(ctx) {
+  if (ctx.route.kind === 'chrome') return laneChrome(ctx)
   if (ctx.route.kind !== 'assets') return null
   if (ctx.upgrade) return jsonR('assets', 426, {})
   await ctx.assets.handle(ctx.req, ctx.res, ctx.path)
   return { lane: 'assets', handled: true }
+}
+// /_chrome/<digest>/<path> (step 7 ship C, decision 4): a release's bytes off the read-only store, public
+// (no identity — the same bytes for everyone, as /assets/*), `cache-control: public, max-age=31536000,
+// immutable` + `etag: "<digest>"` (the URL names the bytes), gzip ≥ 1 KiB for text. No store (local mode,
+// a portal without the artifacts mount), an unknown digest or a path the manifest does not name → 404.
+export async function laneChrome(ctx) {
+  if (ctx.upgrade) return jsonR('chrome', 426, {})
+  if (ctx.method !== 'GET' && ctx.method !== 'HEAD') return jsonR('chrome', 404, {})
+  const store = ctx.chromeStore
+  const { digest, rest } = ctx.route
+  const body = store ? store.open(digest, rest) : null
+  if (!body) return jsonR('chrome', 404, {})
+  send(ctx.req, ctx.res, 200, body, store.type(rest), { etag: `"${digest}"`, 'cache-control': CHROME_CACHE_CONTROL })
+  return { lane: 'chrome', handled: true }
 }
 
 async function resolvePerson(ctx) {
@@ -180,9 +204,17 @@ export async function laneDocument(ctx) {
   return r('document', 200, { body: doc.html, headers: doc.headers })
 }
 
-const chromeShape = (registry, company) => {
+// chromeShape(registry, company, app) → the document's chrome (step 7 ship C, decision 5): an APP document renders
+// the digest its computer REPORTED (`app.chromeDigest` — the sheet its host built carries that chrome's rules, so JS and
+// CSS must be one digest), an app-less document the company default (`registry.chrome(company).digest`); a release
+// digest (64 hex) puts every chrome asset under `/_chrome/<digest>/` (`base`), and NO digest — the fleet before the
+// first release, local mode's mtime stamp — is today's `/modules/<qid>/…?rev=` path, byte for byte.
+export const asDigest = (d) => (typeof d === 'string' && DIGEST_RE.test(d) ? d : null)
+export const chromeShape = (registry, company, app = null) => {
   const c = registry.chrome(company)
   if (!c?.qid) return null
+  const digest = app ? (asDigest(app.chromeDigest) ?? asDigest(c.digest)) : asDigest(c.digest)
+  if (digest) return { qid: c.qid, rev: digest, hasKit: true, hasStyles: true, base: `/_chrome/${digest}` }
   const has = (n) => (c.dir ? ['js', 'jsx'].some((x) => { try { return fs.statSync(path.join(c.dir, `${n}.${x}`)).isFile() } catch { return false } }) : true)
   const hasStyles = c.dir ? (() => { try { return fs.statSync(path.join(c.dir, 'styles.css')).isFile() } catch { return false } })() : true
   return { qid: c.qid, rev: c.digest, hasKit: has('kit'), hasStyles }
@@ -193,8 +225,8 @@ const chromeShape = (registry, company) => {
 export async function composeFor(ctx, { company, slug, person, epoch, nonce }) {
   const registry = ctx.providers.registry
   const rows = await visibleRows(registry, person.id, (await registry.apps(company)).filter((x) => !x.isChrome))
-  const chrome = chromeShape(registry, company)
   const app = slug ? rows.find((x) => x.slug === slug && x.instance) : null
+  const chrome = chromeShape(registry, company, app)
   let entryImports = []
   if (app && app.hasFrontend !== false) entryImports = await entryImportsFor(ctx, { company, app, person })
   const companies = registry.companies?.() ?? []

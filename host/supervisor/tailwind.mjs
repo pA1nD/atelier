@@ -11,6 +11,10 @@
 // candidates across apps by construction — so every call compiles fresh (b5: 4.9 ms median app).
 // No chrome dir → the app's own `styles.css` passed through unchanged ('' when absent).
 // A compile failure (a broken chrome sheet or app sheet) throws {problems} classified `css`.
+// `chromeBase` (step 7 ship C, decision 8): when the host holds a chrome RELEASE, every relative
+// `url()` of the chrome's source — `fonts/InterVariable.woff2` — is rewritten to `<chromeBase>/…`
+// (`/_chrome/<digest>/fonts/…`) before the compile: the app sheet is served at
+// `/modules/<c>/<app>/styles.css`, where a relative url would name the app's folder.
 import nodeFs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
@@ -63,6 +67,20 @@ export function scanSources(dirs, fs = nodeFs) {
   return out
 }
 
+// rebaseUrls(css, base) → css with every RELATIVE url() rebased under `base` (a root-relative, absolute,
+// data:/blob: url or a fragment is left alone; `../` prefixes cannot leave the bundle)
+export function rebaseUrls(css, base) {
+  if (!base) return css
+  const root = String(base).replace(/\/+$/, '')
+  return String(css).replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (m, quote, raw) => {
+    const u = raw.trim()
+    if (!u || /^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(u)) return m
+    const [pathPart, tail = ''] = (() => { const i = u.search(/[?#]/); return i < 0 ? [u] : [u.slice(0, i), u.slice(i)] })()
+    const rel = path.posix.normalize(pathPart).replace(/^(?:\.\.\/)+/, '').replace(/^\.\/?/, '')
+    return `url(${quote}${root}/${rel}${tail}${quote})`
+  })
+}
+
 function cssProblem(file, e) {
   const text = e?.message ?? String(e)
   const m = /(\d+):(\d+)/.exec(text)
@@ -70,9 +88,11 @@ function cssProblem(file, e) {
 }
 
 /**
- * buildSheet({chromeDir, appDir, fs}) → {css, ms, candidates, chrome:boolean}
+ * buildSheet({chromeDir, appDir, fs, chromeBase, source}) → {css, ms, candidates, chrome:boolean}
  *   chromeDir set   → chrome styles.css compiled, scan = chrome ∪ app
  *   chromeDir unset → the app's styles.css bytes as they are ('' when absent), no compile
+ *   chromeBase      → relative url() in the chrome's source rebased under it (`/_chrome/<digest>`)
+ *   source          → the chrome's sheet source in place of `<chromeDir>/styles.css` (the release verb's rewritten copy)
  * throws {problems:[{file,line,col,message,hint}]} on a compile failure.
  */
 const HOST_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -89,7 +109,7 @@ export function tailwindResolver({ hostRoot = HOST_ROOT } = {}) {
   }
 }
 
-export async function buildSheet({ chromeDir, appDir, fs = nodeFs }) {
+export async function buildSheet({ chromeDir, appDir, fs = nodeFs, chromeBase = null, source = null }) {
   const t0 = performance.now()
   if (!chromeDir) {
     let css = ''
@@ -97,8 +117,9 @@ export async function buildSheet({ chromeDir, appDir, fs = nodeFs }) {
     return { css, ms: performance.now() - t0, candidates: 0, chrome: false }
   }
   const entry = path.join(chromeDir, 'styles.css')
-  let src
-  try { src = fs.readFileSync(entry, 'utf8') } catch { return { css: '', ms: performance.now() - t0, candidates: 0, chrome: false } }
+  let src = source
+  if (src === null) { try { src = fs.readFileSync(entry, 'utf8') } catch { return { css: '', ms: performance.now() - t0, candidates: 0, chrome: false } } }
+  if (chromeBase) src = rebaseUrls(src, chromeBase)
   let compiler
   try { compiler = await compile(src, { base: chromeDir, from: entry, onDependency: () => {}, customCssResolver: tailwindResolver() }) } catch (e) { throw { problems: [cssProblem('chrome/styles.css', e)] } }
   const contents = scanSources([chromeDir, appDir], fs)

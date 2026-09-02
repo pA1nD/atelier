@@ -22,3 +22,15 @@ test('slug and reserved ids (§2: one DNS label, no leading/trailing -, the rese
   for (const id of RESERVED_COMPANY_IDS) assert.ok(isReservedCompany(id), id)
   assert.ok(isReservedCompany('p-anything') && !isReservedCompany('acme') && !isReservedCompany('shell'))
 })
+
+test('chrome releases (step 7 ship C, decision 3): DIGEST_RE, the manifest lines, the digest over the sorted lines, the required files, the path rule', async () => {
+  const { DIGEST_RE, CHROME_REQUIRED_FILES, CHROME_PATH_RE, validChromePath, chromeManifestLines, chromeDigestOf, sha256Hex } = await import('../registry.js')
+  assert.ok(DIGEST_RE.test('a'.repeat(64))); assert.ok(!DIGEST_RE.test('A'.repeat(64))); assert.ok(!DIGEST_RE.test('a'.repeat(63))); assert.ok(!DIGEST_RE.test('sha256:' + 'a'.repeat(57)))
+  assert.deepEqual(CHROME_REQUIRED_FILES, ['frontend.js', 'kit.js', 'styles.css', 'chrome.css'])
+  assert.equal(chromeManifestLines({ 'kit.js': '2', 'chrome.css': '1', 'fonts/a.woff2': '3' }), 'chrome.css\n1\nfonts/a.woff2\n3\nkit.js\n2\n')
+  assert.equal(chromeDigestOf({ b: '2', a: '1' }), sha256Hex('a\n1\nb\n2\n'))
+  assert.equal(chromeDigestOf({ a: '1', b: '2' }), chromeDigestOf({ b: '2', a: '1' }), 'order-free')
+  assert.equal(sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+  for (const ok of ['frontend.js', 'fonts/Inter.woff2', 'a/b/c.png', 'X.JS']) assert.ok(validChromePath(ok) && CHROME_PATH_RE.test(ok), ok)
+  for (const bad of ['manifest.json', '../x.js', 'a/../b.js', '/abs.js', 'a/b/c/d.js', '', 'a//b.js', '.hidden', 'a b.js']) assert.ok(!validChromePath(bad), bad)
+})

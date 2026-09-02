@@ -14,6 +14,7 @@
     "package.js",
     "publish.js",
     "list.js",
+    "chrome.js",
     "collections.js",
     "gate.js",
     "server.js",
@@ -32,7 +33,7 @@
   "scripts": {
     "dev": "node server.js",
     "dev:module": "node server.js",
-    "test": "node --test test/*.test.js protocol/test/*.test.js host/test/*.test.js"
+    "test": "node --test test/*.test.js protocol/test/*.test.js shell/test/*.test.js client/test/*.test.js host/test/*.test.js"
   },
   "engines": {
     "node": ">=24"

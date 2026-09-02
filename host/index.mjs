@@ -28,6 +28,7 @@ import { createAuth } from './protocol/auth.mjs'
 import { createServer, HOST_TLS_PLAIN } from './protocol/server.mjs'
 import { createEvents } from './protocol/events.mjs'
 import { createDevShell } from './protocol/devshell.mjs'
+import { createChromeCache, CACHE_REL } from './chrome/fetch.mjs'
 import { createMetrics } from './metrics.mjs'
 
 export const TEARDOWN_CAP_MS = 30_000
@@ -80,7 +81,8 @@ export function hostDirs(cfg, { local }) {
     [`${W}/apps`, 0o755], [R, 0o711], [`${R}/dev`, 0o710], [`${R}/session`, 0o700],
   ]
   return [...(local ? launcherRows : []), [R, 0o711], [`${W}/.atelier/tmp`, 0o711], [`${R}/w`, 0o711],
-    [`${W}/.atelier/data-dev`, 0o711], [`${W}/.atelier/prod`, 0o711], [`${W}/.atelier/rehearsal`, 0o711], [`${W}/.atelier/backup`, 0o711]]
+    [`${W}/.atelier/data-dev`, 0o711], [`${W}/.atelier/prod`, 0o711], [`${W}/.atelier/rehearsal`, 0o711], [`${W}/.atelier/backup`, 0o711],
+    [`${W}/.atelier/${CACHE_REL}`, 0o755]]   // the chrome cache (step 7 ship C): the host's alone; the releases under it 0755/0644
 }
 // mkdir with the mode (chmod after: the host runs under umask 077); an EXISTING root-owned dir with
 // another mode is chmodded (the launcher closes `$run` 1777 → 0711 before any uid-1000 process exists;
@@ -195,7 +197,23 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const ip = podIp()
   const rcfg = { ...cfg, podIp: ip, hostBind: local ? '127.0.0.1' : (ip ?? '0.0.0.0') }   // the protocol port: the pod IP alone in the fleet (no loopback path for a worker), loopback on a laptop
   if (!local && !ip) hostLog('no pod IP found — the protocol port binds 0.0.0.0')
-  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().filter((w) => w.slot === 'prod').map((w) => w.instance) ?? [] })
+  const chromeRef = { current: null }
+  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().filter((w) => w.slot === 'prod').map((w) => w.instance) ?? [], chromeDigest: () => chromeRef.current?.digest() ?? null })
+  // the chrome cache (DESIGN §6.4, step 7 ship C): the register/heartbeat answer names the computer's effective release
+  // (`registrar.onChrome`), the cache fetches and verifies it AFTER `registered` resolves — never on the boot path — and a
+  // swap reports the held digest at once (one beat) and rebuilds every app's sheet against it, once the supervisor has booted
+  let bootDone; const booted = new Promise((r) => { bootDone = r })
+  const chrome = createChromeCache({
+    cache: `${cfg.work}/.atelier/${CACHE_REL}`, fixedDir: cfg.chromeDir, transport: { chrome: (d) => registrar.chromeFetch(d) }, log: hostLog,
+    onSwap: async (digest, prev) => {
+      await booted
+      await registrar.beat()
+      const r = await supervisorRef.current?.rebuildAll(digest.slice(0, 12))
+      log.line(`host: chrome ${prev ? `${prev.slice(0, 12)}… → ` : ''}${digest.slice(0, 12)}… — ${r?.prod.length ?? 0} prod sheet(s) rebuilt, ${r?.dev.length ?? 0} dev rebuild(s)`)
+    },
+  })
+  chromeRef.current = chrome
+  registrar.onChrome = (c) => chrome.want(c)
   const events = createEvents({ transport: registrar.lane, hostId: () => registrar.hostId, epoch: () => registrar.epoch, log: hostLog, metrics })
   const pusher = local ? null : push({ transport: registrar.lane, running: collector.running, log: hostLog })
   if (pusher) collector.sink(pusher)
@@ -244,6 +262,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
     },
     onResume: (instance, rev) => collector.setRunning(instance, rev),   // frontend reports against a resumed rev are not `no-running-rev`
     onBroadcast: (row, event) => dev?.broadcast(row.instance, event),
+    chrome,
   })
   supervisorRef.current = supervisor
   registrar.onConfigStamp = (instance, updated) => supervisor.onConfigStamp(instance, updated)   // D16: the heartbeat's config stamps → a release under the gate
@@ -251,8 +270,9 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
 
   const refuse = () => fault
   server = createServer({ cfg: rcfg, auth, supervisor, collector, registrar, log: hostLog, frontendReport: report, refuse, metrics })
-  const chromeSheet = cfg.chromeDir ? async () => { const r = await buildSheet({ chromeDir: cfg.chromeDir, appDir: null }); return { body: Buffer.from(r.css), type: 'text/css; charset=utf-8' } } : undefined
-  dev = createDevShell({ cfg, os, supervisor, collector, registrar, auth, log: hostLog, frontendReport: report, chromeSheet, refuse })
+  // the dev shell's chrome sheet: compiled against the chrome the host holds NOW (the release's cache, else ATELIER_CHROME_DIR)
+  const chromeSheet = async () => { const d = chrome.dir(); if (!d) return null; const r = await buildSheet({ chromeDir: d, appDir: null, chromeBase: chrome.base() }); return { body: Buffer.from(r.css), type: 'text/css; charset=utf-8' } }
+  dev = createDevShell({ cfg, os, supervisor, collector, registrar, auth, log: hostLog, frontendReport: report, chromeSheet, chrome, refuse })
 
   // ---- boot (§1.1 order): snapshots → the audit (nothing listens while a credential or a snapshot is
   // readable by a foreign uid) → both listeners → the registrar's epoch (fleet) → host-ready
@@ -260,7 +280,8 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   registered.catch(() => {})
   if (local) await registered
   await supervisor.boot()
-  say(`boot: ${supervisor.apps().length} snapshot(s)`)
+  bootDone()
+  say(`boot: ${supervisor.apps().length} snapshot(s)${chrome.digest() ? ` chrome ${chrome.digest().slice(0, 12)}… (cached)` : ''}`)
   let a = audit(os, cfg, dirfd)
   if (a.absent.length) hostLog(`audit: not present (not checked): ${a.absent.join(', ')}`)
   while (a.bad.length) {
@@ -348,7 +369,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   }
   signals.on('SIGTERM', () => teardown('SIGTERM'))
   signals.on('SIGINT', () => teardown('SIGINT'))
-  return { cfg, os, dirfd, supervisor, registrar, server, dev, events, collector, watchdog, metrics, teardown, fault: () => fault, enterFault }
+  return { cfg, os, dirfd, supervisor, registrar, server, dev, events, collector, watchdog, metrics, chrome, teardown, fault: () => fault, enterFault }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

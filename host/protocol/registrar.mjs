@@ -28,12 +28,16 @@
 //   - `release(row)` = `POST /v1/host/release` through `call()` (DESIGN §10.3 step 4): a spine that does
 //     not answer it yet (404), a 5xx or a network failure is logged and NEVER blocks a deploy — the
 //     host's own `releases.jsonl` is the row until the spine answers. `beat()` reads `config:
-//     [{instance, updated}]` from the heartbeat reply and hands each stamp to `onConfigStamp` (D16).
+//     [{instance, updated}]` from the heartbeat reply and hands each stamp to `onConfigStamp` (D16),
+//     returns the answer, and reads `chrome: {digest, version} | null` — the computer's EFFECTIVE chrome
+//     (step 7 ship C) — from the register AND heartbeat answers into `onChrome` (host/chrome/fetch.mjs
+//     fetches it); the heartbeat body carries `chrome_digest` = the digest the host HOLDS (`chromeDigest()`,
+//     null = no cache yet). `chromeFetch(digest)` = `GET /v1/host/chrome/<digest>` through `call()`.
 import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
 import { randomBytes, generateKeyPairSync } from 'node:crypto'
-import { allowMeta, publicKeyFromHex, publicKeyHex, SLUG_RE, reclaimRule, EventRing } from '../../protocol/index.js'
+import { allowMeta, publicKeyFromHex, publicKeyHex, SLUG_RE, DIGEST_RE, reclaimRule, EventRing } from '../../protocol/index.js'
 
 export const WORKER_UID_BASE = 20000
 export const WORKER_UID_MAX = 65535
@@ -46,6 +50,7 @@ export const REGISTER_BACKOFF_MS = [500, 1000, 2000, 5000, 10_000, 30_000]
 export const EPOCH_MOVED = 'host-epoch-moved'
 export const CONNECT_MS = 5000
 export const TOTAL_MS = 30_000
+export const CHROME_FETCH_MS = 15_000
 export const AGENT = { uid: 1000, gid: 1000 }
 
 export const newInstanceId = () => 'i-' + randomBytes(8).toString('hex')
@@ -78,8 +83,8 @@ export function writeClaimRefused(os, dir, why, now = Date.now) {
  * createRegistrar({ os, dirfd, transport, cfg, log, now, fsx, backoffMs, liveWorkers, setTimer })
  *   liveWorkers: () => instance[] — the supervisor's live workers (heartbeat's visible_apps input)
  */
-export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}, now = Date.now, fsx = nodeFsx, backoffMs = REGISTER_BACKOFF_MS, liveWorkers = () => [], setTimer = setTimeout, clearTimer = clearTimeout, onConfigStamp = null }) {
-  const st = { hostId: null, epoch: null, startedAt: null, company: cfg.company ?? null, origin: cfg.origin ?? null, chat: null, principal: null, token: null, pubKey: null, lastServedAt: null }
+export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}, now = Date.now, fsx = nodeFsx, backoffMs = REGISTER_BACKOFF_MS, liveWorkers = () => [], chromeDigest = () => null, setTimer = setTimeout, clearTimer = clearTimeout, onConfigStamp = null, onChrome = null }) {
+  const st = { hostId: null, epoch: null, startedAt: null, company: cfg.company ?? null, origin: cfg.origin ?? null, chat: null, principal: null, token: null, pubKey: null, lastServedAt: null, chrome: null }
   const apps = new Map()              // instance → {slug, uid, rev, meta, tombstone_at}
   const lastServed = new Map()        // instance → ms
   let settleFrom = null, hb = null, stopped = false, registering = null
@@ -98,6 +103,14 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
       apps.set(a.instance, { slug: a.slug, uid: a.uid ?? prev?.uid ?? null, rev: a.rev ?? prev?.rev ?? null, meta: a.meta ?? prev?.meta ?? {}, tombstone_at: a.tombstone_at ?? null, deployed_rev: a.deployed_rev ?? prev?.deployed_rev ?? null })
     }
     transport.setToken?.(st.token)
+    readChrome(r)
+  }
+  // the answer's `chrome` (register and heartbeat): `{digest, version}` | null; an absent field keeps the last word
+  function readChrome(r) {
+    if (!r || !('chrome' in r)) return
+    const c = r.chrome && typeof r.chrome === 'object' && typeof r.chrome.digest === 'string' && DIGEST_RE.test(r.chrome.digest) ? { digest: r.chrome.digest, version: typeof r.chrome.version === 'string' ? r.chrome.version : null } : null
+    st.chrome = c
+    try { hooks.onChrome?.(c) } catch (e) { log(`registrar: chrome ${c?.digest?.slice(0, 12) ?? 'null'}: ${e?.message ?? e}`) }
   }
 
   // register(): bootstrap → token + epoch. Retries with backoff until it succeeds or stop().
@@ -201,15 +214,18 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
   }
   async function beat() {
     let r
-    try { r = await call('heartbeat', { visible_apps: visibleApps(), last_served_at: st.lastServedAt, pod_ip: cfg.podIp ?? null }) } catch (e) { log(`registrar: heartbeat failed (${e?.message ?? e})`); return null }
+    let held = null
+    try { held = chromeDigest() ?? null } catch {}
+    try { r = await call('heartbeat', { visible_apps: visibleApps(), last_served_at: st.lastServedAt, pod_ip: cfg.podIp ?? null, chrome_digest: held }) } catch (e) { log(`registrar: heartbeat failed (${e?.message ?? e})`); return null }
     // D16: a config PUT at the spine is a release — the reply names the instances whose app_config moved
     for (const c of Array.isArray(r?.config) ? r.config : []) {
       if (typeof c?.instance !== 'string' || c.updated == null) continue
       try { hooks.onConfigStamp?.(c.instance, c.updated) } catch (e) { log(`registrar: config stamp ${c.instance}: ${e?.message ?? e}`) }
     }
+    readChrome(r)
     return r
   }
-  const hooks = { onConfigStamp }
+  const hooks = { onConfigStamp, onChrome }
   // release(row) → the spine's {ok, id} | null (logged, never thrown): the release row is the host's first;
   // a green deploy/rollback/adopt moves the local `deployed_rev` too (the next boot's anchor)
   async function release(row) {
@@ -248,9 +264,12 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
   return {
     get hostId() { return st.hostId }, get epoch() { return st.epoch }, get startedAt() { return st.startedAt },
     get company() { return st.company }, get origin() { return st.origin }, get chat() { return st.chat },
-    get principal() { return st.principal }, get token() { return st.token },
+    get principal() { return st.principal }, get token() { return st.token }, get chrome() { return st.chrome },
     register, claim, unlink, modulesChanged, heartbeat, beat, served, reconcile, visibleApps, release,
     set onConfigStamp(fn) { hooks.onConfigStamp = fn }, get onConfigStamp() { return hooks.onConfigStamp },
+    set onChrome(fn) { hooks.onChrome = fn }, get onChrome() { return hooks.onChrome },
+    // chromeFetch(digest) → {digest, version, files:{path: base64}} — the bundle by digest (host/chrome/fetch.mjs verifies it)
+    chromeFetch: (digest) => call('chrome', digest),
     draining: () => call('draining'),
     appConfig: (instance) => call('appConfig', instance),
     lane: { events: (batch) => call('events', batch), appError: (body) => call('appError', body) },
@@ -263,13 +282,13 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
 
 // ---- spineTransport(cfg, opts): HTTP to ATELIER_SPINE_URL (DESIGN §7). Bearer = the host token;
 // register() alone uses the bootstrap secret (read once from $ATELIER_RUN/bootstrap.token).
-export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, totalMs = TOTAL_MS } = {}) {
+export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, totalMs = TOTAL_MS, chromeMs = CHROME_FETCH_MS } = {}) {
   const base = new URL(cfg.spineUrl)
   const bootstrap = bootstrapToken ?? (() => { try { return fs.readFileSync(cfg.run + '/bootstrap.token', 'utf8').trim() } catch { return null } })()
   let token = null
   const lib = base.protocol === 'https:' ? https : http
 
-  function request(method, path, body, { auth = 'token' } = {}) {
+  function request(method, path, body, { auth = 'token', totalMs: total = totalMs } = {}) {
     return new Promise((resolve, reject) => {
       const cred = auth === 'bootstrap' ? bootstrap : token
       const payload = body === undefined ? null : Buffer.from(JSON.stringify(body))
@@ -286,12 +305,12 @@ export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, to
         })
         res.on('error', reject)
       })
-      const total = setTimeout(() => req.destroy(new Error(`spine: total timeout ${totalMs} ms`)), totalMs)
-      total.unref?.()
+      const totalTimer = setTimeout(() => req.destroy(new Error(`spine: total timeout ${total} ms`)), total)
+      totalTimer.unref?.()
       req.on('timeout', () => req.destroy(new Error(`spine: connect timeout ${connectMs} ms`)))   // fires before the socket is live: no bytes yet
       req.on('socket', (s) => s.once('connect', () => req.setTimeout(0)))
-      req.on('error', (e) => { clearTimeout(total); reject(e) })
-      req.on('close', () => clearTimeout(total))
+      req.on('error', (e) => { clearTimeout(totalTimer); reject(e) })
+      req.on('close', () => clearTimeout(totalTimer))
       req.end(payload ?? undefined)
     })
   }
@@ -309,6 +328,8 @@ export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, to
     appConfig: (instance) => body(request('GET', `/v1/apps/${encodeURIComponent(instance)}/config`)),
     draining: () => body(request('POST', '/v1/host/draining', {})),
     release: (b) => body(request('POST', '/v1/host/release', b)),
+    // the chrome bundle by digest (~1.2 MB base64): its own bound (15 s), the fetch lane's budget
+    chrome: (digest) => body(request('GET', `/v1/host/chrome/${encodeURIComponent(digest)}`, undefined, { totalMs: chromeMs })),
   }
 }
 
@@ -368,6 +389,7 @@ export function localTransport(cfg = {}, dirfd, { os, fsx = nodeFsx, now = Date.
     async appError(b) { appErrors.push(b); if (appErrors.length > 200) appErrors.shift(); return { ok: true } },
     async appConfig() { return { env: {} } },
     async draining() { return { ok: true } },
+    async chrome(digest) { throw new TransportError(404, { error: 'unknown-digest', digest }) },   // no releases on a laptop: the fixed folder is the chrome
     // the release twin: the row kept (last 50), `deployed_rev` on the app row when green
     async release(r) {
       if (!r || typeof r.instance !== 'string') throw new TransportError(400, { error: 'bad-instance' })

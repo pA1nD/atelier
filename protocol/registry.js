@@ -21,6 +21,8 @@
 //   - reclaim (D1 items 5-6): a tombstoned slug is reserved 24 h against OTHER computers; the
 //     owning computer adopts a live row / revives a tombstoned one (same instance id, data dir back).
 
+import { createHash } from 'node:crypto'
+
 // One DNS label, no leading/trailing `-` (§2). Shared by company ids and app slugs.
 export const SLUG_RE = /^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$/
 // §2 verbatim: `api assets modules global atelier portal apps www go` (`go`: the portal's /go route,
@@ -43,6 +45,22 @@ const validators = {
   color: (v) => typeof v === 'string' && COLOR_RE.test(v),
   primary: (v) => typeof v === 'boolean',
 }
+
+// ---- chrome releases (step 7 ship C, R-CHROME; LANES-CHROME decision 3): the digest rule the verb
+// computes, the spine checks end to end (registry/protocol.ts), the shell keys its store by and the
+// host verifies a fetched bundle against. A bundle = `{frontend.js, kit.js, styles.css, chrome.css,
+// fonts/*.woff2}`; digest = sha256 over the sorted manifest lines `<path>\n<sha256(bytes)>\n`, 64
+// lowercase hex. The manifest itself (`manifest.json`) is the store's, never a bundle path.
+export const DIGEST_RE = /^[0-9a-f]{64}$/
+export const CHROME_REQUIRED_FILES = ['frontend.js', 'kit.js', 'styles.css', 'chrome.css']
+// a bundle path: relative, at most three plain segments, no dot segments
+export const CHROME_PATH_RE = /^(?:[a-z0-9][a-z0-9_.-]{0,63}\/){0,2}[a-z0-9][a-z0-9_.-]{0,63}$/i
+export const CHROME_MANIFEST = 'manifest.json'
+export const validChromePath = (p) => typeof p === 'string' && p !== CHROME_MANIFEST && CHROME_PATH_RE.test(p) && !p.split('/').some((s) => s === '.' || s === '..')
+// chromeManifestLines(shas: {path → sha256 hex}) → the digest's input; chromeDigestOf(shas) → the digest
+export const chromeManifestLines = (shas) => Object.keys(shas).sort().map((p) => `${p}\n${shas[p]}\n`).join('')
+export const chromeDigestOf = (shas) => createHash('sha256').update(chromeManifestLines(shas)).digest('hex')
+export const sha256Hex = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
 export const isReservedCompany = (id) => RESERVED_COMPANY_IDS.includes(id) || String(id).startsWith(RESERVED_COMPANY_PREFIX)
 export const validCompany = (id) => typeof id === 'string' && SLUG_RE.test(id) && !isReservedCompany(id)

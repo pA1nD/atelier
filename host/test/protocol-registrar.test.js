@@ -11,7 +11,7 @@ import { keys, memoryFsx } from './protocol-fixtures.mjs'
 // A minimal spine: computers {id, company, token, epoch}, apps rows keyed by instance; the write
 // rules are protocol/registry's (authorizeWrite + reclaimRule), so the registrar meets the real gate.
 function fakeSpine({ computer = 'computer-1', company = 'acme', bootstrap = 'boot-secret', shellKeys = keys() } = {}) {
-  const s = { calls: [], apps: new Map(), token: null, epoch: null, failRegister: 0, rows: [], releases: [], releaseDoor: 'ok', config: [] }
+  const s = { calls: [], apps: new Map(), token: null, epoch: null, failRegister: 0, rows: [], releases: [], releaseDoor: 'ok', config: [], chrome: null, bundles: {} }   // chrome: the answer's `chrome`; bundles: digest → files (base64)
   const others = new Map()   // slug → computer (rows other computers hold, for 409s)
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
   const read = (req) => new Promise((r) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => r(b ? JSON.parse(b) : {})) })
@@ -25,11 +25,12 @@ function fakeSpine({ computer = 'computer-1', company = 'acme', bootstrap = 'boo
       if (s.failRegister > 0) { s.failRegister--; return json(res, 503, { error: 'busy' }) }
       s.token = randomBytes(8).toString('hex'); s.epoch = randomBytes(8).toString('hex')
       return json(res, 200, { host_id: computer, epoch: s.epoch, token: s.token, company, origin: `https://${company}.portal.pa1nd.de`, chat: 'chat-1', principal: { id: 'p-agent', name: 'Bayard' },
-        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at, deployed_rev: a.deployed_rev ?? null })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey) })
+        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at, deployed_rev: a.deployed_rev ?? null })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey), chrome: s.chrome })
     }
     if (auth !== s.token) return json(res, 401, { error: EPOCH_MOVED })
     let m
-    if (url.pathname === '/v1/host/heartbeat') return json(res, 200, { ok: true, config: s.config })
+    if (url.pathname === '/v1/host/heartbeat') return json(res, 200, { ok: true, config: s.config, chrome: s.chrome })
+    if ((m = /^\/v1\/host\/chrome\/([^/]+)$/.exec(url.pathname))) { if (!/^[0-9a-f]{64}$/.test(m[1])) return json(res, 400, { error: 'bad-digest' }); const b = s.bundles[m[1]]; return b ? json(res, 200, { digest: m[1], version: b.version ?? null, files: b.files }) : json(res, 404, { error: 'unknown-digest', digest: m[1] }) }
     if (url.pathname === '/v1/host/release') {
       if (s.releaseDoor === '404') return json(res, 404, { error: 'no-route' })
       if (s.releaseDoor === '500') return json(res, 500, { error: 'boom' })
@@ -184,7 +185,7 @@ test('401 host-epoch-moved on any call → register again with a new epoch, then
     const e1 = r.registrar.epoch
     spine.revoke()
     const hb = await r.registrar.beat()
-    assert.deepEqual(hb, { ok: true, config: [] })
+    assert.deepEqual(hb, { ok: true, config: [], chrome: null })
     assert.notEqual(r.registrar.epoch, e1); assert.equal(r.registrar.epoch, spine.epoch)
     assert.deepEqual(spine.calls.slice(-3).map((c) => c.path), ['/v1/host/heartbeat', '/v1/host/register', '/v1/host/heartbeat'])
     assert.ok(r.logs.some((l) => l.includes(EPOCH_MOVED)))
@@ -214,7 +215,7 @@ test('heartbeat body: visible_apps = live workers ∪ served in the last 10 min;
     r.registrar.served('i-a'); t += 1000; r.registrar.served('i-b')
     t += 10 * 60 * 1000 - 500                      // i-a is 10 min + 0.5 s old → out; i-b (9 min 59.5 s) inside
     await r.registrar.beat()
-    assert.deepEqual(spine.calls.at(-1).body, { visible_apps: 2, last_served_at: 1_001_000, pod_ip: '10.0.0.7' })
+    assert.deepEqual(spine.calls.at(-1).body, { visible_apps: 2, last_served_at: 1_001_000, pod_ip: '10.0.0.7', chrome_digest: null })
     const timer = r.registrar.heartbeat(50)
     await new Promise((res) => setTimeout(res, 120))
     r.registrar.stop()
@@ -294,7 +295,7 @@ test('heartbeat config stamps (D16): every {instance, updated} of the reply reac
     const r = rig(spine)
     r.registrar.onConfigStamp = (instance, updated) => stamps.push([instance, updated])
     await r.registrar.register()
-    assert.deepEqual(await r.registrar.beat(), { ok: true, config: [] })
+    assert.deepEqual(await r.registrar.beat(), { ok: true, config: [], chrome: null })
     assert.deepEqual(stamps, [])
     spine.config = [{ instance: 'i-0123456789abcdef', updated: '2026-09-02T10:00:00.000Z' }, { instance: 'i-fedcba9876543210', updated: 1756807200000 }, { nope: 1 }, { instance: 'i-x' }]
     await r.registrar.beat()
@@ -363,4 +364,47 @@ test('local transport twin: register/claim/adopt/unlink/revive over registry.jso
   assert.equal(transport.appErrors.length, 1)
   assert.deepEqual(await transport.appConfig(a.instance), { env: {} })
   assert.ok(SLUG_RE.test('todo'))
+})
+
+test('the chrome seams (step 7 ship C): the register and heartbeat answers\' `chrome` reach onChrome and `registrar.chrome` (null too; an absent field keeps the last word); the heartbeat body reports the digest the host HOLDS (`chromeDigest()`); beat() returns the answer; chromeFetch(digest) reads GET /v1/host/chrome/<digest> through call() (a 404 throws the TransportError, an epoch move re-registers); the local twin answers 404', async () => {
+  const D = 'd'.repeat(64)
+  const spine = fakeSpine(); await spine.listen()
+  spine.chrome = { digest: D, version: '0.2.2' }
+  spine.bundles[D] = { version: '0.2.2', files: { 'frontend.js': Buffer.from('export function chrome(){}').toString('base64'), 'kit.js': 'a2l0', 'styles.css': 'Y3Nz', 'chrome.css': 'Y3Nz' } }
+  try {
+    const seen = []
+    let held = null
+    const os = memory({}); const dirfd = os.openDir('/work/.atelier')
+    const transport = spineTransport({ spineUrl: spine.url, run: '/run/atelier' }, { bootstrapToken: 'boot-secret' })
+    const registrar = createRegistrar({ os, dirfd, transport, cfg: { podIp: '10.0.0.7' }, log: () => {}, fsx: memoryFsx(), backoffMs: [5, 5], chromeDigest: () => held, onChrome: (c) => seen.push(c) })
+    await registrar.register()
+    assert.deepEqual(seen, [{ digest: D, version: '0.2.2' }]); assert.deepEqual(registrar.chrome, { digest: D, version: '0.2.2' })
+    held = D
+    const answer = await registrar.beat()
+    assert.deepEqual(answer, { ok: true, config: [], chrome: { digest: D, version: '0.2.2' } }, 'beat() returns the answer')
+    assert.equal(spine.calls.at(-1).body.chrome_digest, D, 'the body reports the held digest')
+    assert.equal(seen.length, 2)
+    spine.chrome = null
+    await registrar.beat()
+    assert.equal(seen.at(-1), null); assert.equal(registrar.chrome, null, 'null: the spine names no release')
+    spine.chrome = { digest: 'not a digest' }
+    await registrar.beat()
+    assert.equal(registrar.chrome, null, 'a shapeless chrome is none')
+    // the fetch: the bundle, then a 404, then an epoch move
+    const b = await registrar.chromeFetch(D)
+    assert.equal(b.digest, D); assert.equal(b.version, '0.2.2'); assert.equal(Buffer.from(b.files['frontend.js'], 'base64').toString(), 'export function chrome(){}')
+    await assert.rejects(registrar.chromeFetch('e'.repeat(64)), (e) => e instanceof TransportError && e.status === 404 && e.body.error === 'unknown-digest')
+    spine.revoke()
+    const again = await registrar.chromeFetch(D)
+    assert.equal(again.digest, D); assert.ok(spine.calls.filter((c) => c.path === '/v1/host/register').length >= 2, 're-registered on the epoch move')
+    // a registrar without the hook: the answer is kept, nothing thrown
+    const quiet = createRegistrar({ os, dirfd, transport, cfg: {}, log: () => {}, fsx: memoryFsx(), backoffMs: [5, 5] })
+    spine.chrome = { digest: D, version: '0.2.2' }
+    await quiet.register()
+    assert.deepEqual(quiet.chrome, { digest: D, version: '0.2.2' })
+    quiet.stop(); registrar.stop()
+  } finally { await spine.close() }
+  const os2 = memory({}); const local = localTransport({ company: 'local' }, os2.openDir('/work/.atelier'), { os: os2, fsx: memoryFsx() })
+  assert.equal((await local.register()).chrome, undefined, 'the twin names no release')
+  await assert.rejects(local.chrome(D), (e) => e instanceof TransportError && e.status === 404)
 })

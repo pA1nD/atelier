@@ -8,6 +8,7 @@
  *   atelier add <source|name>     subscribe to a collection / install from one
  *   atelier update [<name>]       upgrade installed modules to newer cuts
  *   atelier list                  your collections and what they offer
+ *   atelier chrome release <dir>  build a chrome release payload (step 7 ship C; chrome.js)
  *
  * NOTE: these verbs are reserved words for standalone mode — a module
  * literally named `add` can still be run with `node server.js add`.
@@ -18,6 +19,7 @@ const VERBS = new Map([
   ['package', './package.js'],
   ['publish', './publish.js'],
   ['list', './list.js'],
+  ['chrome', './chrome.js'],
   ['doctor', './doctor/cli.mjs'],
 ]);
 const verb = VERBS.get(process.argv[2]);

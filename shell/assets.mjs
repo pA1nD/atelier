@@ -32,7 +32,7 @@ export const textual = (type) => /^(text\/|application\/(javascript|json|xml))/.
 export function send(req, res, status, body, type, extra = {}) {
   let buf = Buffer.isBuffer(body) ? body : Buffer.from(body)
   const headers = { 'content-type': type, 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff', ...extra }
-  if (extra.etag && req.headers?.['if-none-match'] === extra.etag) { res.writeHead(304, { etag: extra.etag, 'cache-control': 'no-cache' }); return res.end() }
+  if (extra.etag && req.headers?.['if-none-match'] === extra.etag) { res.writeHead(304, { etag: extra.etag, 'cache-control': headers['cache-control'] }); return res.end() }
   if (gzipOk(req) && textual(type) && buf.length >= GZIP_MIN) { buf = zlib.gzipSync(buf); headers['content-encoding'] = 'gzip'; headers.vary = 'accept-encoding' }
   headers['content-length'] = buf.length
   res.writeHead(status, headers)

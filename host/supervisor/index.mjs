@@ -17,9 +17,14 @@
 // Collaborators are injected (DESIGN §4): `spawn` = worker/spawn.mjs spawnWorker, `proxy` =
 // worker/proxy.mjs proxyRequest, `jail` = worker/jail.mjs {jailPlan, applyJail, claimRoundTrip, …},
 // `install` = worker/install.mjs installDeps, `hook` = worker/hook.mjs runHook, `report` =
-// errors/collector.mjs report, `registrar` = protocol/registrar.mjs. Without `jail`/`install` the
-// supervisor creates the per-instance dirs itself and treats an install event as a plain rebuild
-// (local mode / tests).
+// errors/collector.mjs report, `registrar` = protocol/registrar.mjs, `chrome` = host/chrome/fetch.mjs
+// createChromeCache (`dir()` the chrome folder every sheet compiles against — the cache's `current`
+// when the host holds a release, else `cfg.chromeDir`; `digest()`/`base()` the held release; absent =
+// `cfg.chromeDir` alone, as before). Without `jail`/`install` the supervisor creates the per-instance
+// dirs itself and treats an install event as a plain rebuild (local mode / tests). `rebuildAll(label)`
+// (step 7 ship C, decision 8) follows a chrome swap: every prod slot gets a NEW rev = its code + a sheet
+// compiled against the new chrome (`store.clone`, no gate, no restart — the worker keeps running; `onSwap`
+// → modulesChanged → the company's frames), every linked row a dev rebuild.
 import nodeFs from 'node:fs'
 import path from 'node:path'
 import { discover, checkModuleJson } from './discovery.mjs'
@@ -44,13 +49,16 @@ export const DEFAULT_TIMING = Object.freeze({
 
 /** @typedef {{instance, slug, company, uid, rev:number|null, state:'live'|'stopped'|'loading'|'failed'|'down'|'undeployed'|'unclaimed', pid?:number, sock?:string, dataDir, dir, deployed_rev, prod_rev, dev_rev, prod_state, dev_state}} AppRow */
 
-export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report = () => {}, registrar, onSwap = () => {}, onDevSwap = () => {}, onResume = () => {}, spawn, proxy, fs = nodeFs, timing = {}, jail = null, install = null, hook = null, onBroadcast = () => {}, hostVersion = '2.0.0', treeOk = () => true, metrics = createMetrics(), hostEnv = process.env }) {
+export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report = () => {}, registrar, onSwap = () => {}, onDevSwap = () => {}, onResume = () => {}, spawn, proxy, fs = nodeFs, timing = {}, jail = null, install = null, hook = null, onBroadcast = () => {}, hostVersion = '2.0.0', treeOk = () => true, metrics = createMetrics(), hostEnv = process.env, chrome = null }) {
   const T = { ...DEFAULT_TIMING, ...timing, deploy: { ...DEPLOY_TIMING, ...(timing.deploy ?? {}) } }
   const emit = typeof log === 'function' ? log : (line) => log.write(line)
   const store = createStore({ os, dirfd, fs, log: emit, hostVersion })
   const rows = new Map()   // instance → row
   const appsDir = path.join(cfg.work ?? '/work', 'apps')
-  const chromeName = cfg.chromeDir ? path.basename(cfg.chromeDir) : null
+  // the chrome every sheet compiles against: the held release (host/chrome/fetch.mjs) first, `cfg.chromeDir` else
+  const chromeDirOf = () => chrome?.dir?.() ?? cfg.chromeDir ?? null
+  const chromeBaseOf = () => chrome?.base?.() ?? null
+  const chromeNameOf = () => chrome?.digest?.() ?? (cfg.chromeDir ? path.basename(cfg.chromeDir) : null)   // revision.json.chrome: the digest, else the folder's name
   const company = () => registrar?.company ?? cfg.company ?? 'local'
   const origin = () => registrar?.origin ?? cfg.origin ?? 'http://127.0.0.1:1844'
   // Paths handed to OTHER processes (the worker's codeDir/dataDir/tmpDir, the watchdog's du as the worker
@@ -192,7 +200,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     const [backend, frontend, sheet] = await withGroup(row.uid, () => Promise.all([
       bundleBackend({ appDir, fs }),
       transformFrontend({ appDir, rev, fs }),
-      buildSheet({ chromeDir: cfg.chromeDir, appDir, fs }),
+      buildSheet({ chromeDir: chromeDirOf(), appDir, fs, chromeBase: chromeBaseOf() }),
     ]))
     // the §4.5 Tailwind row: buildSheet's own ms, cold = this app's first compiled sheet of this host
     // life (no chrome dir = no compile — the app's own styles.css passed through — and no sample)
@@ -288,7 +296,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     const rev = next.live.rev
     slot.live = next.live; slot.rev = rev; slot.state = 'live'; row.broken = null; row.fingerprint = fp
     slot.resources = next.resources; slot.suspendable = next.suspendable; slot.restarts = 0
-    store.commit(row.instance, rev, { slug: row.slug, sha256, bytes, fingerprint: fp, chrome: chromeName })
+    store.commit(row.instance, rev, { slug: row.slug, sha256, bytes, fingerprint: fp, chrome: chromeNameOf() })
     if (old) {
       slot.kept.push({ rev: old.rev, until: os.now() + T.keepMs })
       slot.retiring.add(old)
@@ -489,6 +497,40 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     rel, dot, realPath, workerSpec, startWorker, stopLive, buildArtefacts, prune, prodSlot, exportDir, withInstalling, later,
     onSwap, armIdle: (row, slot) => armIdle(row, slot), withGroupSync, checkModuleJson: (dir) => checkModuleJson(dir, fs),
   })
+  // chromeRelease(row, label): the prod slot's sheet rebuilt against the chrome the host now holds — a new rev of the SAME
+  // code (store.clone), the `current` pointer moved, the previous rev kept for the window, `onSwap` → modulesChanged.
+  // The prod worker keeps running (its code did not change); the next resume starts from the new rev. Never during a
+  // deploy (that release builds against the new chrome itself), never on a down or undeployed slot.
+  async function chromeRelease(row, label) {
+    const slot = row.prod
+    if (!slot || slot.rev == null || slot.adoptPending || slot.state === 'down' || row.deploying) return null
+    if (!treeOk()) return null
+    const cur = store.current(row.instance)
+    if (!cur) return null
+    const p = (async () => {
+      let sheet
+      try { sheet = await withGroup(row.uid, () => buildSheet({ chromeDir: chromeDirOf(), appDir: slot.appDir, fs, chromeBase: chromeBaseOf() })) } catch (e) {
+        const hint = e?.problems ? formatHint(e.problems[0]) : (e?.code ?? e?.message ?? String(e))
+        emit(`[${row.slug}] chrome ${label}: prod sheet NOT rebuilt (${hint}) — rev ${slot.rev} keeps its sheet`)
+        return null
+      }
+      let rev
+      try { rev = store.nextRev(row.instance) } catch (e) { emit(`[${row.slug}] chrome ${label}: ${e.code ?? e.message}`); return null }
+      row.counter = rev
+      try { store.clone(row.instance, cur.rev, rev, row.uid, { css: sheet.css }) } catch (e) { emit(`[${row.slug}] chrome ${label}: snapshot write failed (${e.code ?? e.message})`); try { store.remove(row.instance, rev) } catch {} return null }
+      const prev = slot.rev
+      store.commitProd(row.instance, rev, { commit: slot.commit, message: `chrome ${label}`, legacy: !!slot.legacy, chrome: chromeNameOf() })
+      slot.rev = rev
+      if (prev != null && prev !== rev) { slot.kept.push({ rev: prev, until: os.now() + T.keepMs }); later(T.keepMs + 50, () => prune(row)) }
+      if (sheet.chrome) { metrics.tailwind(row.slug, sheet.ms, { cold: !row.tailwindWarm }); row.tailwindWarm = true }
+      try { onSwap(row.instance, rev) } catch {}
+      emit(`[${row.slug}] rev ${rev} chrome ${label} (prod sheet rebuilt from rev ${prev})`)
+      return rev
+    })()
+    row.deploying = p
+    try { return await p } finally { if (row.deploying === p) row.deploying = null }
+  }
+
   function onConfigStamp(instance, updated) {
     const row = rows.get(instance)
     if (!row) return
@@ -589,6 +631,18 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       return d
     },
 
+    // rebuildAll(label) → {prod:[[instance, rev]], dev:[instance]}: after a chrome swap (host/chrome/fetch.mjs onSwap)
+    async rebuildAll(label = 'swap') {
+      const out = { prod: [], dev: [] }
+      for (const row of [...rows.values()]) {
+        if (!row.linked) continue
+        const rev = await chromeRelease(row, label).catch((e) => { emit(`[${row.slug}] chrome ${label}: ${e?.stack ?? e}`); return null })
+        if (rev != null) out.prod.push([row.instance, rev])
+        if (row.dir && row.claimed) { out.dev.push(row.instance); rebuild(row) }
+        else { row.attempted = null; row.fingerprint = null }   // a boot row not yet claimed: the first scan rebuilds it (needsBuild reads null as never built)
+      }
+      return out
+    },
     apps: () => [...rows.values()].map(appRow),
     // workers(): every live worker of every slot (the watchdog's input; `key` tells two workers of one instance apart)
     workers: () => {

@@ -114,12 +114,13 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       link(inst, 'current-dev', rev)
     },
     // commitProd(inst, rev, prod) — the PROD release: `revision.json.prod = {rev, commit, deployedAt, message, legacy?}`
-    // + the `current` symlink. The counter is bumped to `rev` when a deploy minted it.
-    commitProd(inst, rev, { commit, deployedAt = new Date(os.now()).toISOString(), message = null, legacy = false }) {
+    // + the `current` symlink. The counter is bumped to `rev` when a deploy minted it. `chrome` (step 7 ship C: the
+    // chrome release digest the prod sheet was built with) stamps `revision.json.chrome` when given.
+    commitProd(inst, rev, { commit, deployedAt = new Date(os.now()).toISOString(), message = null, legacy = false, chrome }) {
       const cur = store.revision(inst) ?? {}
       const prod = { rev, commit, deployedAt, message }
       if (legacy) prod.legacy = true
-      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev: Math.max(cur.rev ?? 0, rev), prod }, 0o600)
+      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev: Math.max(cur.rev ?? 0, rev), ...(chrome !== undefined ? { chrome } : {}), prod }, 0o600)
       link(inst, 'current', rev)
     },
     // prodPatch(inst, patch) — merges fields into the `prod` block (a key set to undefined is removed): the DOWN
@@ -129,6 +130,18 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       const prod = { ...(cur.prod ?? {}), ...patch }
       for (const k of Object.keys(patch)) if (patch[k] === undefined) delete prod[k]
       writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, prod }, 0o600)
+    },
+    // clone(inst, fromRev, toRev, uid, {css}) → {dir, sha256, bytes}: a NEW rev = rev-<from>'s artefacts (backend, map,
+    // frontend/*) with `styles.css` replaced — the chrome swap's prod sheet rebuild (step 7 ship C): the same code the
+    // worker runs, one new sheet, one new rev (the ETag is `rev-N`, so a sheet change is a rev change)
+    clone(inst, fromRev, toRev, uid, { css }) {
+      const from = revDir(inst, fromRev)
+      const frontend = new Map()
+      const fe = path.join(from, 'frontend')
+      const walk = (d, rel) => { for (const ent of fs.readdirSync(d, { withFileTypes: true })) { const r = rel ? `${rel}/${ent.name}` : ent.name; if (ent.isDirectory()) walk(path.join(d, ent.name), r); else if (ent.isFile()) frontend.set(r, fs.readFileSync(path.join(d, ent.name))) } }
+      try { walk(fe, '') } catch (e) { if (e.code !== 'ENOENT') throw e }
+      const readOr = (rel) => { try { return fs.readFileSync(path.join(from, rel)) } catch (e) { if (e.code === 'ENOENT') return null; throw e } }
+      return store.write(inst, toRev, uid, { backend: readOr('backend.js'), map: readOr('backend.js.map'), frontend, css })
     },
     // link(inst, name, rev) — one pointer symlink, swapped by rename
     link: (inst, name, rev) => link(inst, name, rev),
