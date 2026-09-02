@@ -288,3 +288,30 @@ test('sleep mode (API 50 `sleep` → registrar.sleep): on an always-on computer 
     assert.equal(w.reports.length, 0)
   } finally { await w.done(sup) }
 })
+
+test('sleep mode, the other arming paths (review Codex 5): a boot row resumed by a request on an always-on computer, and a save (the load-beside swap), arm no dev timer — the worker stays live past the window', async () => {
+  const w = world()
+  const dir = w.app('quiet', { 'module.json': APP_JSON('Q'), 'backend.js': QUIET })
+  w.registrar.sleep = 'always-on'
+  let sup = w.make({ timing: { devIdleMs: 150 } })
+  try {
+    await sup.scan()
+    const q = await live(sup, 'quiet')
+    await sup.teardown()
+    // a second host life: boot → the first scan reads the mode → a request resumes the boot row's dev worker
+    sup = w.make({ timing: { devIdleMs: 150 } })
+    await sup.boot(); await sup.scan()
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'stopped', 'a fresh always-on pod boots with cold dev slots')
+    assert.equal((await api(sup, q, '/rev')).status, 200)
+    const row = sup.rows.get(q.instance)
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'live'); assert.equal(row.dev.idleTimer, null, 'the resume armed no timer')
+    // a save: the swap arms none either
+    fs.writeFileSync(path.join(dir, 'backend.js'), BACKEND(2))
+    await waitFor(() => sup.resolve('acme', 'quiet').dev_rev === 2)
+    assert.equal(row.dev.idleTimer, null, 'the swap armed no timer')
+    await sleep(400)   // past two windows
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'live'); assert.equal(row.dev.idleTimer, null)
+    assert.ok(!w.lines.some((l) => /STOPPED \(dev\)/.test(l)))
+    assert.equal(w.reports.length, 0)
+  } finally { await w.done(sup) }
+})
