@@ -120,26 +120,33 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // --- the app config (DESIGN §7 appConfig → {env:{K:V}}; the hold rule of §6.1) -----------------------------
   // readConfig(row) → the composed document {K:V}, fresh from the door and cached as `row.configDoc` for this host life
   // (never to disk); a 404 (no config rows) is the empty document. Throws the transport's error on anything else — a
-  // 5xx, API 50's `503 no config key`, a network error, a timeout — and throws on a MASKED document: a 200 whose
-  // `sealed_missing` names keys the spine could not unseal (API 50) is no document at all — the partial env never becomes
-  // the last-known one; the error names the keys, never a value. The caller decides.
+  // 5xx, API 50's `503 no config key`, a network error, a timeout — and throws `{masked:true}` on a MASKED document: a 200
+  // whose `sealed_missing` names keys the spine could not unseal (API 50) is no document at all — the partial env never
+  // becomes the last-known one; the error names the keys, never a value. The caller decides.
   async function readConfig(row) {
     if (!registrar?.appConfig) return {}
     let r
     try { r = await registrar.appConfig(row.instance) }
     catch (e) { if (e?.status !== 404) throw e; r = { env: {} } }
     const missing = Array.isArray(r?.sealed_missing) ? r.sealed_missing.filter((k) => typeof k === 'string') : []
-    if (missing.length) throw new Error(`spine cannot unseal ${missing.join(', ')} (sealed_missing)`)
+    if (missing.length) throw Object.assign(new Error(`spine cannot unseal ${missing.join(', ')} (sealed_missing)`), { masked: true })
     row.configDoc = r?.env ?? {}
     if (row.configWhy) { row.configWhy = null; emit(`[${row.slug}] app config: the door answers again`) }
     return row.configDoc
   }
-  // configFailed(row, e): one line per row per reason (not one per spawn or per scan), until the door answers again
-  function configFailed(row, e) {
+  // configFailed(row, e, {running}): one line per row per reason (not one per spawn or per scan), until the door answers again.
+  // The tail says what the host does about it: a masked document holds the spawn whatever the cache holds; a closed door
+  // holds it without a cache and spawns on the cache with one; `running` (a config stamp's read) — the running workers keep
+  // the document they hold
+  function configFailed(row, e, { running = false } = {}) {
     const why = e?.message ?? String(e)
     if (row.configWhy === why) return
     row.configWhy = why
-    emit(`[${row.slug}] app config: ${why} — ${row.configDoc ? 'spawning with the last-known document (swapped at the next successful read)' : 'no known document: spawn HELD (retried at each scan)'}`)
+    const then = running ? 'the running worker keeps its document (settled at the next successful read)'
+      : e?.masked ? 'spawn HELD: the keys are sealed under a key the spine does not hold (CONFIG_KEY_PREVIOUS at the spine\'s boot, or set them again) — a running worker keeps its document; retried at each scan'
+      : row.configDoc ? 'spawning with the last-known document (swapped at the next successful read)'
+      : 'no known document: spawn HELD (retried at each scan)'
+    emit(`[${row.slug}] app config: ${why} — ${then}`)
   }
   // configRetry(row) → true when the row's spawns may go. A row with a HELD slot (a spawn refused for want of a document) or
   // a STALE worker in either slot (spawned on the last-known one) reads the door once per scan: held → the spawn is retried
@@ -175,14 +182,17 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // The config door decides whether the spawn goes (§6.1 "config hold"): a fresh document (or a 404) → the spawn; the door
   // failing WITH a last-known document → the spawn on that one, `configStale` for the slot (the scan swaps the fresh
   // document in); failing WITHOUT one → `{error:'config-held'}` — no worker rather than one without its env (2026-09-02:
-  // the system host's `home` spawned without SPINE_ADMIN and the portal was dark for every signed-in user).
+  // the system host's `home` spawned without SPINE_ADMIN and the portal was dark for every signed-in user). A MASKED
+  // document holds the spawn even WITH a last-known one — the spine's contract (routes.ts config: the host refuses the spawn
+  // while `sealed_missing` is non-empty): the cache carries the OLD plaintext of the very keys the spine can no longer open,
+  // and a rotated key's value must not reach a fresh worker; a worker already running keeps the document it holds.
   // `config:false` (the install specs): no read — an install runs without the document.
   async function workerSpec(row, slot, rev, codeDir, { appDir, dataDir, sockFile, config = true } = {}) {
     let configEnv = {}, configStale = false
     if (config) {
       try { configEnv = await readConfig(row) } catch (e) {
         configFailed(row, e)
-        if (!row.configDoc) throw { error: 'config-held', msg: e?.message ?? String(e) }
+        if (!row.configDoc || e?.masked) throw { error: 'config-held', msg: e?.message ?? String(e) }
         configEnv = row.configDoc; configStale = true
       }
     }
@@ -649,21 +659,25 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     try { return await p } finally { if (row.deploying === p) row.deploying = null }
   }
 
-  // onConfigStamp(instance, updated) — D16: prod → a config release under the gate; dev → a live worker on an older document
-  // is stopped and the next request resumes it on the new one (D18: no gate, no release row; a stopped one reads fresh at
-  // its resume anyway — the same on an always-on computer, where this and settleStale are the dev slot's only refresh)
-  function onConfigStamp(instance, updated) {
+  // onConfigStamp(instance, updated) — D16. The door is read FIRST: a stamp whose read fails (the door closed, the document
+  // masked) leaves the running workers on the document they hold, marked stale for the scan to settle once a whole read
+  // succeeds — never a gate that stops the prod worker to spawn nothing (a masked door holds the spawn: DOWN would follow),
+  // never a restart on the cache. A whole read: prod → a config release under the gate; dev → a live worker on an older
+  // document is stopped and the next request resumes it on the new one (D18: no gate, no release row; a stopped one reads
+  // fresh at its resume anyway — the same on an always-on computer, where this and settleStale are the dev slot's only
+  // refresh). Never rejects (the registrar's beat calls it without awaiting).
+  async function onConfigStamp(instance, updated) {
     const row = rows.get(instance)
     if (!row) return
     row.configStamp = updated
-    const dev = row.dev
-    if (dev.live && dev.configAt !== updated) { emit(`[${row.slug}] config stamp ${updated}: dev rev ${dev.live.rev} stopped — resumed on the new document at the next request`); idleStop(row, dev) }
-    const slot = row.prod
-    if (!slot || row.deploying) return
-    if (slot.state === 'down') { emit(`[${row.slug}] config stamp ${updated} noted — the app is DOWN after a failed release; no restart (restore or deploy first)`); return }   // S2: a config PUT never resurrects a failed release
-    if (!slot.live) return      // idle: the next resume fetches the config at spawn
-    if (slot.configAt === updated) return
-    deployer.configRelease(row).catch((e) => emit(`[${row.slug}] config release crashed: ${e?.stack ?? e}`))
+    const dev = row.dev, prod = row.prod
+    if (prod && !row.deploying && prod.state === 'down') emit(`[${row.slug}] config stamp ${updated} noted — the app is DOWN after a failed release; no restart (restore or deploy first)`)   // S2: a config PUT never resurrects a failed release
+    const devDue = !!dev.live && dev.configAt !== updated
+    const prodDue = !!prod?.live && !row.deploying && prod.state !== 'down' && prod.configAt !== updated
+    if (!devDue && !prodDue) return      // idle: the next resume fetches the document at spawn
+    try { await readConfig(row) } catch (e) { configFailed(row, e, { running: true }); if (devDue) dev.configStale = true; if (prodDue) prod.configStale = true; return }
+    if (devDue && dev.live) { emit(`[${row.slug}] config stamp ${updated}: dev rev ${dev.live.rev} stopped — resumed on the new document at the next request`); idleStop(row, dev) }
+    if (prodDue && prod.live && !row.deploying) deployer.configRelease(row).catch((e) => emit(`[${row.slug}] config release crashed: ${e?.stack ?? e}`))
   }
 
   // --- the public surface (§4.1) --------------------------------------------------------------
