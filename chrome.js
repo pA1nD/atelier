@@ -63,6 +63,18 @@ export function rewriteFontUrls(css) {
   })
 }
 
+// relativeUrls(css) → the RELATIVE url() targets of a sheet (no scheme, not root-relative, not a fragment; query/fragment
+// stripped, normalized) — served by digest they resolve beside the sheet, so each must be a bundle path (fonts/*)
+export function relativeUrls(css) {
+  const out = new Set()
+  for (const m of String(css).matchAll(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g)) {
+    const u = m[2].trim()
+    if (!u || /^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(u)) continue
+    out.add(path.posix.normalize(u.replace(/[?#].*$/, '')))
+  }
+  return [...out]
+}
+
 const exists = (p) => { try { return fs.statSync(p).isFile() } catch { return false } }
 
 // bundleChrome(dir, {shims, log}) → {files: Map<path, Buffer>, shas, digest, notes}
@@ -86,6 +98,8 @@ export async function bundleChrome(dir, { shims = path.join(HERE, 'shims'), log 
     // the shell serves the bundle as one file: an import esbuild left external would 404 in the browser
     const left = Object.values(r.metafile.outputs).flatMap((o) => (o.imports ?? []).filter((i) => i.external).map((i) => i.path))
     if (left.length) throw new Error(`${entry}.js still imports ${[...new Set(left)].join(', ')} — nothing may stay external`)
+    // one output always: without an output path esbuild REFUSES a stylesheet import from JS ("Cannot import x.css into a
+    // JavaScript file without an output path configured"), so a chrome's JS never yields a second file (N7, tested)
     files.set(`${entry}.js`, Buffer.from(r.outputFiles[0].text))
     notes.push(`${entry}.js ${(r.outputFiles[0].text.length / 1024).toFixed(0)} KB`)
   }
@@ -100,6 +114,10 @@ export async function bundleChrome(dir, { shims = path.join(HERE, 'shims'), log 
   try { fonts = fs.readdirSync(fontsDir).filter((n) => /\.woff2?$/i.test(n)).sort() } catch {}
   for (const n of fonts) { const p = `fonts/${n}`; if (!validChromePath(p)) throw new Error(`bad font name ${n}`); files.set(p, fs.readFileSync(path.join(fontsDir, n))) }
   notes.push(`${fonts.length} font(s)`)
+  // every relative url() left in the sheet must be a bundled path: served at /_chrome/<digest>/<url> anything else 404s on
+  // every company origin, silently — refused at publish time instead (N5). Only fonts/* ride; the chrome is one sheet.
+  const unbundled = relativeUrls(source).filter((u) => !files.has(u))
+  if (unbundled.length) throw new Error(`styles.css references ${unbundled.join(', ')} — not in the bundle (only fonts/*.woff2 ride; under /_chrome/<digest>/ it would 404 on every origin)`)
   // 4. chrome.css — the chrome-only compiled sheet (buildSheet over the rewritten source; scan = the chrome's own sources)
   let sheet
   try { sheet = await buildSheet({ chromeDir: src, appDir: null, source }) } catch (e) { const p = e?.problems?.[0]; throw new Error(p ? `chrome.css: ${p.file}:${p.line}:${p.col} ${p.message}` : (e?.message ?? String(e))) }

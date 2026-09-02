@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { release, bundleChrome, parseArgs, rewriteFontUrls, payloadFor } from '../chrome.js'
+import { release, bundleChrome, parseArgs, rewriteFontUrls, relativeUrls, payloadFor } from '../chrome.js'
 import { chromeDigestOf, sha256Hex, DIGEST_RE } from '../protocol/registry.js'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -62,6 +62,21 @@ test('bundleChrome: {frontend.js, kit.js, styles.css (fonts → fonts/…), chro
   await assert.rejects(bundleChrome(path.join(root, 'nope')), /not a directory/)
   fs.rmSync(path.join(d2, 'kit.js'))
   await assert.rejects(bundleChrome(d2), /kit/)
+})
+
+// review 2026-09-02, Opus N5 / N7: served by digest a relative url() resolves beside the sheet, so every one must be a
+// bundled path — the verb refuses the rest at publish time instead of a silent 404 on every origin; and a chrome's JS
+// never yields a second esbuild output (a css import is refused outright), so `outputFiles[0]` IS the bundle
+test('bundleChrome refuses a styles.css whose relative url() names a path the bundle does not carry (N5) — fonts/* ride, `assets/logo.svg` does not; a css import from frontend.jsx is a build error, never a second output (N7)', async () => {
+  assert.deepEqual(relativeUrls("url('fonts/a.woff2') url(\"./fonts/a.woff2?v=1\") url(assets/logo.svg#x) url(/abs.png) url(data:x) url(https://x/y.png) url('#frag') url(../img/../x.png)").sort(), ['../x.png', 'assets/logo.svg', 'fonts/a.woff2'])
+  const root = tmp()
+  const d = chromeDir(root)
+  fs.appendFileSync(path.join(d, 'styles.css'), `.atelier-logo { background: url('assets/logo.svg'); mask: url(./icons/x.svg#m) }\n`)
+  await assert.rejects(bundleChrome(d), (e) => /styles\.css references assets\/logo\.svg, icons\/x\.svg — not in the bundle/.test(e.message))
+  const d2 = chromeDir(path.join(root, 'two'))
+  fs.writeFileSync(path.join(d2, 'x.css'), '.x{color:red}\n')
+  fs.writeFileSync(path.join(d2, 'frontend.jsx'), `import React from 'react'\nimport './x.css'\nexport function chrome() { return <div /> }\n`)
+  await assert.rejects(bundleChrome(d2), /Cannot import "x\.css" into a JavaScript file without an output path/)
 })
 
 test('release(): the payload {version, changelog, agent_notes, breaking, notice, digest, files:{path: base64}} written to --out and nowhere else; --digest re-releases without files; the argument rules', async () => {
