@@ -1270,7 +1270,10 @@ and `CLAIM-REFUSED.txt` are out) as `<rel>\0<bytes>\0` in path order cut to 40 h
 id on every boot (mtimes, which every `cp` rewrites, do not move it), so the spine replays the id and `deployed_rev`
 converges from `legacy`. No dev slot, no watcher, no `.git`: the
 folder is served in the legacy shape (bundle from the rev dir, static files and `createRequire` from the folder); prod
-keeps the R14 idle rule (resume on the next request, requests held) — nothing D18 can stop. Every scan recomputes the
+keeps the R14 idle rule (resume on the next request, requests held; the bundle and the folder's static files answer from the
+rev dir and the folder while the worker is stopped — `asset()` never dials it, so the document's JS/CSS cannot 404; a resume
+that THROWS answers `503 {error: 'app not ready'}` without the waking header — a hard error the shell shows, not a retry loop
+on a worker that cannot load) — nothing D18 can stop. Every scan recomputes the
 id: equal → the boot announce only (a spine that refused or was unreachable is asked again; `announced` is not set by the
 seeded build itself); different (a re-seed over a kept `/work`) → a new rev the same way, the old worker retired
 `swapStopMs` after the swap. Two failure classes: the FOLDER's answer (its `module.json`, a build problem, a backend that

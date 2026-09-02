@@ -6,7 +6,7 @@
 // report, not one per sweep; a normal folder beside it boots dev-only exactly as before. Plus `treeId` itself.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { world, api, waitFor, sleep, makeSpawn, APP_JSON, BACKEND, fs, path, os } from './supervisor-harness.test.js'
+import { world, api, waitFor, sleep, makeSpawn, APP_JSON, BACKEND, FRONTEND, CARD, fs, path, os } from './supervisor-harness.test.js'
 import { treeId } from '../supervisor/watcher.mjs'
 import { SEEDED_MARKER } from '../supervisor/discovery.mjs'
 
@@ -264,5 +264,41 @@ test('two seeded folders build side by side inside ONE scan and the scan settles
     assert.equal(w.releases.length, 2); assert.deepEqual(w.releases.map((x) => x.kind), ['adopt', 'adopt'])
     assert.ok(!w.lines.some((l) => /\(dev\)/.test(l)))
     assert.deepEqual(sup.workers().map((x) => [x.slug, x.slot]).sort(), [['catalyst-chrome', 'prod'], ['home', 'prod']])
+  } finally { await w.done(sup) }
+})
+
+test('the seeded prod slot through ITS OWN idle window (R14; review 2026-09-02 S2, Grok 5): quiet for idleMs → `[home] rev 1 STOPPED` (no `(dev)` suffix), no worker, the slot keeps its rev; the folder\'s static file and the rev dir\'s bundle still answer while stopped (asset() never dials the worker — why the document\'s JS/CSS cannot 404); the next API request is held and answered 200 — never a 404 — with ONE RESUMED line for two concurrent callers; a second window stops and resumes it again', async () => {
+  const w = world({ seededApps: true })
+  w.app('home', { 'module.json': APP_JSON('Home'), 'backend.js': BACKEND(1), 'frontend.jsx': FRONTEND(1), 'card.js': CARD, 'logo.svg': '<svg/>', [SEEDED_MARKER]: '' })
+  const sup = w.make({ timing: { idleMs: 200, devIdleMs: 60_000 } })
+  try {
+    await sup.scan()
+    let r = sup.resolve('acme', 'home')
+    assert.equal(r.prod_state, 'live', w.lines.filter((l) => l.startsWith('[home]')).join('\n'))
+    assert.equal(JSON.parse((await api(sup, r, '/rev', prod)).body).rev, 1)
+    // the window passes with nobody asking
+    await waitFor(() => sup.resolve('acme', 'home').prod_state === 'stopped', { ms: 5000 })
+    assert.ok(w.lines.some((l) => l === '[home] rev 1 STOPPED'), w.lines.filter((l) => l.startsWith('[home]')).join('\n'))
+    assert.ok(!w.lines.some((l) => /STOPPED \(dev\)/.test(l)), 'no dev slot to stop')
+    assert.equal(sup.workers().length, 0)
+    r = sup.resolve('acme', 'home')
+    assert.equal(r.prod_rev, 1); assert.match(r.deployed_rev, HEX40); assert.equal(r.state, 'stopped')
+    // while stopped: the static file from the folder (group held), the bundle from the rev dir — no worker in either road
+    assert.equal((await sup.asset(r, 'logo.svg')).body.toString(), '<svg/>')
+    const js = await sup.asset(r, 'frontend.js'); assert.ok(js && js.body.length > 0 && js.rev === 1, 'the bundle serves from the rev dir while the worker is stopped')
+    // the first requests after the stop: held, answered, ONE resume for two concurrent callers
+    const before = w.lines.length
+    const [a, b] = await Promise.all([api(sup, r, '/rev', prod), api(sup, r, '/rev', prod)])
+    assert.equal(a.status, 200, a.body); assert.equal(b.status, 200, b.body)
+    assert.equal(JSON.parse(a.body).rev, 1)
+    assert.equal(w.lines.slice(before).filter((l) => /^\[home\] rev 1 RESUMED \d+ ms$/.test(l)).length, 1, w.lines.slice(before).join('\n'))
+    assert.equal(sup.resolve('acme', 'home').prod_state, 'live')
+    assert.deepEqual(sup.workers().map((x) => [x.slug, x.slot, x.rev]), [['home', 'prod', 1]])
+    // a second window: stopped and resumed again — the row is never "not deployed"
+    await waitFor(() => sup.resolve('acme', 'home').prod_state === 'stopped', { ms: 5000 })
+    assert.equal((await api(sup, r, '/rev', prod)).status, 200)
+    assert.equal(w.lines.filter((l) => /^\[home\] rev 1 RESUMED \d+ ms$/.test(l)).length, 2)
+    assert.equal(w.lines.filter((l) => l === '[home] rev 1 STOPPED').length, 2)
+    assert.equal(w.reports.length, 0); assert.equal(w.releases.filter((x) => x.kind === 'adopt').length, 1, 'no new rev across the windows')
   } finally { await w.done(sup) }
 })
