@@ -25,6 +25,7 @@ import { chromeDigestOf } from '../../protocol/index.js'
 import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP } from './fixtures.mjs'
 
 const sha = (b) => createHash('sha256').update(b).digest('hex')
+const digestOf = (files) => chromeDigestOf(Object.fromEntries(Object.entries(files).map(([p, b]) => [p, sha(b)])))
 const CHROME_QID = 'portal/catalyst-chrome'
 
 // writeBundle(root, files) → digest: the spine's layout — <root>/<digest>/<path> + manifest.json
@@ -60,15 +61,56 @@ test('the store: a manifest names the bundle; open() only what it lists, bytes c
   assert.equal(store.open('e'.repeat(64), 'kit.js'), null)
   assert.equal(store.open('not-a-digest', 'kit.js'), null)
   assert.equal(store.manifest(D.toUpperCase()), null)
-  // a bundle landing later is seen (no negative cache); a file that does not match its sha is refused
-  const late = 'f'.repeat(64)
+  // a bundle landing later is seen (no negative cache); a file that does not match its sha is refused, the rest serves
+  const LATE = { ...BUNDLE, 'kit.js': Buffer.from('export const Button = 3\n') }, late = digestOf(LATE)
   assert.equal(store.has(late), false)
-  writeBundle(root, { ...BUNDLE }, { digest: late })
+  writeBundle(root, LATE)
   assert.equal(store.has(late), true)
-  const bad = writeBundle(root, { ...BUNDLE, 'kit.js': Buffer.from('export const Button = 2\n') }, { digest: 'a'.repeat(64), manifest: { digest: 'a'.repeat(64), files: { 'kit.js': { sha256: sha('other'), bytes: 5 } } } })
+  const bad = writeBundle(root, { ...BUNDLE, 'kit.js': Buffer.from('export const Button = 2\n') })
+  fs.writeFileSync(path.join(root, bad, 'kit.js'), 'export const Button = 22\n')
   assert.equal(store.open(bad, 'kit.js'), null, 'a sha mismatch is refused')
+  assert.equal(store.open(bad, 'styles.css').toString(), BUNDLE['styles.css'].toString(), 'the rest of that bundle serves')
   assert.equal(store.type('kit.js'), 'application/javascript; charset=utf-8'); assert.equal(store.type('fonts/Inter.woff2'), 'font/woff2'); assert.equal(store.type('chrome.css'), 'text/css; charset=utf-8')
   store.close()
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+// the manifest is trusted only as far as the URL's digest vouches for it (review 2026-09-02, Codex 3 / Grok 3, N1, N2, N4)
+test('the store trusts the digest, not the manifest: an entry without a 64-hex sha, shas that do not recompute to the digest → the whole bundle refused; a prototype key is no path (N1); a symlinked file or a symlinked dir on the way (N2) is refused even when the bytes match; the bound drops the least recently USED digest (N4)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-trust-'))
+  const store = createChromeStore({ root })
+  const good = writeBundle(root, BUNDLE)
+  const okFiles = () => Object.fromEntries(Object.entries(BUNDLE).map(([p, b]) => [p, { sha256: sha(b), bytes: b.length }]))
+  // no sha / a sha that is not 64 hex / shas that hash to another digest: refused whole, nothing served
+  const noSha = writeBundle(root, { ...BUNDLE, 'kit.js': Buffer.from('a\n') }, { manifest: { files: { ...okFiles(), 'kit.js': { bytes: 2 } } } })
+  const shortSha = writeBundle(root, { ...BUNDLE, 'kit.js': Buffer.from('b\n') }, { manifest: { files: { ...okFiles(), 'kit.js': { sha256: 'abc', bytes: 2 } } } })
+  const wrongSha = writeBundle(root, { ...BUNDLE, 'kit.js': Buffer.from('c\n') }, { manifest: { files: { ...okFiles(), 'kit.js': { sha256: sha('not c\n'), bytes: 2 } } } })
+  for (const [d, why] of [[noSha, 'no sha'], [shortSha, 'a short sha'], [wrongSha, 'shas that do not hash to the digest']]) {
+    assert.equal(store.has(d), false, why); assert.equal(store.open(d, 'styles.css'), null, `${why}: not even a path whose own sha is right`)
+  }
+  assert.equal(store.has(good), true)
+  // a manifest that names only what it names: `constructor`/`toString` are not paths of this bundle
+  for (const p of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) assert.equal(store.open(good, p), null, p)
+  // a symlink is never served, even to the right bytes: the file itself, or a directory on the way
+  const outside = path.join(root, 'outside'); fs.mkdirSync(path.join(outside, 'fonts'), { recursive: true })
+  fs.writeFileSync(path.join(outside, 'kit.js'), BUNDLE['kit.js']); fs.writeFileSync(path.join(outside, 'fonts', 'Inter.woff2'), BUNDLE['fonts/Inter.woff2'])
+  const linked = writeBundle(root, { ...BUNDLE, 'chrome.css': Buffer.from('.linked{}\n') })
+  fs.rmSync(path.join(root, linked, 'kit.js')); fs.symlinkSync(path.join(outside, 'kit.js'), path.join(root, linked, 'kit.js'))
+  fs.rmSync(path.join(root, linked, 'fonts'), { recursive: true }); fs.symlinkSync(path.join(outside, 'fonts'), path.join(root, linked, 'fonts'))
+  assert.equal(store.has(linked), true)
+  assert.equal(store.open(linked, 'kit.js'), null, 'a symlinked file')
+  assert.equal(store.open(linked, 'fonts/Inter.woff2'), null, 'a regular file behind a symlinked dir')
+  assert.equal(store.open(linked, 'chrome.css').toString(), '.linked{}\n', 'the bundle\'s own regular files serve')
+  // least recently USED: with max 2, touching A keeps A when C arrives; B is re-read from disk
+  const reads = [], fsx = { readFileSync: (p, ...a) => { reads.push(String(p)); return fs.readFileSync(p, ...a) }, lstatSync: fs.lstatSync.bind(fs), realpathSync: fs.realpathSync.bind(fs) }
+  const lru = createChromeStore({ root, fs: fsx, max: 2 })
+  const A = good, B = linked, C = writeBundle(root, { ...BUNDLE, 'chrome.css': Buffer.from('.c{}\n') })
+  lru.manifest(A); lru.manifest(B); lru.manifest(A); lru.manifest(C)
+  const manifestReads = () => reads.filter((p) => p.endsWith('manifest.json')).map((p) => path.basename(path.dirname(p)))
+  reads.length = 0
+  lru.manifest(A); assert.deepEqual(manifestReads(), [], 'A was touched: still cached')
+  lru.manifest(B); assert.deepEqual(manifestReads(), [B], 'B was the least recently used: dropped, read again')
+  store.close(); lru.close()
   fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -156,7 +198,8 @@ test('lane 4a: the bytes public (no session), immutable + etag = the digest, 304
 })
 
 test('the document by digest (decision 5): the registry names D and the row reports D → /acme/ and /acme/todo render /_chrome/D/… (chromeRev = D, chromeBase, the kit import map, the app-less sheet = chrome.css, preloads after the import map), every chrome URL immutable and 200; a computer still on PREV renders PREV on its app document while the app-less one follows the default; a row reporting no digest follows the default; a digest that is not 64 hex is no digest', async (t) => {
-  const D = 'd'.repeat(64), PREV = 'e'.repeat(64)
+  const PREV_BUNDLE = { ...BUNDLE, 'kit.js': Buffer.from('export const Button = 0 // prev\n') }
+  const D = digestOf(BUNDLE), PREV = digestOf(PREV_BUNDLE)
   const rows = [
     { instance: TODO, slug: 'todo', company: 'acme', rev: 3, state: 'live', meta: { name: 'Todo' }, primary: true, chromeDigest: D },
     { instance: WIKI, slug: 'wiki', company: 'acme', rev: 1, state: 'live', meta: { name: 'Wiki' }, chromeDigest: PREV },
@@ -164,7 +207,7 @@ test('the document by digest (decision 5): the registry names D and the row repo
     { instance: 'i-3333333333333333', slug: 'odd', company: 'acme', rev: 5, state: 'live', meta: { name: 'Odd' }, chromeDigest: 'sha256:nope' },
   ]
   const r = await rig(t, { chrome: { qid: CHROME_QID, digest: D }, rows })
-  writeBundle(r.root, BUNDLE, { digest: D }); writeBundle(r.root, BUNDLE, { digest: PREV })
+  writeBundle(r.root, BUNDLE); writeBundle(r.root, PREV_BUNDLE)
   const ROW_ASSET = /\/modules\/portal\/catalyst-chrome\/(frontend\.js|kit\.js|styles\.css)/
   for (const [p, want] of [['/acme/', D], ['/acme/todo', D], ['/acme/wiki', PREV], ['/acme/notes', D], ['/acme/odd', D], ['/acme/unknown-slug', D]]) {
     const x = await r.go(p)
@@ -184,7 +227,7 @@ test('the document by digest (decision 5): the registry names D and the row repo
   assert.ok(bare.text.includes(`<link id="atelier-chrome-styles" rel="stylesheet" href="/_chrome/${D}/chrome.css">`), 'the app-less sheet is the bundle\'s chrome.css')
   const app = await r.go('/acme/todo')
   assert.ok(app.text.includes('<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/acme/todo/styles.css?rev=3">'), 'the app sheet is the app\'s')
-  assert.match(app.text, /"chromeDigest":"d{64}"/, 'the bootstrap row carries its digest')
+  assert.ok(app.text.includes(`"chromeDigest":"${D}"`), 'the bootstrap row carries its digest')
   const oddDoc = await r.go('/acme/odd')
   assert.ok(!/"id":"odd"[^}]*"chromeDigest"/.test(oddDoc.text) && !oddDoc.text.includes('sha256:nope'), 'a row digest that is not 64 hex rides on no bootstrap row: the client compares that document against the default it was composed with (S1)')
   // every chrome URL the document names answers 200 + immutable
