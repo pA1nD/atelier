@@ -244,3 +244,47 @@ test('kill() → SIGKILL + report(worker) + restart with backoff (prod); an unex
     await sup2.teardown()
   } finally { await w.done(sup) }
 })
+
+test('sleep mode (API 50 `sleep` → registrar.sleep): on an always-on computer the DEV slot never idle-stops (D18 stands down; prod keeps R14); 24h stops as before; a flip at a later beat takes effect at the next scan, both ways', async () => {
+  const w = world({ gitCommit: true })
+  w.app('quiet', { 'module.json': APP_JSON('Q'), 'backend.js': QUIET })
+  w.registrar.sleep = 'always-on'
+  const sup = w.make({ timing: { idleMs: 250, devIdleMs: 300 } })
+  try {
+    await sup.scan()
+    const q = await live(sup, 'quiet')
+    const row = sup.rows.get(q.instance)
+    assert.deepEqual(w.lines.filter((l) => l.startsWith('sleep mode:')), ['sleep mode: always-on — dev workers stay live (no idle stop)'])
+    await sleep(800)   // well past two windows
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'live', 'no idle stop on an always-on computer')
+    assert.equal(row.dev.idleTimer, null, 'no timer armed')
+    assert.ok(!w.lines.some((l) => /STOPPED \(dev\)/.test(l)))
+    // prod keeps the R14 rule: released and quiet → stopped after idleMs; the dev worker still live
+    assert.equal((await deploy(sup, q, { message: 'release quiet' })).outcome, 'green')
+    await waitFor(() => sup.resolve('acme', 'quiet').prod_state === 'stopped')
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'live')
+    // the flip to 24h at a later beat: nothing until the next scan
+    w.registrar.sleep = '24h'
+    await sleep(500)
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'live', 'a flip takes effect at the next scan, not at the beat')
+    await sup.scan()
+    assert.equal(w.lines.filter((l) => l.startsWith('sleep mode:')).at(-1), 'sleep mode: 24h — dev workers idle-stop again')
+    assert.ok(row.dev.idleTimer, 'the scan armed the timer (the window from now)')
+    await waitFor(() => sup.resolve('acme', 'quiet').dev_state === 'stopped')
+    assert.ok(w.lines.some((l) => /^\[quiet\] rev \d+ STOPPED \(dev\)$/.test(l)), 'stops as before under 24h')
+    // a dev request resumes it on demand (D18); the 24h rule stops it again
+    assert.equal((await api(sup, q, '/rev')).status, 200)
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'live')
+    await waitFor(() => sup.resolve('acme', 'quiet').dev_state === 'stopped')
+    // back to always-on at a later beat: a running timer is cleared at the next scan, the worker stays
+    assert.equal((await api(sup, q, '/rev')).status, 200)
+    assert.ok(row.dev.idleTimer, 'armed under 24h')
+    w.registrar.sleep = 'always-on'
+    await sup.scan()
+    assert.equal(row.dev.idleTimer, null, 'cleared at the scan')
+    await sleep(800)
+    assert.equal(sup.resolve('acme', 'quiet').dev_state, 'live')
+    assert.equal(w.lines.filter((l) => l.startsWith('sleep mode:')).length, 3, 'one line per flip, never one per scan')
+    assert.equal(w.reports.length, 0)
+  } finally { await w.done(sup) }
+})

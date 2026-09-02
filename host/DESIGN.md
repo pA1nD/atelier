@@ -535,6 +535,11 @@ the app folder as the current user and skips freeze (logged).
 - Idle-stop (R14): only when the READY report's `resources` is empty (nothing but the IPC server) or
   `{t:'suspendable'}` arrived, and no request for 60 s; resume from `current` on the next request
   with requests held (≤ 100 ms in a pod), never 502; a broken folder never affects a resume.
+- Sleep mode (API 50 `sleep: "24h" | "always-on"` on the register and heartbeat answers → `registrar.sleep`): on an
+  `always-on` computer the dev slot's idle stop (D18, 10 min) stands down — no timer is armed and a live dev worker stays
+  live; `24h` is the rule above. The supervisor applies the mode at every `scan()` (one log line per flip: always-on
+  clears the dev timers, 24h arms one on every live dev worker, the window from then), so a value that changes at a
+  later beat takes effect at the next scan; prod keeps R14 either way.
 - Boot: table from `last-good/*/` + markers; every row starts `stopped` (lazy resume); the first
   scan re-claims folders and rebuilds only folders whose fingerprint differs from `revision.json`.
 - Sweep = a net, not a retry loop: every `scan()` (the 30 s rescan, §9.12) rebuilds a folder only when

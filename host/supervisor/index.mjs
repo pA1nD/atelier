@@ -11,8 +11,9 @@
 // a copy of the data → the gate (requests held ≤ 10 s, then the shell's waking bytes) → stop old →
 // backup → migrate → start → probe → release. Prod never overlaps (D13); the dev slot keeps the
 // load-beside + one mount retry rule. Idle-stop: prod only when its READY `resources` are empty or it
-// sent `{t:'suspendable'}`, 60 s without a request; dev after 10 min whatever it holds (D18); resume
-// from the slot's pointer with requests held. Boot resumes prod (`current`) only.
+// sent `{t:'suspendable'}`, 60 s without a request; dev after 10 min whatever it holds (D18) — unless the
+// computer is `always-on` (API 50 `sleep` via `registrar.sleep`, applied at every scan): then dev stays live;
+// resume from the slot's pointer with requests held. Boot resumes prod (`current`) only.
 //
 // Collaborators are injected (DESIGN §4): `spawn` = worker/spawn.mjs spawnWorker, `proxy` =
 // worker/proxy.mjs proxyRequest, `jail` = worker/jail.mjs {jailPlan, applyJail, claimRoundTrip, …},
@@ -397,11 +398,24 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
   // --- idle-stop / resume / crash (§6.1 R14; D18 for dev) ------------------------------------
   const isQuiet = (slot) => slot.suspendable || (slot.resources && Object.values(slot.resources).every((n) => !n))
+  const clearIdle = (slot) => { if (slot.idleTimer) { clearTimeout(slot.idleTimer); timers.delete(slot.idleTimer); slot.idleTimer = null } }
+  // the sleep mode (§6.1; API 50 `sleep` on the register/heartbeat answers → `registrar.sleep`): on an always-on computer
+  // the dev slot's idle stop (D18) stands down — no timer, a dev worker stays live; prod keeps R14. `alwaysOn` is the mode
+  // the slots run under, read at every scan (syncSleep) so a flip at a later beat takes effect at the next scan
+  let alwaysOn = false
+  function syncSleep() {
+    const on = registrar?.sleep === 'always-on'
+    if (on === alwaysOn) return
+    alwaysOn = on
+    emit(`sleep mode: ${on ? 'always-on — dev workers stay live (no idle stop)' : '24h — dev workers idle-stop again'}`)
+    for (const row of rows.values()) { if (on) clearIdle(row.dev); else if (row.dev.live && !row.dev.idleTimer) armIdle(row, row.dev) }
+  }
   function armIdle(row, slot) {
     if (!slot) return
-    if (slot.idleTimer) { clearTimeout(slot.idleTimer); timers.delete(slot.idleTimer); slot.idleTimer = null }
+    clearIdle(slot)
     if (!slot.live?.handle) return
     if (slot.name === 'prod' && !isQuiet(slot)) return
+    if (slot.name === 'dev' && alwaysOn) return
     const ms = slot.name === 'dev' ? T.devIdleMs : T.idleMs
     slot.idleTimer = later(ms, () => {
       slot.idleTimer = null
@@ -690,6 +704,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
     // scan() → the discovery result (index.mjs watches the `no-module-json` folders it names)
     async scan() {
+      syncSleep()
       const d = withAllGroupsSync(() => discover(appsDir, fs, { links: cfg.appsLinks === true }))
       if (d.unreadable) {
         emit(`scan: ${appsDir} unreadable — nothing claimed, nothing tombstoned`)
