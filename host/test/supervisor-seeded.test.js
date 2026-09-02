@@ -6,7 +6,7 @@
 // report, not one per sweep; a normal folder beside it boots dev-only exactly as before. Plus `treeId` itself.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { world, api, waitFor, sleep, APP_JSON, BACKEND, fs, path, os } from './supervisor-harness.test.js'
+import { world, api, waitFor, sleep, makeSpawn, APP_JSON, BACKEND, fs, path, os } from './supervisor-harness.test.js'
 import { treeId } from '../supervisor/watcher.mjs'
 import { SEEDED_MARKER } from '../supervisor/discovery.mjs'
 
@@ -155,6 +155,68 @@ test('a broken seeded folder: ONE build report and ONE rev across sweeps (the fo
     await sup.scan()
     assert.equal(sup.resolve('acme', 'broken').prod_state, 'live'); assert.equal(sup.resolve('acme', 'broken').prod_rev, 2)
     assert.equal(JSON.parse((await api(sup, r, '/rev', prod)).body).rev, 7)
+    assert.equal(w.releases.length, 1); assert.equal(w.reports.length, 1)
+  } finally { await w.done(sup) }
+})
+
+// The real pod's permission model, simulated (review 2026-09-02, B1): after the claim the folder is `1000:<uid> 2750` and the
+// host is userns root WITHOUT DAC_OVERRIDE — a read made without the app's gid held is EACCES. macOS cannot show this
+// (`setgroups` is a no-op unprivileged, the folders are 0755), so the fs the supervisor reads through refuses every read of a
+// CLAIMED folder while the harness's last setgroups() call does not hold that folder's uid. Before the fix `checkModuleJson`
+// ran ungrouped: EACCES read as "module.json missing", the seeded row never got a prod slot — the outage, on the first scan.
+const gidStrictFs = (w, dir, slug) => new Proxy(fs, {
+  get: (t, k) => {
+    const v = t[k]
+    if (typeof v !== 'function') return v
+    return (...a) => {
+      const p = a[0], uid = w.claims.get(slug)?.uid ?? null, held = w.groups.at(-1) ?? []
+      if (uid && typeof p === 'string' && (p === dir || p.startsWith(dir + '/')) && !held.includes(uid)) { const e = new Error(`EACCES: permission denied, ${k} '${p}'`); e.code = 'EACCES'; throw e }
+      return v.apply(t, a)
+    }
+  },
+})
+
+test('every read on the seeded road holds the app\'s gid: through an fs that answers EACCES to any read of the claimed folder made without its uid held (the pod: `1000:<uid> 2750`, root without DAC_OVERRIDE), the seeded row still comes up `rev 1 LIVE (prod)` — never "module.json missing"; the second scan (the id recomputed, the announce) and a static read while it serves hold it too', async () => {
+  const w = world({ seededApps: true })
+  const dir = w.app('home', { 'module.json': APP_JSON('Home'), 'backend.js': BACKEND(1), 'logo.svg': '<svg/>', [SEEDED_MARKER]: '' })
+  const sup = w.make({ fs: gidStrictFs(w, dir, 'home') })
+  try {
+    await sup.scan()
+    const r = sup.resolve('acme', 'home')
+    assert.equal(r.prod_state, 'live', w.lines.filter((l) => l.startsWith('[home]')).join('\n')); assert.equal(r.prod_rev, 1); assert.match(r.deployed_rev ?? '', HEX40)
+    assert.ok(w.lines.some((l) => /^\[home\] rev 1 LIVE \(prod\) commit [0-9a-f]{12} in \d+ ms$/.test(l)))
+    assert.ok(!w.reports.some((x) => /module\.json missing/.test(x.message)), JSON.stringify(w.reports))
+    assert.equal(w.reports.length, 0)
+    assert.ok(w.groups.some((g) => g.includes(w.claims.get('home').uid)), 'the gid was held at least once')
+    assert.equal((await sup.asset(r, 'logo.svg')).body.toString(), '<svg/>')
+    await sup.scan()
+    assert.equal(sup.resolve('acme', 'home').prod_rev, 1); assert.equal(w.releases.length, 2, 'the second scan announced (no EACCES on the id)')
+    assert.equal(w.reports.length, 0)
+  } finally { await w.done(sup) }
+})
+
+test('a HOST-SIDE failure on the seeded road (the spawn refused: EAGAIN) is retried at the next scan and reported ONCE — never left as a row nothing will build again; the rev it minted is dropped, the retry mints the next; the folder\'s own failure (a backend that fails to load) stays one rev and one report until its bytes change', async () => {
+  const w = world({ seededApps: true })
+  w.app('home', { 'module.json': APP_JSON('Home'), 'backend.js': BACKEND(1), [SEEDED_MARKER]: '' })
+  const real = makeSpawn(w.root + '/runtime.mjs')
+  let refuse = 2   // what worker/spawn.mjs rejects with when os.spawn throws (EAGAIN: the process cap or memory)
+  const sup = w.make({ spawn: (args) => (refuse > 0 ? (refuse--, Promise.reject({ error: 'spawn-eagain', msg: 'spawn: EAGAIN' })) : real(args)) })
+  try {
+    await sup.scan()
+    let r = sup.resolve('acme', 'home')
+    assert.equal(r.prod_state, null); assert.equal(r.deployed_rev, null)
+    assert.equal(w.reports.length, 1); assert.equal(w.reports[0].kind, 'worker'); assert.match(w.reports[0].message, /spawn-eagain/)
+    assert.ok(w.lines.some((l) => /^\[home\] rev 1 FAILED \(seeded\) spawn-eagain: .* — a host-side failure, retried at the next scan$/.test(l)), w.lines.filter((l) => l.startsWith('[home]')).join('\n'))
+    assert.ok(!fs.existsSync(dot(w, r.instance, 'current')), 'nothing to serve yet')
+    await sup.scan()   // refused once more: the same reason → no second report
+    assert.equal(sup.resolve('acme', 'home').prod_state, null)
+    assert.equal(w.reports.length, 1, 'one report per (bytes, reason)')
+    assert.equal(w.lines.filter((l) => /FAILED \(seeded\)/.test(l)).length, 2, 'the log line repeats; the chat hears it once')
+    await sup.scan()   // the host recovered
+    r = sup.resolve('acme', 'home')
+    assert.equal(r.prod_state, 'live'); assert.equal(r.prod_rev, 3, 'rev 1 and 2 dropped, the retry minted 3'); assert.match(r.deployed_rev, HEX40)
+    assert.equal(JSON.parse((await api(sup, r, '/rev', prod)).body).rev, 1)
+    assert.deepEqual(fs.readdirSync(dot(w, 'last-good', r.instance)).filter((n) => /^rev-\d+$/.test(n)), ['rev-3'])
     assert.equal(w.releases.length, 1); assert.equal(w.reports.length, 1)
   } finally { await w.done(sup) }
 })

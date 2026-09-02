@@ -123,7 +123,8 @@ export const MESSAGES = {
     failed:  (slug, c12, step, error, id) => `[${slug}] deploy ${c12} FAILED at ${step}: ${error} — DOWN, backup ${id ?? 'none'}`,
     adopt:   (slug, N, c12) => `[${slug}] adopt: rev ${N} (${c12}) committed — prod = the legacy tree until its first deploy`,
     seeded:  (slug, N, c12) => `[${slug}] seeded: rev ${N} (${c12}) is the release — prod from the folder, no dev slot`,
-    seededFail: (slug, N, hint) => `[${slug}] rev ${N} FAILED (seeded) ${hint}`,
+    seededFail: (slug, N, hint) => `[${slug}] rev ${N} FAILED (seeded) ${hint}`,                                                    // the folder's answer until its bytes change
+    seededRetry: (slug, N, why) => `[${slug}] rev ${N} FAILED (seeded) ${why} — a host-side failure, retried at the next scan`,   // reported once, retried every scan
     config:  (slug, N, at) => `[${slug}] config release: rev ${N} restarted under the gate (config updated ${at})`,
     restore: (slug, id, ms) => `[${slug}] restore ${id} done in ${ms} ms`,
     restoreRed: (slug, id, step, error) => `[${slug}] restore ${id} RED at ${step}: ${error} — nothing restored`,
@@ -786,45 +787,83 @@ export function createDeployer(i) {
   // worker starts at once and ONE `adopt` row goes to the spine. No dev slot, no watcher: nothing D18 can idle-stop out from
   // under the company (2026-09-02: both seeded apps came up `(dev)` and stopped ten minutes later; the portal was dark).
   // Every scan calls it: the same id → the boot announce (which converges a row the spine never recorded); a new id (a
-  // re-seed over a kept /work) → a new rev the same way, the old worker retired after the swap. A build that failed is
-  // this folder's answer until its bytes change (the sweep rule of §6.1: never a rev every 30 s for one broken tree).
+  // re-seed over a kept /work) → a new rev the same way, the old worker retired after the swap. Two failure classes
+  // (review 2026-09-02, B1/N1): the FOLDER'S answer (its module.json, a build problem, a worker that failed to load its
+  // bytes) is one rev and one report until the bytes change (the sweep rule of §6.1: never a rev every 30 s for one broken
+  // tree); a HOST-SIDE failure (the rev counter, the snapshot store, the spawn, the jail, the record) is retried at every
+  // scan — reported once per (bytes, reason), never left as a row nothing will ever build again.
+  // Every read of the folder holds the app's gid (§6.2): on the real pod the folder is `1000:<uid> 2750` after the claim and
+  // the host is userns root WITHOUT DAC_OVERRIDE — an ungrouped read is EACCES, and an EACCES on module.json read as
+  // "module.json missing" reproduced the outage on the first scan of the pod (review 2026-09-02, B1).
   function seeded(row) {
     const inst = row.instance, slug = row.slug
     const id = i.withGroupSync(row.uid, () => treeId(row.dir, fs))
     if (!id) { emit(`[${slug}] seeded: folder unreadable — retried on the next scan`); return Promise.resolve(null) }
     if (row.prod?.commit === id && !row.prod.adoptPending) return announce(row)
     if (row.deploying) return row.deploying
-    if (row.seededAttempted === id) return Promise.resolve(null)
-    row.seededAttempted = id
+    if (row.seededAttempted === id) return Promise.resolve(null)   // the folder's answer stands until its bytes change
     const t0 = os.now()
     row.deploying = (async () => {
-      let rev
-      try { rev = store.nextRev(inst) } catch (e) { emit(`[${slug}] seeded: ${e?.code ?? e?.message ?? e}`); return null }
-      row.counter = rev
-      const fail = (kind, message, hint, where = {}) => {
+      let rev = null
+      // one report per (bytes, kind, reason): a host-side failure retried at every scan reaches the chat once
+      const once = (kind, message, hint, where) => {
+        const key = `${id}\0${kind}\0${message}`
+        if (row.seededReported === key) return
+        row.seededReported = key
         report(kind, inst, prodRev(row), { message, ...(hint ? { hint } : {}), ...where })
-        emit(MESSAGES.log.seededFail(slug, rev, hint ?? message))
-        try { store.remove(inst, rev) } catch {}
+      }
+      const drop = () => { if (rev != null) { try { store.remove(inst, rev) } catch {} } if (row.prod && !row.prod.live) row.prod.state = 'stopped' }   // a re-seed's old rev resumes on the next request
+      // the folder's answer: its bytes are the problem — not retried until they change
+      const fail = (kind, message, hint, where = {}) => {
+        row.seededAttempted = id
+        once(kind, message, hint, where)
+        emit(MESSAGES.log.seededFail(slug, rev ?? '?', hint ?? message))
+        drop()
         return null
       }
-      const mj = i.checkModuleJson(row.dir)
+      // a host-side failure: this folder is asked again at the next scan
+      const retry = (kind, message, hint = null, where = {}) => {
+        once(kind, message, hint, where)
+        emit(MESSAGES.log.seededRetry(slug, rev ?? '?', message))
+        drop()
+        return null
+      }
+      try { rev = store.nextRev(inst) } catch (e) { return retry('build', `snapshot write failed: ${e?.code ?? e?.message ?? e}`) }
+      row.counter = rev
+      const mj = i.withGroupSync(row.uid, () => i.checkModuleJson(row.dir))
       if (!mj.ok) return fail('build', mj.error.message, formatHint(mj.error), { file: mj.error.file, line: mj.error.line, col: mj.error.col })
+      if (JSON.stringify(mj.meta) !== JSON.stringify(row.meta)) {   // a re-seed that renamed the app or changed its icon: the registry's meta follows (as build() does)
+        row.meta = mj.meta
+        try { await registrar?.claim?.({ slug, meta: mj.json, dir: row.dir }) } catch (e) { emit(`[${slug}] meta update: ${e.message}`) }
+      }
       let built
       try { built = await i.buildArtefacts(row, { appDir: row.dir, rev }) } catch (e) {
         if (e?.problems) { const p = e.problems[0]; return fail('build', p.message, formatHint(p), { file: p.file, line: p.line, col: p.col }) }
-        return fail('build', `snapshot write failed: ${e?.code ?? e?.message ?? e}`, null)
+        return retry('build', `snapshot write failed: ${e?.code ?? e?.message ?? e}`)
       }
-      // load-beside: a re-seed's old worker keeps serving until the new one is READY (a request meanwhile resumes the old rev)
+      // load-beside: a re-seed's old worker keeps serving until the new one is READY (a request meanwhile resumes the old rev).
+      // The two workers share ONE data dir — a named exception to D13 (prod never overlaps) for a folder nobody deploys to —
+      // so a MOUNT-ERROR beside the old worker gets build()'s one-shot retry: stop the old worker, start once more.
       const slot = row.prod ?? i.prodSlot(row, { rev: null, commit: null, legacy: true })
-      let next
-      try { next = await i.startWorker(row, slot, rev, built.written.dir) } catch (e) {
-        const p = e.failed ? classifyWorkerFailure(e.failed, { appDir: row.dir, fs, map: built.map }) : null
-        return fail('worker', p?.message ?? `${e.error}: ${e.msg}`, p ? formatHint(p) : null, p ? { file: p.file, line: p.line, col: p.col } : {})
+      let next, retried = false
+      for (;;) {
+        try { next = await i.startWorker(row, slot, rev, built.written.dir); break } catch (e) {
+          if (e.failed?.code === 'MOUNT-ERROR' && slot.live && !retried) {
+            retried = true
+            emit(`[${slug}] rev ${rev} mount failed beside rev ${slot.live.rev} — retrying once after the old worker exits`)
+            const old = slot.live; slot.live = null; slot.state = 'loading'
+            await i.stopLive(row, slot, old, 'mount-retry')
+            continue
+          }
+          const p = e.failed ? i.withGroupSync(row.uid, () => classifyWorkerFailure(e.failed, { appDir: row.dir, fs, map: built.map })) : null
+          const message = p?.message ?? `${e.error}: ${e.msg}`, hint = p ? formatHint(p) : null, where = p ? { file: p.file, line: p.line, col: p.col } : {}
+          return ['spawn-eagain', 'jail', 'host-fault'].includes(e.error) ? retry('worker', message, hint, where) : fail('worker', message, hint, where)
+        }
       }
       const chrome = i.chromeNameOf?.() ?? null   // the sheet was compiled against it (rebuildAll reads it back)
       try { store.commitProd(inst, rev, { commit: id, message: MESSAGES.git.seededMessage(rev), deployedAt: nowIso(os.now()), legacy: true, ...(chrome ? { chrome } : {}) }) } catch (e) {
         try { await i.stopLive(row, slot, next.live, 'seeded-record-failed') } catch {}
-        return fail('build', `revision.json: ${e?.code ?? e?.message ?? e}`, null)
+        return retry('build', `revision.json: ${e?.code ?? e?.message ?? e}`)
       }
       const old = slot.live
       slot.live = next.live; slot.rev = rev; slot.state = 'live'; slot.commit = id; slot.legacy = true; slot.appDir = row.dir
