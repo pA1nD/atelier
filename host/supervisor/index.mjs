@@ -119,11 +119,17 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // --- the app config (DESIGN §7 appConfig → {env:{K:V}}; the hold rule of §6.1) -----------------------------
   // readConfig(row) → the composed document {K:V}, fresh from the door and cached as `row.configDoc` for this host life
   // (never to disk); a 404 (no config rows) is the empty document. Throws the transport's error on anything else — a
-  // 5xx, API 50's `503 no config key` / `config key mismatch`, a network error, a timeout — the caller decides.
+  // 5xx, API 50's `503 no config key`, a network error, a timeout — and throws on a MASKED document: a 200 whose
+  // `sealed_missing` names keys the spine could not unseal (API 50) is no document at all — the partial env never becomes
+  // the last-known one; the error names the keys, never a value. The caller decides.
   async function readConfig(row) {
     if (!registrar?.appConfig) return {}
-    try { const r = await registrar.appConfig(row.instance); row.configDoc = r?.env ?? {} }
-    catch (e) { if (e?.status !== 404) throw e; row.configDoc = {} }
+    let r
+    try { r = await registrar.appConfig(row.instance) }
+    catch (e) { if (e?.status !== 404) throw e; r = { env: {} } }
+    const missing = Array.isArray(r?.sealed_missing) ? r.sealed_missing.filter((k) => typeof k === 'string') : []
+    if (missing.length) throw new Error(`spine cannot unseal ${missing.join(', ')} (sealed_missing)`)
+    row.configDoc = r?.env ?? {}
     if (row.configWhy) { row.configWhy = null; emit(`[${row.slug}] app config: the door answers again`) }
     return row.configDoc
   }

@@ -547,7 +547,9 @@ the app folder as the current user and skips freeze (logged).
 - The config hold: every spawn reads `registrar.appConfig` (§7) first, and the door's answer decides whether the spawn
   goes. A 2xx is the composed document, cached in memory as the row's last-known one for this host life (never to disk);
   a 404 (no config rows) is the empty document, known from then on. Any other failure — a 5xx, API 50's `503 no config
-  key` / `config key mismatch`, a network error, a timeout — WITH a last-known document spawns on it (`slot.configStale`;
+  key`, a network error, a timeout, and a 200 whose `sealed_missing` is non-empty (API 50: keys the spine could not
+  unseal, masked out of `env` — a partial document is no document, it never becomes the last-known one; the line names
+  the keys, never a value) — WITH a last-known document spawns on it (`slot.configStale`;
   one log line per row per reason) and WITHOUT one HOLDS the spawn (`{error:'config-held'}` from `workerSpec`): no
   worker — never one without its env (2026-09-02: the system host's `home` came up without `SPINE_ADMIN`, the portal dark
   for every signed-in user) — the slot `loading` (a request answers 503 `app not ready`), the built rev dropped, no

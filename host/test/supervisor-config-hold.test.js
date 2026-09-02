@@ -1,11 +1,12 @@
 // supervisor/index.mjs workerSpec + scan (DESIGN §6.1 "the config hold"; the 2026-09-02 incident: the system host's `home`
 // spawned WITHOUT its env when the config GET failed, and the portal was dark for every signed-in user): the config door
-// decides whether a spawn goes. No document known and the door fails (5xx, API 50's `503 no config key` / `config key
-// mismatch`, a network error) → the spawn is HELD: no worker, the slot `loading`, one line per row per reason, no report,
-// retried at each scan once the door answers — never a rebuild against a closed door. A last-known document from a
-// previous successful read → the spawn on it, and the next successful read that shows the document moved is a config
-// release (D16). A 404 (no config rows) is the empty document, known from then on. The seeded (system host) road and the
-// resume of a boot row follow the same rule.
+// decides whether a spawn goes. No document known and the door fails (5xx, API 50's `503 no config key`, a network error,
+// or a 200 with a non-empty `sealed_missing` — keys the spine could not unseal, masked out of `env`) → the spawn is HELD:
+// no worker, the slot `loading`, one line per row per reason (the keys named, never a value), no report, retried at each
+// scan once the door answers — never a rebuild against a closed door. A last-known document from a previous successful
+// read → the spawn on it, and the next successful read that shows the document moved is a config release (D16). A 404
+// (no config rows) is the empty document, known from then on. The seeded (system host) road and the resume of a boot row
+// follow the same rule.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { world, api, waitFor, APP_JSON, fs, path } from './supervisor-harness.test.js'
@@ -25,7 +26,8 @@ const BACK = 'the door answers again'
 function door(w) {
   const d = { answer: null }
   d.closed = (status = 503, error = 'no config key') => { d.answer = () => { throw new TransportError(status, { error }) } }
-  d.open = (env) => { d.answer = () => ({ env }) }
+  d.open = (env) => { d.answer = () => ({ env, sealed_missing: [] }) }
+  d.masked = (env, keys) => { d.answer = () => ({ env, sealed_missing: keys }) }   // API 50: a 200 with values the spine could not unseal masked out
   w.registrar.appConfig = async () => d.answer()
   return d
 }
@@ -183,6 +185,80 @@ test('a second host life with the door closed (no document yet): the resume of a
     assert.deepEqual(JSON.parse((await api(sup, r, '/env', prod)).body), { rev: 1, K: 'b' })
     assert.equal(row.prod.configHeld, false); assert.equal(row.prod.configStale, false)
     assert.ok(w.lines.slice(before).some((l) => /^\[home\] rev 1 RESUMED \d+ ms$/.test(l)))
+    assert.equal(w.reports.length, 0)
+  } finally { await w.done(sup) }
+})
+
+test('a MASKED document (API 50: a 200 whose `sealed_missing` is non-empty) is a closed door: no document known → the dev spawn is HELD, ONE line naming the keys (never a value), one read per scan, no rebuild; the whole document → the spawn; masked again WITH a last-known document → the save spawns on the cache (stale), the partial env never served; an idle-stopped worker resumes fresh once the document is whole', async () => {
+  const w = world()
+  const d = door(w); d.masked({ K: 'hunter2' }, ['SECRET_A', 'SECRET_B'])
+  const dir = w.app('todo', { 'module.json': APP_JSON('Todo'), 'backend.js': ENV_BACKEND(1) })
+  const sup = w.make({ timing: { devIdleMs: 200 } })
+  try {
+    await sup.scan()
+    const inst = state(sup, 'todo').instance, row = sup.rows.get(inst)
+    await waitFor(() => row.dev.configHeld && row.building === null)
+    let r = state(sup, 'todo')
+    assert.equal(r.dev_state, 'loading'); assert.equal(sup.workers().length, 0)
+    assert.equal((await api(sup, r, '/env')).status, 503)
+    assert.deepEqual(configLines(w, 'todo'), [`[todo] app config: ${HELD('spine cannot unseal SECRET_A, SECRET_B (sealed_missing)')}`])
+    assert.equal(row.configDoc, null, 'the partial env never becomes the last-known document')
+    assert.equal(w.reports.length, 0, 'a masked document is no app error')
+    await sup.scan(); await sup.scan()
+    assert.equal(revJson(w, inst).rev, 1, 'no rebuild against a masked door'); assert.equal(configLines(w, 'todo').length, 1, 'one line, not one per scan')
+    assert.equal(sup.workers().length, 0)
+    // the whole document: the scan spawns with it
+    d.open({ K: 'hunter2' })
+    await sup.scan()
+    await waitFor(() => state(sup, 'todo').dev_state === 'live')
+    r = state(sup, 'todo')
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 1, K: 'hunter2' })
+    assert.deepEqual(configLines(w, 'todo').slice(1), [`[todo] app config: ${BACK}`])
+    assert.equal(row.dev.configHeld, false); assert.deepEqual(row.configDoc, { K: 'hunter2' })
+    // masked again, with a last-known document: the save's spawn goes on the cache (stale) — the masked env is never served
+    d.masked({ K: 'partial' }, ['SECRET_A'])
+    fs.writeFileSync(path.join(dir, 'backend.js'), ENV_BACKEND(2))
+    await waitFor(() => state(sup, 'todo').dev_rev === 3)
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 2, K: 'hunter2' }, 'the cache, never the partial document')
+    assert.equal(row.dev.configStale, true)
+    assert.equal(configLines(w, 'todo').at(-1), `[todo] app config: ${CACHED('spine cannot unseal SECRET_A (sealed_missing)')}`)
+    assert.deepEqual(row.configDoc, { K: 'hunter2' }, 'the cache is untouched by the masked read')
+    await sup.scan()
+    assert.equal(configLines(w, 'todo').length, 3, 'still masked: no new line')
+    // whole again, moved: the idle-stopped dev worker resumes on the fresh document
+    await waitFor(() => state(sup, 'todo').dev_state === 'stopped')
+    d.open({ K: 'moved' })
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env')).body), { rev: 2, K: 'moved' })
+    assert.equal(row.dev.configStale, false); assert.equal(configLines(w, 'todo').at(-1), `[todo] app config: ${BACK}`)
+    assert.ok(!w.lines.some((l) => /hunter2|partial|moved/.test(l)), 'no value ever reaches a log line')
+    assert.equal(w.reports.length, 0)
+  } finally { await w.done(sup) }
+})
+
+test('the seeded (system host) road: a MASKED document at boot HOLDS the prod build — prod `loading`, 503 app not ready, one rev, one line naming the keys, no adopt row; the whole document → live on it, ONE adopt row', async () => {
+  const w = world({ seededApps: true })
+  const d = door(w); d.masked({}, ['SPINE_ADMIN'])
+  w.app('home', { 'module.json': APP_JSON('Home'), 'backend.js': ENV_BACKEND(1), [SEEDED_MARKER]: '' })
+  const sup = w.make({ timing: { idleMs: 60_000 } })
+  try {
+    await sup.scan()
+    let r = state(sup, 'home')
+    const inst = r.instance, row = sup.rows.get(inst)
+    assert.equal(r.prod_state, 'loading'); assert.equal(r.prod_rev, null); assert.equal(sup.workers().length, 0)
+    assert.equal((await api(sup, r, '/env', prod)).status, 503)
+    assert.deepEqual(configLines(w, 'home'), [`[home] app config: ${HELD('spine cannot unseal SPINE_ADMIN (sealed_missing)')}`])
+    assert.equal(row.prod.configHeld, true); assert.equal(row.configDoc, null)
+    assert.equal(w.releases.length, 0); assert.equal(w.reports.length, 0)
+    await sup.scan(); await sup.scan()
+    assert.equal(revJson(w, inst).rev, 1, 'one rev across scans'); assert.equal(configLines(w, 'home').length, 1); assert.equal(sup.workers().length, 0)
+    d.open({ K: 'admin-1' })
+    await sup.scan()
+    await waitFor(() => state(sup, 'home').prod_state === 'live')
+    r = state(sup, 'home')
+    assert.deepEqual(JSON.parse((await api(sup, r, '/env', prod)).body), { rev: 1, K: 'admin-1' })
+    assert.equal(w.releases.length, 1); assert.equal(w.releases[0].kind, 'adopt')
+    assert.equal(configLines(w, 'home').at(-1), `[home] app config: ${BACK}`)
+    assert.equal(row.prod.configHeld, false); assert.equal(row.prod.configStale, false)
     assert.equal(w.reports.length, 0)
   } finally { await w.done(sup) }
 })
