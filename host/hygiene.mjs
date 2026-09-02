@@ -44,10 +44,12 @@ export function hostEnv(podEnv, cfg) {
 // spine (k8s.ts buildSessionPod) and the Containerfile set, minus ATELIER_* (the bootstrap secret
 // and the host's knobs), HOME pinned to /work. CLAUDE_MODEL is the supervisor's model pick
 // (session-supervisor.mjs reads it at claude launch); OPENAI_VOICE_TOKEN is the pod's `voice`
-// secret (envFrom) that speak/draw need.
+// secret (envFrom) that speak/draw need. The CHANNEL_ family is kept by PREFIX: the spine adds members
+// (CHANNEL_CHAT_KIND=group|direct, 2026-09-02 — the door plugin's send-path guard fails closed in every 1:1
+// without it), and a name list here silently dropped each new one before it reached claude and the plugin.
 export const SESSION_KEEP = Object.freeze([
   'PATH', 'LANG', 'LC_ALL', 'TERM', 'TZ', 'CHAT_ID', 'PERSONA*', 'STORY_TEXT',
-  'CHANNEL_URL', 'CHANNEL_TOKEN', 'CHANNEL_CHAT', 'ANTHROPIC_*', 'CLAUDE_MODEL', 'DISABLE_AUTOUPDATER',
+  'CHANNEL_*', 'ANTHROPIC_*', 'CLAUDE_MODEL', 'DISABLE_AUTOUPDATER',
   'OPENAI_VOICE_TOKEN', 'HORSE_BROWSER_*', 'FLEET_EGRESS*', 'PIP_USER', 'NPM_CONFIG_PREFIX',
 ])
 export function sessionEnv(podEnv) { return { ...scrub(podEnv, SESSION_KEEP), HOME: '/work' } }

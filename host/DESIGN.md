@@ -213,7 +213,7 @@ spread from `process.env` anywhere. `SECRETS = [ATELIER_BOOTSTRAP, CHANNEL_TOKEN
 | row | who spawns | argv (before wrapper) | uid:gid / groups | env (exact) | umask | cwd | stdio |
 |---|---|---|---|---|---|---|---|
 | H host | launcher | `node /app/host/index.mjs` | 0:0 / inherited (root's) | pod env minus `SECRETS` minus `CHANNEL_*`, plus `ATELIER_DIRFD=3`, `ATELIER_RUN`, `ATELIER_WORK`, `ATELIER_CONTROL`, `ATELIER_SPINE_URL` (= pod `CHANNEL_URL`), `HOME=/root`, `NODE_ENV=production` | 077 | `/` | `['ignore','inherit','inherit', dirfd]` |
-| S session supervisor | launcher | `node /app/session-supervisor.mjs` | 1000:1000 / `[19999]` via `setpriv --groups` | pod env minus `ATELIER_BOOTSTRAP` (keeps `CHANNEL_TOKEN`, `CHANNEL_URL`, `CHANNEL_CHAT`, `PERSONA*`, `STORY_TEXT`, `TERM`, `LANG`, `ANTHROPIC_*`, `DISABLE_AUTOUPDATER`, `PATH`), plus `HOME=/work` | 022 (it sets 077 itself for its own writes) | `/work` | `['ignore','inherit','inherit']` |
+| S session supervisor | launcher | `node /app/session-supervisor.mjs` | 1000:1000 / `[19999]` via `setpriv --groups` | pod env minus `ATELIER_BOOTSTRAP` (keeps the whole `CHANNEL_*` family by prefix — `CHANNEL_CHAT_KIND` and any member the spine adds reach claude and the door plugin without a launcher change — `PERSONA*`, `STORY_TEXT`, `TERM`, `LANG`, `ANTHROPIC_*`, `DISABLE_AUTOUPDATER`, `PATH`), plus `HOME=/work` | 022 (it sets 077 itself for its own writes) | `/work` | `['ignore','inherit','inherit']` |
 | X control helper | launcher | `sh -c 'cat >> /control/.host-crash'` (stdin = the line) | 1000:1000 / `[]` | `{PATH}` | 077 | `/` | `['pipe','ignore','inherit']` |
 | W worker | host | `node --max-old-space-size=<cap−576 MB, min 256> host/worker/runtime.mjs` (args: none; everything via env + fd 3) | `20000+i` : same / `[]` | `{PATH, NODE_ENV, APP_ID=<instance>, HOME=<scratch>/<inst>/home, HOST, PORT, BASE_URL, ATELIER_WORKER=<json §4.1>}` + the app's spine-held config keys (OR14) | 002 | `/` (the worker `chdir`s to its app dir itself) | `['ignore','pipe','pipe','pipe']` — fd 3 = control lane |
 | I install | host | `npm install --no-audit --no-fund` | `20000+i` : same / `[]` | `{PATH, NODE_ENV, APP_ID, HOME=<scratch>/<inst>/home, npm_config_cache=$HOME/.npm-cache}` | 022 | `<scratch>/<inst>/build` | `['ignore','pipe','pipe']` |
@@ -837,7 +837,7 @@ Deviations from §2.1–§2.2 as built, current state (details in `host/drill/la
 4. **Env rows are explicit key lists** (`scrub` never spreads): H = `PATH LANG LC_ALL TERM TZ ATELIER_*`
    plus the launcher-set keys (`ATELIER_DIRFD=3`, `ATELIER_RUN/WORK/CONTROL`, `ATELIER_SPINE_URL` =
    pod `CHANNEL_URL`, `HOME=/root`, `NODE_ENV=production`); S = `PATH LANG LC_ALL TERM TZ CHAT_ID PERSONA*
-   STORY_TEXT CHANNEL_URL CHANNEL_TOKEN CHANNEL_CHAT ANTHROPIC_* DISABLE_AUTOUPDATER HORSE_BROWSER_*
+   STORY_TEXT CHANNEL_* ANTHROPIC_* DISABLE_AUTOUPDATER HORSE_BROWSER_*
    FLEET_EGRESS* PIP_USER NPM_CONFIG_PREFIX` plus `HOME=/work` (what k8s.ts `buildSessionPod` and the
    Containerfile set); X = `PATH`. `ATELIER_BOOTSTRAP` is never copied by `scrub` under any list. The
    adapter's `sh -c` wrapper adds `PWD`, `SHLVL`, `_` to every child.

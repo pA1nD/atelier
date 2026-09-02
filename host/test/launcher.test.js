@@ -34,7 +34,7 @@ function withDac(os, io, state) {
 const POD_ENV = {
   PATH: '/work/.local/bin:/usr/local/bin:/usr/bin:/bin', HOME: '/work', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'xterm-256color',
   CHAT_ID: 'c1', PERSONA: 'bayard', PERSONA_TEXT: 'You are…', STORY_TEXT: 'story',
-  CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1',
+  CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1', CHANNEL_CHAT_KIND: 'direct',   // CHANNEL_CHAT_KIND: a 2026-09-02 member of the family — kept by prefix, never by a name list
   ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', CLAUDE_MODEL: 'claude-y', DISABLE_AUTOUPDATER: '1', OPENAI_VOICE_TOKEN: 'voice-secret',
   HORSE_BROWSER_BIN: '/usr/local/bin/chrome-egress', HORSE_BROWSER_UNATTENDED: '1', FLEET_EGRESS: 'http://exit', FLEET_EGRESS_TZ: 'Europe/Berlin',
   PIP_USER: '1', NPM_CONFIG_PREFIX: '/work/.npm-global',
@@ -243,7 +243,7 @@ test('env rows: H has no secret and no CHANNEL_*; S keeps the supervisor contrac
   assert.equal('ATELIER_BOOTSTRAP' in S, false); assert.equal('ATELIER_GRACE_S' in S, false); assert.equal('KUBERNETES_SERVICE_HOST' in S, false)
   assert.deepEqual(S, {
     PATH: POD_ENV.PATH, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'xterm-256color', CHAT_ID: 'c1', PERSONA: 'bayard', PERSONA_TEXT: 'You are…', STORY_TEXT: 'story',
-    CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1', ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', CLAUDE_MODEL: 'claude-y',
+    CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1', CHANNEL_CHAT_KIND: 'direct', ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', CLAUDE_MODEL: 'claude-y',
     DISABLE_AUTOUPDATER: '1', OPENAI_VOICE_TOKEN: 'voice-secret', HORSE_BROWSER_BIN: '/usr/local/bin/chrome-egress', HORSE_BROWSER_UNATTENDED: '1', FLEET_EGRESS: 'http://exit', FLEET_EGRESS_TZ: 'Europe/Berlin',
     PIP_USER: '1', NPM_CONFIG_PREFIX: '/work/.npm-global', HOME: '/work',
   })
