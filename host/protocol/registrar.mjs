@@ -123,6 +123,8 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     try { hooks.onChrome?.(c) } catch (e) { log(`registrar: chrome ${c?.digest?.slice(0, 12) ?? 'null'}: ${e?.message ?? e}`) }
   }
   // the answer's `sleep` (register and heartbeat, API 50): "24h" | "always-on"; an absent or shapeless field keeps the last word
+  // — `null` too, unlike `chrome` above where null is a value (the spine names no release): the spine always sends one of the
+  // two strings, and a sleep mode is never "none"
   function readSleep(r) {
     if (r?.sleep === '24h' || r?.sleep === 'always-on') st.sleep = r.sleep
   }
