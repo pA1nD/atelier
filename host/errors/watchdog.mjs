@@ -52,7 +52,8 @@ export const sumKb = (stdout) => String(stdout ?? '').split('\n').reduce((n, l) 
 
 /**
  * createWatchdog({ os, workers, report, kill, dataRoot, now, timers, log, tickMs, diskMs, duMs, path })
- *   workers() → [{instance, slug, pid, uid, dataDir, sock, rev, rlimits?}]   (the supervisor's table; slug labels the metrics row, rev + rlimits.data read when present)
+ *   workers() → [{instance, key?, slot?, slug, pid, uid, dataDir, sock, rev, rlimits?}]   (the supervisor's table; slug labels the metrics row, rev + rlimits.data read when present;
+ *              `key` tells two workers of one instance apart — the dev and the prod slot, DESIGN §10.3 — and `slot` rides into kill(instance, why, slot))
  *   .start() / .stop()        schedule / cancel the three loops (stop resumes every stopped worker)
  *   .tick()                   one RSS + CPU sample over every worker
  *   .diskTick()               one statfs sample + the stop/resume decision
@@ -61,7 +62,8 @@ export const sumKb = (stdout) => String(stdout ?? '').split('\n').reduce((n, l) 
  */
 export function createWatchdog({ os, workers, report, kill, dataRoot, now, timers = { setTimeout, clearTimeout }, log, tickMs = TICK_MS, diskMs = DISK_MS, duMs = DU_MS, path = '/usr/bin:/bin', metrics = createMetrics() } = {}) {
   const clock = now ?? os.now
-  const st = new Map()        // instance → per-worker state
+  const st = new Map()        // key (instance, or instance/slot) → per-worker state
+  const key = (w) => w.key ?? w.instance
   let handles = []
   let running = false
   let diskUsed = null
@@ -73,8 +75,8 @@ export function createWatchdog({ os, workers, report, kill, dataRoot, now, timer
   const trip = (w, kind) => { try { metrics.watchdogTrip(w.slug ?? w.instance, kind) } catch {} }
 
   function stateOf(w) {
-    let s = st.get(w.instance)
-    if (!s || s.pid !== w.pid) { s = { pid: w.pid, j: null, at: null, rssKb: null, cpuPct: 0, cycles: 0, cycleTimes: [], lastCpuReport: null, stopped: new Set(), contTimer: null, duKb: null, grewKb: 0, shmKb: 0 }; st.set(w.instance, s) }
+    let s = st.get(key(w))
+    if (!s || s.pid !== w.pid) { s = { pid: w.pid, j: null, at: null, rssKb: null, cpuPct: 0, cycles: 0, cycleTimes: [], lastCpuReport: null, stopped: new Set(), contTimer: null, duKb: null, grewKb: 0, shmKb: 0 }; st.set(key(w), s) }
     return s
   }
   function prune(live) {
@@ -94,7 +96,7 @@ export function createWatchdog({ os, workers, report, kill, dataRoot, now, timer
     const live = new Set()
     const t = clock()
     for (const w of rows()) {
-      live.add(w.instance)
+      live.add(key(w))
       const s = stateOf(w)
       // --- RSS ---
       const rss = os.rssKb(w.pid)
@@ -104,9 +106,9 @@ export function createWatchdog({ os, workers, report, kill, dataRoot, now, timer
         if (rss > cap) {
           const why = `rss ${fmtMb(rss * 1024)} > ${fmtMb(cap * 1024)}`
           if (s.contTimer !== null) { timers.clearTimeout(s.contTimer); s.contTimer = null }
-          st.delete(w.instance)
+          st.delete(key(w))
           trip(w, 'rss')
-          try { kill?.(w.instance, why) } catch (e) { say(log, `watchdog: kill threw ${e?.message ?? e}`) }
+          try { kill?.(w.instance, why, w.slot) } catch (e) { say(log, `watchdog: kill threw ${e?.message ?? e}`) }
           tell(w, { message: why, hint: `the worker's resident memory passed the cap (RLIMIT_DATA ${fmtMb(w.rlimits?.data ?? RLIMIT_DATA_DEFAULT)} − 640 MB); look for an unbounded cache or a leak, then save — the host restarts the worker with backoff` })
           continue
         }
@@ -139,7 +141,7 @@ export function createWatchdog({ os, workers, report, kill, dataRoot, now, timer
   function duTick() {
     const live = new Set()
     for (const w of rows()) {
-      live.add(w.instance)
+      live.add(key(w))
       const s = stateOf(w)
       if (typeof w.dataDir === 'string') {
         const r = os.spawnSync({ argv: ['du', '-s', '-k', w.dataDir], env: { PATH: path }, cwd: '/', uid: w.uid, gid: w.uid, groups: [], stdio: ['ignore', 'pipe', 'ignore'] })
@@ -177,7 +179,7 @@ export function createWatchdog({ os, workers, report, kill, dataRoot, now, timer
       stop(w.w, w.s, 'disk')
       tell(w.w, { message: `disk ${DISK_STOP_PCT} % — worker stopped until < ${DISK_RESUME_PCT} %`, hint: `/work is ${pct} % used; this dataDir grew ${fmtMb(w.s.grewKb * 1024)} in the last du pass (${fmtMb((w.s.duKb ?? 0) * 1024)} total) — free space (delete data, or the operator grows the volume) and the worker resumes on its own below ${DISK_RESUME_PCT} %` })
     } else if (pct < DISK_RESUME_PCT) {
-      for (const w of list) { const s = st.get(w.instance); if (s?.stopped.has('disk')) { resume(w, s, 'disk'); say(log, `watchdog: ${w.instance} resumed — disk ${pct} %`) } }
+      for (const w of list) { const s = st.get(key(w)); if (s?.stopped.has('disk')) { resume(w, s, 'disk'); say(log, `watchdog: ${w.instance} resumed — disk ${pct} %`) } }
     }
   }
 
@@ -194,7 +196,7 @@ export function createWatchdog({ os, workers, report, kill, dataRoot, now, timer
       running = false
       for (const h of handles) if (h.id !== null) timers.clearTimeout(h.id)
       handles = []
-      const byInst = new Map(rows().map((w) => [w.instance, w]))
+      const byInst = new Map(rows().map((w) => [key(w), w]))
       for (const [inst, s] of st) {
         if (s.contTimer !== null) { timers.clearTimeout(s.contTimer); s.contTimer = null }
         if (s.stopped.size && byInst.get(inst)) { s.stopped.clear(); signal(byInst.get(inst), 'SIGCONT') }
