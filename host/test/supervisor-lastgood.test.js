@@ -16,7 +16,9 @@ function setup() {
   fs.mkdirSync(path.join(dot, 'last-good'), { recursive: true })
   const calls = []
   const base = unprivileged()
-  const osx = { ...base, chown: (p, u, g) => { calls.push(['chown', path.relative(dot, p), u, g]); return base.chown(p, u, g) }, chmod: (p, m) => { calls.push(['chmod', path.relative(dot, p), m]); return base.chmod(p, m) }, now: () => 1_700_000_000_000 }
+  // on Linux `at()` is the `/proc/self/fd/N/…` form: the recorder names inodes by their real path under the tree
+  const rel = (p) => { try { return path.relative(dot, path.join(fs.realpathSync(path.dirname(p)), path.basename(p))) } catch { return path.relative(dot, p) } }
+  const osx = { ...base, chown: (p, u, g) => { calls.push(['chown', rel(p), u, g]); return base.chown(p, u, g) }, chmod: (p, m) => { calls.push(['chmod', rel(p), m]); return base.chmod(p, m) }, now: () => 1_700_000_000_000 }
   const dirfd = osx.openDir(dot)
   const store = createStore({ os: osx, dirfd, hostVersion: 'test' })
   return { root, dot, osx, dirfd, store, calls, done: () => { osx.closeFd(dirfd); fs.rmSync(root, { recursive: true, force: true }) } }
@@ -33,7 +35,7 @@ test('write → commit: rev dir renamed into place, files in place, checksum, re
   assert.equal((fs.statSync(path.join(s.dot, INST, 'revision.json')).mode & 0o777), 0o600, 'markers are the host\'s alone')
   const fe = new Map([['frontend.js', 'export default 1'], ['views/deep.js', 'export const d = 1']])
   const w1 = s.store.write(INST, 1, 20001, { backend: 'export default {}', map: '{"version":3}', frontend: fe, css: '.a{}' })
-  assert.equal(w1.dir, path.join(s.dot, 'last-good', INST, 'rev-1'))
+  assert.equal(fs.realpathSync(w1.dir), path.join(s.dot, 'last-good', INST, 'rev-1'))
   assert.deepEqual(fs.readdirSync(w1.dir).sort(), ['backend.js', 'backend.js.map', 'frontend', 'styles.css'])
   assert.equal(fs.readFileSync(path.join(w1.dir, 'frontend', 'views', 'deep.js'), 'utf8'), 'export const d = 1')
   assert.equal(fs.readdirSync(path.join(s.dot, 'last-good', INST)).filter((n) => n.includes('tmp')).length, 0, 'no tmp dir left behind')

@@ -1,39 +1,47 @@
-find: ‘/work/.atelier/tmp/i-a70daab0b7f843a5’: Permission denied
-find: ‘/work/.atelier/tmp/i-12143996ffade520’: Permission denied
-find: ‘/work/.atelier/data-dev/i-a70daab0b7f843a5’: Permission denied
-find: ‘/work/.atelier/data-dev/i-12143996ffade520’: Permission denied
-2770 20001:19999 /work/.atelier/data-dev/i-12143996ffade520
-2770 20002:19999 /work/.atelier/data-dev/i-a70daab0b7f843a5
-600 root:root /work/.atelier/i-12143996ffade520/registered.json
-600 root:root /work/.atelier/i-12143996ffade520/revision.json
-600 root:root /work/.atelier/i-12143996ffade520/slug
-600 root:root /work/.atelier/i-12143996ffade520/uid
-600 root:root /work/.atelier/i-a70daab0b7f843a5/registered.json
-600 root:root /work/.atelier/i-a70daab0b7f843a5/releases.jsonl
-600 root:root /work/.atelier/i-a70daab0b7f843a5/revision.json
-600 root:root /work/.atelier/i-a70daab0b7f843a5/slug
-600 root:root /work/.atelier/i-a70daab0b7f843a5/uid
+find: ‘/work/.atelier/tmp/i-06005cf53088113d’: Permission denied
+find: ‘/work/.atelier/tmp/i-4273e0907ec4a493’: Permission denied
+find: ‘/work/.atelier/data-dev/i-06005cf53088113d’: Permission denied
+find: ‘/work/.atelier/data-dev/i-4273e0907ec4a493’: Permission denied
+2770 20001:19999 /work/.atelier/data-dev/i-4273e0907ec4a493
+2770 20002:19999 /work/.atelier/data-dev/i-06005cf53088113d
+2770 20002:19999 /work/.atelier/rehearsal/i-06005cf53088113d/data
+600 root:root /work/.atelier/i-06005cf53088113d/registered.json
+600 root:root /work/.atelier/i-06005cf53088113d/releases.jsonl
+600 root:root /work/.atelier/i-06005cf53088113d/revision.json
+600 root:root /work/.atelier/i-06005cf53088113d/slug
+600 root:root /work/.atelier/i-06005cf53088113d/uid
+600 root:root /work/.atelier/i-4273e0907ec4a493/registered.json
+600 root:root /work/.atelier/i-4273e0907ec4a493/revision.json
+600 root:root /work/.atelier/i-4273e0907ec4a493/slug
+600 root:root /work/.atelier/i-4273e0907ec4a493/uid
 640 root:node /work/.atelier/agent.log
-700 20001:20001 /work/.atelier/tmp/i-12143996ffade520
-700 20002:20002 /work/.atelier/tmp/i-a70daab0b7f843a5
+700 20001:20001 /work/.atelier/tmp/i-4273e0907ec4a493
+700 20002:20002 /work/.atelier/tmp/i-06005cf53088113d
 711 root:root /work/.atelier
 711 root:root /work/.atelier/backup
 711 root:root /work/.atelier/data
 711 root:root /work/.atelier/data-dev
-711 root:root /work/.atelier/i-12143996ffade520
-711 root:root /work/.atelier/i-a70daab0b7f843a5
+711 root:root /work/.atelier/i-06005cf53088113d
+711 root:root /work/.atelier/i-4273e0907ec4a493
 711 root:root /work/.atelier/last-good
 711 root:root /work/.atelier/prod
 711 root:root /work/.atelier/rehearsal
 711 root:root /work/.atelier/scratch
 711 root:root /work/.atelier/tmp
-750 root:20001 /work/.atelier/last-good/i-12143996ffade520
-750 root:20001 /work/.atelier/last-good/i-12143996ffade520/rev-1
-750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5
-750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-1
-750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-2
-750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-3
-750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-4
-750 root:20002 /work/.atelier/last-good/i-a70daab0b7f843a5/rev-5
-777 root:root /work/.atelier/i-12143996ffade520/current-dev
-777 root:root /work/.atelier/i-a70daab0b7f843a5/current-dev
+750 root:20001 /work/.atelier/last-good/i-4273e0907ec4a493
+750 root:20001 /work/.atelier/last-good/i-4273e0907ec4a493/rev-1
+750 root:20002 /work/.atelier/last-good/i-06005cf53088113d
+750 root:20002 /work/.atelier/last-good/i-06005cf53088113d/rev-1
+750 root:20002 /work/.atelier/last-good/i-06005cf53088113d/rev-3
+750 root:20002 /work/.atelier/last-good/i-06005cf53088113d/rev-5
+750 root:20002 /work/.atelier/last-good/i-06005cf53088113d/rev-7
+750 root:20002 /work/.atelier/last-good/i-06005cf53088113d/rev-9
+750 root:20002 /work/.atelier/prod/i-06005cf53088113d
+750 root:20002 /work/.atelier/prod/i-06005cf53088113d/4f7052be170f.tmp
+750 root:20002 /work/.atelier/prod/i-06005cf53088113d/53dd6e10a6b4.tmp
+750 root:20002 /work/.atelier/prod/i-06005cf53088113d/8b3ca6b869d9.tmp
+750 root:20002 /work/.atelier/prod/i-06005cf53088113d/ed77b3c014d5.tmp
+750 root:20002 /work/.atelier/prod/i-06005cf53088113d/f9ede180c4cf.tmp
+750 root:20002 /work/.atelier/rehearsal/i-06005cf53088113d
+777 root:root /work/.atelier/i-06005cf53088113d/current-dev
+777 root:root /work/.atelier/i-4273e0907ec4a493/current-dev

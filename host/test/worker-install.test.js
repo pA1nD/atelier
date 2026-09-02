@@ -4,6 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { memory } from '../adapters/os.mjs'
@@ -171,7 +172,7 @@ test('parseFreeze / npmSpec / copyManifestSpec / freezeSpec (pure)', () => {
 })
 
 test('freeze.py: compiles, refuses an unknown mode, refuses a missing scratch under the dirfd — always with a FREEZE- verdict line', (t) => {
-  const py = spawnSync('python3', ['-m', 'py_compile', FREEZE_PATH], { encoding: 'utf8' })
+  const py = spawnSync('python3', ['-m', 'py_compile', FREEZE_PATH], { encoding: 'utf8', env: { ...process.env, PYTHONPYCACHEPREFIX: os.tmpdir() } })   // the .pyc lands in tmp: the tree may be read-only for this uid (the drill pod)
   if (py.error) return t.skip('python3 not on this machine')
   assert.equal(py.status, 0, py.stderr)
   const bad = spawnSync('python3', [FREEZE_PATH, 'bogus', 'i-x', 'demo', '20001', '20001'], { encoding: 'utf8' })

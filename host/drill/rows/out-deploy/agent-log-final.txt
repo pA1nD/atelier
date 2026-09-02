@@ -1,17 +1,32 @@
-2026-09-02T03:57:11.000Z host: ready pid 16 host=computer-drill epoch=520ba884cf2c0284
-2026-09-02T03:57:19.713Z [hello] rev 1 LIVE (dev) in 111 ms
-2026-09-02T03:57:19.773Z [locker] rev 1 LIVE (dev) in 141 ms
-2026-09-02T03:57:21.021Z [locker] deploy none "first release": commit FAILED 2 ms — git init: spawn sh EACCES
-2026-09-02T03:57:21.021Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
-2026-09-02T03:57:23.346Z [locker] rev 2 LIVE (dev) in 213 ms
-2026-09-02T03:57:48.315Z [locker] deploy none "second release": commit FAILED 1 ms — git init: spawn sh EACCES
-2026-09-02T03:57:48.315Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
-2026-09-02T03:57:50.962Z [locker] rev 3 LIVE (dev) in 199 ms
-2026-09-02T03:58:15.075Z [locker] deploy none "release 3": commit FAILED 1 ms — git init: spawn sh EACCES
-2026-09-02T03:58:15.075Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
-2026-09-02T03:58:17.532Z [locker] rev 4 LIVE (dev) in 166 ms
-2026-09-02T03:58:41.494Z [locker] deploy none "release 4": commit FAILED 1 ms — git init: spawn sh EACCES
-2026-09-02T03:58:41.494Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
-2026-09-02T03:58:43.893Z [locker] rev 5 LIVE (dev) in 154 ms
-2026-09-02T03:59:07.800Z [locker] deploy none "release 5": commit FAILED 2 ms — git init: spawn sh EACCES
-2026-09-02T03:59:07.800Z [locker] deploy none RED at commit: git init: spawn sh EACCES — prod stays on rev 0
+2026-09-02T04:00:32.150Z host: ready pid 16 host=computer-drill epoch=3346f9c73534d51c
+2026-09-02T04:00:40.645Z [hello] rev 1 LIVE (dev) in 120 ms
+2026-09-02T04:00:40.681Z [locker] rev 1 LIVE (dev) in 137 ms
+2026-09-02T04:00:41.974Z [locker] deploy 53dd6e10a6b4 "first release": commit ok 9 ms — 53dd6e10a6b4 "first release"
+2026-09-02T04:00:41.981Z [locker] deploy 53dd6e10a6b4 "first release": copy ok 1 ms — 0 MB of prod data copied
+2026-09-02T04:00:41.986Z [locker] deploy 53dd6e10a6b4 "first release": export FAILED 5 ms — tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/53dd6e10a6b4.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now
+2026-09-02T04:00:41.987Z [locker] rev 0 FAILED (users see nothing — never live) nothing deployed — locker stays on rev 0 (none); fix and run atelier deploy again
+2026-09-02T04:00:41.987Z [locker] deploy 53dd6e10a6b4 RED at export: tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/53dd6e10a6b4.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now — prod stays on rev 0
+2026-09-02T04:00:44.174Z [locker] rev 3 LIVE (dev) in 139 ms
+2026-09-02T04:01:09.078Z [locker] deploy ed77b3c014d5 "second release": commit ok 14 ms — ed77b3c014d5 "second release"
+2026-09-02T04:01:09.085Z [locker] deploy ed77b3c014d5 "second release": copy ok 3 ms — 0 MB of prod data copied
+2026-09-02T04:01:09.089Z [locker] deploy ed77b3c014d5 "second release": export FAILED 4 ms — tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/ed77b3c014d5.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now
+2026-09-02T04:01:09.089Z [locker] rev 0 FAILED (users see nothing — never live) nothing deployed — locker stays on rev 0 (none); fix and run atelier deploy again
+2026-09-02T04:01:09.090Z [locker] deploy ed77b3c014d5 RED at export: tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/ed77b3c014d5.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now — prod stays on rev 0
+2026-09-02T04:01:11.799Z [locker] rev 5 LIVE (dev) in 210 ms
+2026-09-02T04:01:35.742Z [locker] deploy 4f7052be170f "release 3": commit ok 10 ms — 4f7052be170f "release 3"
+2026-09-02T04:01:35.752Z [locker] deploy 4f7052be170f "release 3": copy ok 3 ms — 0 MB of prod data copied
+2026-09-02T04:01:35.756Z [locker] deploy 4f7052be170f "release 3": export FAILED 4 ms — tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/4f7052be170f.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now
+2026-09-02T04:01:35.756Z [locker] rev 0 FAILED (users see nothing — never live) nothing deployed — locker stays on rev 0 (none); fix and run atelier deploy again
+2026-09-02T04:01:35.756Z [locker] deploy 4f7052be170f RED at export: tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/4f7052be170f.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now — prod stays on rev 0
+2026-09-02T04:01:38.230Z [locker] rev 7 LIVE (dev) in 201 ms
+2026-09-02T04:02:02.383Z [locker] deploy f9ede180c4cf "release 4": commit ok 14 ms — f9ede180c4cf "release 4"
+2026-09-02T04:02:02.388Z [locker] deploy f9ede180c4cf "release 4": copy ok 2 ms — 0 MB of prod data copied
+2026-09-02T04:02:02.391Z [locker] deploy f9ede180c4cf "release 4": export FAILED 3 ms — tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/f9ede180c4cf.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now
+2026-09-02T04:02:02.391Z [locker] rev 0 FAILED (users see nothing — never live) nothing deployed — locker stays on rev 0 (none); fix and run atelier deploy again
+2026-09-02T04:02:02.392Z [locker] deploy f9ede180c4cf RED at export: tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/f9ede180c4cf.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now — prod stays on rev 0
+2026-09-02T04:02:04.851Z [locker] rev 9 LIVE (dev) in 161 ms
+2026-09-02T04:02:28.800Z [locker] deploy 8b3ca6b869d9 "release 5": commit ok 11 ms — 8b3ca6b869d9 "release 5"
+2026-09-02T04:02:28.806Z [locker] deploy 8b3ca6b869d9 "release 5": copy ok 2 ms — 0 MB of prod data copied
+2026-09-02T04:02:28.809Z [locker] deploy 8b3ca6b869d9 "release 5": export FAILED 3 ms — tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/8b3ca6b869d9.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now
+2026-09-02T04:02:28.809Z [locker] rev 0 FAILED (users see nothing — never live) nothing deployed — locker stays on rev 0 (none); fix and run atelier deploy again
+2026-09-02T04:02:28.810Z [locker] deploy 8b3ca6b869d9 RED at export: tar -x: tar: /proc/self/fd/3/prod/i-06005cf53088113d/8b3ca6b869d9.tmp: Cannot open: No such file or directory | tar: Error is not recoverable: exiting now — prod stays on rev 0
