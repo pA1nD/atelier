@@ -11,6 +11,7 @@
 // carries the five slots below; the built-in fallback is the same skeleton so the shell composes
 // without the fork present.
 import { randomBytes } from 'node:crypto'
+import { asDigest } from '../protocol/index.js'
 
 export const SLOTS = {
   styles: '<!--__STYLES__-->',
@@ -66,12 +67,13 @@ export function relativeImports(code) {
   return [...out]
 }
 
-// a row's `chromeDigest` (the digest its computer reports, step 7 ship C) rides only when there is one: a document
-// with no release in play is byte for byte the step-5 document
+// a row's `chromeDigest` (the digest its computer reports, step 7 ship C) rides only when there is one — 64 hex, the
+// same rule the document is composed by (routes.mjs chromeShape), so the client never compares against a digest the
+// shell did not render: a document with no release in play is byte for byte the step-5 document
 const moduleRow = (r) => ({
   id: r.slug, instance: r.instance, rev: r.rev ?? null, hasFrontend: r.hasFrontend !== false,
   meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) },
-  ...(r.chromeDigest ? { chromeDigest: r.chromeDigest } : {}),
+  ...(asDigest(r.chromeDigest) ? { chromeDigest: r.chromeDigest } : {}),
 })
 
 /**

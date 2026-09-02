@@ -185,6 +185,8 @@ test('the document by digest (decision 5): the registry names D and the row repo
   const app = await r.go('/acme/todo')
   assert.ok(app.text.includes('<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/acme/todo/styles.css?rev=3">'), 'the app sheet is the app\'s')
   assert.match(app.text, /"chromeDigest":"d{64}"/, 'the bootstrap row carries its digest')
+  const oddDoc = await r.go('/acme/odd')
+  assert.ok(!/"id":"odd"[^}]*"chromeDigest"/.test(oddDoc.text) && !oddDoc.text.includes('sha256:nope'), 'a row digest that is not 64 hex rides on no bootstrap row: the client compares that document against the default it was composed with (S1)')
   // every chrome URL the document names answers 200 + immutable
   for (const u of [...app.text.matchAll(/href="(\/_chrome\/[^"]+)"/g)].map((m) => m[1])) { const x = await r.go(u); assert.equal(x.status, 200, u); assert.equal(x.headers['cache-control'], CHROME_CACHE_CONTROL, u) }
   // the rail frame: the default AND every row's digest (the client compares an app document against its row)

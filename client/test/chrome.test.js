@@ -3,7 +3,7 @@
 // against the default — a pinned (lagging) computer's document loads exactly once.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chromeUrl, railDefault, documentDigest, chromeMoved, targetDigest } from '../chrome.js'
+import { chromeUrl, railDefault, documentDigest, chromeMoved, targetDigest, asDigest } from '../chrome.js'
 
 const D = 'd'.repeat(64), PREV = 'e'.repeat(64)
 const rail = (def, rows) => ({ stream: 's', seq: 1, modules: rows, chrome: { qid: 'portal/catalyst-chrome', digest: def }, chromeRev: def })
@@ -26,6 +26,19 @@ test('railDefault / documentDigest: the frame\'s default (chromeRev, else chrome
   assert.equal(documentDigest(r, 'wiki'), D)
   assert.equal(documentDigest(r, 'notes'), D)
   assert.equal(documentDigest(r, 'unknown'), D)
+})
+
+test('a row digest that is not 64 hex is no digest (review 2026-09-02, S1): the row follows the default — as the shell composes it — so a malformed row value never reloads, and never loops', () => {
+  for (const bad of ['sha256:nope', '', 'D'.repeat(64), 'd'.repeat(63), 42, {}, true]) {
+    assert.equal(asDigest(bad), null, String(bad))
+    const r = rail(D, [{ id: 'odd', chromeDigest: bad }])
+    assert.equal(documentDigest(r, 'odd'), D, `${String(bad)}: the default`)
+    assert.equal(chromeMoved(D, r, 'odd'), false, `${String(bad)}: the document composed with the default is at rest`)
+    assert.equal(chromeMoved(D, r, 'odd'), false, 'on every frame')
+    assert.equal(targetDigest({ row: { chromeDigest: bad }, railDefault: D, bootRev: PREV }), D, `${String(bad)}: navigating to that row renders the default`)
+  }
+  assert.equal(asDigest(D), D)
+  assert.equal(chromeMoved(PREV, rail(D, [{ id: 'odd', chromeDigest: 'sha256:nope' }]), 'odd'), true, 'a document composed with PREV reloads once for the default, as an app-less one would')
 })
 
 test('the reload rule: a pinned computer\'s app document never reloads while the default moves on (one load); it reloads once its OWN row moves; an app-less document follows the default; a null side compares nothing', () => {

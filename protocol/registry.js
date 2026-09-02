@@ -52,6 +52,10 @@ const validators = {
 // fonts/*.woff2}`; digest = sha256 over the sorted manifest lines `<path>\n<sha256(bytes)>\n`, 64
 // lowercase hex. The manifest itself (`manifest.json`) is the store's, never a bundle path.
 export const DIGEST_RE = /^[0-9a-f]{64}$/
+// asDigest(x) → x when it is a digest, else null: the ONE shape rule every side applies to a digest it did not mint
+// (the shell composing a document, the rail rows, the client's reload rule) — a malformed digest anywhere is "follow
+// the default", never a value one side keeps and the other drops (that asymmetry is a reload loop; client/chrome.js)
+export const asDigest = (d) => (typeof d === 'string' && DIGEST_RE.test(d) ? d : null)
 export const CHROME_REQUIRED_FILES = ['frontend.js', 'kit.js', 'styles.css', 'chrome.css']
 // a bundle path: relative, at most three plain segments, no dot segments
 export const CHROME_PATH_RE = /^(?:[a-z0-9][a-z0-9_.-]{0,63}\/){0,2}[a-z0-9][a-z0-9_.-]{0,63}$/i

@@ -5,6 +5,8 @@
 // `host()`; presence = membership of the app's chat (protocol/membership, OR20). The spine client
 // and the membership model are seams (`spine`, `membership`) — step 5 wires the real ones, the
 // shell tests pass fakes. `company(host)` parses `<c>.<domain>`.
+import { asDigest } from '../../protocol/index.js'
+
 export const APPS_TTL_MS = 5000
 export const HEARTBEAT_STALE_MS = 30_000
 
@@ -40,13 +42,13 @@ export function createRegistryFleet({ spine, membership, domain = 'portal.pa1nd.
   const invalidate = (company) => { cache.delete(company); for (const fn of watchers.get(company) ?? []) { try { fn() } catch {} } }
   const unsub = spine.onCompany?.((company) => invalidate(company))
   // `chat` on the dial row is the wake target (a chat owns exactly one computer); an app row's `host` may carry none — the row's own then
-  const hostShape = (h, chat = null) => (h ? { hostId: h.host_id, chat: h.chat ?? chat, epoch: h.epoch, token: h.token, ip: h.pod_ip, port: h.port ?? 1845, tls: h.tls ?? null, heartbeatAt: h.heartbeat_at ?? null, drainingAt: h.draining_at ?? null, chromeDigest: h.chrome_digest ?? null } : null)
+  const hostShape = (h, chat = null) => (h ? { hostId: h.host_id, chat: h.chat ?? chat, epoch: h.epoch, token: h.token, ip: h.pod_ip, port: h.port ?? 1845, tls: h.tls ?? null, heartbeatAt: h.heartbeat_at ?? null, drainingAt: h.draining_at ?? null, chromeDigest: asDigest(h.chrome_digest) } : null)
 
   async function apps(company) {
     const hit = cache.get(company)
     if (hit && now() - hit.at < ttlMs) return hit.rows
     const raw = (await spine.apps(company)) ?? []
-    const rows = raw.map((r) => ({ instance: r.instance, slug: r.slug, company, meta: r.meta ?? {}, requestedPrimary: r.requested_primary ?? null, primary: r.primary === true, rev: r.rev ?? null, state: r.state ?? 'unknown', computer: r.computer ?? null, chat: r.chat ?? null, hasFrontend: r.hasFrontend !== false, chromeDigest: r.chrome_digest ?? null, host: hostShape(r.host ?? null, r.chat ?? null) }))
+    const rows = raw.map((r) => ({ instance: r.instance, slug: r.slug, company, meta: r.meta ?? {}, requestedPrimary: r.requested_primary ?? null, primary: r.primary === true, rev: r.rev ?? null, state: r.state ?? 'unknown', computer: r.computer ?? null, chat: r.chat ?? null, hasFrontend: r.hasFrontend !== false, chromeDigest: asDigest(r.chrome_digest), host: hostShape(r.host ?? null, r.chat ?? null) }))
     cache.set(company, { at: now(), rows })
     for (const r of rows) byInst.set(r.instance, company)
     return rows
@@ -85,8 +87,9 @@ export function createRegistryFleet({ spine, membership, domain = 'portal.pa1nd.
     // per replica and one in flight, and reads the verdict the client answers
     ...(typeof spine.wake === 'function' ? { wake: (chat, opts) => spine.wake(chat, opts) } : {}),
     // chrome(company) → {qid, dir: null, digest, version, base}: the company DEFAULT (the app document picks its row's
-    // `chromeDigest` first, routes.mjs chromeShape); `base` is where the chrome assets are (`/_chrome/<digest>` | `/modules/<qid>`)
-    chrome(company) { const c = spine.chrome?.(company) ?? null; const digest = c?.digest ?? null; return { qid: c?.qid ?? null, dir: null, digest, version: c?.version ?? null, base: c?.base ?? (c?.qid ? (digest ? `/_chrome/${digest}` : `/modules/${c.qid}`) : null) } },
+    // `chromeDigest` first, routes.mjs chromeShape); `base` is where the chrome assets are (`/_chrome/<digest>` |
+    // `/modules/<qid>`), derived here from the VALIDATED digest (64 hex, else null = the row's path) — never the spine's word
+    chrome(company) { const c = spine.chrome?.(company) ?? null; const digest = asDigest(c?.digest); return { qid: c?.qid ?? null, dir: null, digest, version: c?.version ?? null, base: c?.qid ? (digest ? `/_chrome/${digest}` : `/modules/${c.qid}`) : null } },
     watch(company, fn) { let s = watchers.get(company); if (!s) { s = new Set(); watchers.set(company, s) } s.add(fn); return () => s.delete(fn) },
     // cacheAgeMs(): the age of the OLDEST live per-company apps entry — how stale a read can still
     // be when a revocation lands (PLAN §4.5 "cache staleness at revocation"; shell/metrics.mjs

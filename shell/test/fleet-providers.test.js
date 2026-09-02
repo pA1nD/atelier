@@ -19,7 +19,7 @@ function fakeSpine() {
     async instance(instance) { const c = Object.keys(rows).find((k) => rows[k].some((r) => r.instance === instance)); return c ? { company: c } : null },
     async host(company) { calls.host++; return company === 'acme' ? { host_id: 'c-1', chat: 'chat-a', epoch: 'e1', token: 'tok', pod_ip: '10.0.0.5', port: 1845, tls: null, heartbeat_at: 1000, draining_at: null } : null },
     async wake(chat, opts) { calls.wake.push([chat, opts]); return { ok: true, state: 'waking', status: 202 } },
-    chrome() { return { qid: 'global/catalyst-chrome', digest: 'sha256:abc' } },   // a pre-release shape (no version, no base): the provider fills base from the qid
+    chrome() { return { qid: 'global/catalyst-chrome', digest: 'sha256:abc' } },   // a pre-release shape (no version, no base; a digest that is not 64 hex = none): the provider fills base from the qid
     onCompany(fn) { listeners.add(fn); return () => listeners.delete(fn) },
     fire(company) { for (const fn of listeners) fn(company) },
   }
@@ -57,7 +57,7 @@ test('registry-fleet: Host parse, TTL cache + company-frame invalidation, presen
   assert.equal((await chatless.host('acme')).chat, null, 'no chat on the row → none on the host: the dependency is the row')
   assert.equal(await reg.host('beta'), null)
   assert.equal(reg.stale({ heartbeatAt: clock - 31_000, drainingAt: null }), true); assert.equal(reg.stale({ heartbeatAt: clock - 1000, drainingAt: null }), false); assert.equal(reg.stale({ heartbeatAt: clock, drainingAt: clock }), true)
-  assert.deepEqual(reg.chrome('acme'), { qid: 'global/catalyst-chrome', dir: null, digest: 'sha256:abc', version: null, base: '/_chrome/sha256:abc' })
+  assert.deepEqual(reg.chrome('acme'), { qid: 'global/catalyst-chrome', dir: null, digest: null, version: null, base: '/modules/global/catalyst-chrome' }, 'a digest that is not 64 hex is no digest: the row\'s path (review 2026-09-02, N10)')
   reg.stop()
 })
 
@@ -84,7 +84,7 @@ test('bus-fleet: no implicit adoption — unregistered before the hello, stale-e
   assert.equal(seen.at(-1).topic, 'company:acme'); assert.equal(seen.at(-1).stream, `shell:${bus.shellEpoch}`)
   assert.deepEqual(await bus.snapshot(TODO), { stream: 'c-1:e2', seq: 1, rev: 3, error: null })
   const rail = await bus.snapshot('company:acme')
-  assert.deepEqual(rail.modules.map((m) => m.id), ['todo', 'wiki']); assert.equal(rail.chrome.digest, 'sha256:abc')
+  assert.deepEqual(rail.modules.map((m) => m.id), ['todo', 'wiki']); assert.equal(rail.chrome.digest, null, 'the malformed default reaches no frame')
   assert.equal(bus.stats.rejected, 4)
   bus.stop(); reg.stop()
 })
@@ -102,6 +102,14 @@ test('registry-fleet + bus-fleet, the chrome by digest (step 7 ship C): chrome(c
   const rows = await reg.apps('acme')
   assert.equal(rows[0].chromeDigest, PREV); assert.equal(rows[1].chromeDigest, null)
   assert.equal(rows[0].host.chromeDigest, PREV); assert.equal((await reg.host('acme')).chromeDigest, PREV)
+  // a row or a dial row reporting something that is not a digest (S1): null, on the row, on the host and on the rail —
+  // the client compares an app document against exactly what the shell composed it with
+  spine.rows.acme[1].chrome_digest = 'sha256:nope'; spine.rows.acme[1].host = { ...spine.rows.acme[0].host, chrome_digest: 'sha256:nope' }
+  reg.invalidate?.('acme')
+  const odd = (await reg.apps('acme'))[1]
+  assert.equal(odd.chromeDigest, null); assert.equal(odd.host.chromeDigest, null)
+  assert.deepEqual((await createBusFleet({ registry: reg, stream: { subscribe: () => () => {} } }).snapshot('company:acme', { person: { id: 'p1' } })).modules.map((m) => [m.id, m.chromeDigest]), [['todo', PREV], ['wiki', null]])
+  spine.rows.acme[1].chrome_digest = null; delete spine.rows.acme[1].host; reg.invalidate?.('acme')
   const bus = createBusFleet({ registry: reg, stream: { subscribe: () => () => {} } })
   const rail = await bus.snapshot('company:acme', { person: { id: 'p1' } })
   assert.equal(rail.chromeRev, D); assert.deepEqual(rail.chrome, { qid: 'portal/catalyst-chrome', digest: D, version: '0.2.2' })

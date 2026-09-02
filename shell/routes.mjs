@@ -36,7 +36,7 @@
 //   do not exist in 2.0 — gone, not skipped (§4.8 N6).
 import fs from 'node:fs'
 import path from 'node:path'
-import { SLUG_RE, DIGEST_RE, companyTopic, isReservedTopic } from '../protocol/index.js'
+import { SLUG_RE, DIGEST_RE, asDigest, companyTopic, isReservedTopic } from '../protocol/index.js'
 import { send } from './assets.mjs'
 import { CHROME_CACHE_CONTROL } from './chrome-store.mjs'
 import { renderDocument, relativeImports, appAsset } from './document.mjs'
@@ -208,8 +208,9 @@ export async function laneDocument(ctx) {
 // the digest its computer REPORTED (`app.chromeDigest` — the sheet its host built carries that chrome's rules, so JS and
 // CSS must be one digest), an app-less document the company default (`registry.chrome(company).digest`); a release
 // digest (64 hex) puts every chrome asset under `/_chrome/<digest>/` (`base`), and NO digest — the fleet before the
-// first release, local mode's mtime stamp — is today's `/modules/<qid>/…?rev=` path, byte for byte.
-export const asDigest = (d) => (typeof d === 'string' && DIGEST_RE.test(d) ? d : null)
+// first release, local mode's mtime stamp — is today's `/modules/<qid>/…?rev=` path, byte for byte. `asDigest`
+// (protocol/registry.js) is the shape rule — the rail rows, the bootstrap rows and the client apply the same one.
+export { asDigest }
 export const chromeShape = (registry, company, app = null) => {
   const c = registry.chrome(company)
   if (!c?.qid) return null
