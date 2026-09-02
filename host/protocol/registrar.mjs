@@ -51,6 +51,8 @@ export const EPOCH_MOVED = 'host-epoch-moved'
 export const CONNECT_MS = 5000
 export const TOTAL_MS = 30_000
 export const CHROME_FETCH_MS = 15_000
+export const ANSWER_MAX = 1024 * 1024            // any other answer: a page of rows, never a bundle
+export const CHROME_ANSWER_MAX = 24 * 1024 * 1024   // the bundle answer (base64 JSON; the door takes ≤ 16 MiB raw on publish) — over it the fetch is refused, the host keeps its cache (review 2026-09-02, Codex 4)
 export const AGENT = { uid: 1000, gid: 1000 }
 
 export const newInstanceId = () => 'i-' + randomBytes(8).toString('hex')
@@ -282,28 +284,36 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
 
 // ---- spineTransport(cfg, opts): HTTP to ATELIER_SPINE_URL (DESIGN §7). Bearer = the host token;
 // register() alone uses the bootstrap secret (read once from $ATELIER_RUN/bootstrap.token).
-export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, totalMs = TOTAL_MS, chromeMs = CHROME_FETCH_MS } = {}) {
+export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, totalMs = TOTAL_MS, chromeMs = CHROME_FETCH_MS, answerMax = ANSWER_MAX, chromeMax = CHROME_ANSWER_MAX } = {}) {
   const base = new URL(cfg.spineUrl)
   const bootstrap = bootstrapToken ?? (() => { try { return fs.readFileSync(cfg.run + '/bootstrap.token', 'utf8').trim() } catch { return null } })()
   let token = null
   const lib = base.protocol === 'https:' ? https : http
 
-  function request(method, path, body, { auth = 'token', totalMs: total = totalMs } = {}) {
+  function request(method, path, body, { auth = 'token', totalMs: total = totalMs, maxBytes = answerMax } = {}) {
     return new Promise((resolve, reject) => {
       const cred = auth === 'bootstrap' ? bootstrap : token
       const payload = body === undefined ? null : Buffer.from(JSON.stringify(body))
       const headers = { accept: 'application/json', ...(cred ? { authorization: `Bearer ${cred}` } : {}) }
       if (payload) { headers['content-type'] = 'application/json'; headers['content-length'] = payload.length }
       const req = lib.request({ protocol: base.protocol, hostname: base.hostname, port: base.port || undefined, path: base.pathname.replace(/\/$/, '') + path, method, headers, timeout: connectMs }, (res) => {
+        // the answer is bounded: a declared or accumulated size over `maxBytes` destroys the request (the chunks are
+        // dropped, nothing is parsed) — a faulty spine cannot grow the root host process
+        let over = null
+        const bail = (why) => { over = new Error(why); chunks.length = 0; reject(over); res.destroy() }   // rejected here, the stream dropped: nothing parsed, nothing kept
+        res.on('error', (e) => { if (!over) reject(e) })
         const chunks = []
-        res.on('data', (c) => chunks.push(c))
+        const declared = Number(res.headers['content-length'])
+        if (Number.isFinite(declared) && declared > maxBytes) return bail(`spine: answer ${declared} bytes over the ${maxBytes}-byte bound`)
+        let got = 0
+        res.on('data', (c) => { if (over) return; got += c.length; if (got > maxBytes) return bail(`spine: answer over the ${maxBytes}-byte bound`); chunks.push(c) })
         res.on('end', () => {
+          if (over) return
           const text = Buffer.concat(chunks).toString('utf8')
           let json = null; try { json = text ? JSON.parse(text) : null } catch { json = null }
           if (res.statusCode < 200 || res.statusCode >= 300) return reject(new TransportError(res.statusCode, json ?? { error: text.slice(0, 200) }))
           resolve({ status: res.statusCode, body: json ?? {} })
         })
-        res.on('error', reject)
       })
       const totalTimer = setTimeout(() => req.destroy(new Error(`spine: total timeout ${total} ms`)), total)
       totalTimer.unref?.()
@@ -329,7 +339,7 @@ export function spineTransport(cfg, { bootstrapToken, connectMs = CONNECT_MS, to
     draining: () => body(request('POST', '/v1/host/draining', {})),
     release: (b) => body(request('POST', '/v1/host/release', b)),
     // the chrome bundle by digest (~1.2 MB base64): its own bound (15 s), the fetch lane's budget
-    chrome: (digest) => body(request('GET', `/v1/host/chrome/${encodeURIComponent(digest)}`, undefined, { totalMs: chromeMs })),
+    chrome: (digest) => body(request('GET', `/v1/host/chrome/${encodeURIComponent(digest)}`, undefined, { totalMs: chromeMs, maxBytes: chromeMax })),
   }
 }
 

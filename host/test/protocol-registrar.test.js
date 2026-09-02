@@ -397,6 +397,15 @@ test('the chrome seams (step 7 ship C): the register and heartbeat answers\' `ch
     spine.revoke()
     const again = await registrar.chromeFetch(D)
     assert.equal(again.digest, D); assert.ok(spine.calls.filter((c) => c.path === '/v1/host/register').length >= 2, 're-registered on the epoch move')
+    // the bundle answer is bounded (review 2026-09-02, Codex 4): over `chromeMax` the request is destroyed before a byte is
+    // kept — the fetch rejects, the host keeps its cache; the ordinary answers keep their own (smaller) bound
+    const tight = spineTransport({ spineUrl: spine.url, run: '/run/atelier' }, { bootstrapToken: 'boot-secret', chromeMax: 64 })
+    tight.setToken(transport.token ?? null)
+    const tightRegistrar = createRegistrar({ os, dirfd, transport: tight, cfg: {}, log: () => {}, fsx: memoryFsx(), backoffMs: [5, 5] })
+    await tightRegistrar.register()
+    await assert.rejects(tightRegistrar.chromeFetch(D), /over the 64-byte bound/)
+    assert.deepEqual(await tightRegistrar.beat(), { ok: true, config: [], chrome: { digest: 'not a digest' } }, 'a small answer under the ordinary bound is read as before')
+    tightRegistrar.stop()
     // a registrar without the hook: the answer is kept, nothing thrown
     const quiet = createRegistrar({ os, dirfd, transport, cfg: {}, log: () => {}, fsx: memoryFsx(), backoffMs: [5, 5] })
     spine.chrome = { digest: D, version: '0.2.2' }
