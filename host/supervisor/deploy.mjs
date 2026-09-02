@@ -21,7 +21,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { archiveSpec, commitAll, resolveCommit, gitInit } from './lastgood.mjs'
 import { formatHint, classifyWorkerFailure } from './bundle.mjs'
-import { REL, commit12, backupId, parseBackupId, newReleaseId, cpSpec, rmSpec, duSpec, lsSpec, extractSpec, parseKb, ownTree, pruneBackups, backupFeasible, mb, deferred, RELEASES_KEEP, COMMIT_RE, DATA_CAP_BYTES, sockName } from './slots.mjs'
+import { REL, commit12, backupId, parseBackupId, newReleaseId, copySpecs, rmSpec, duSpec, lsSpec, extractSpec, parseKb, ownTree, pruneBackups, backupFeasible, mb, deferred, RELEASES_KEEP, COMMIT_RE, DATA_CAP_BYTES, sockName } from './slots.mjs'
 import { run } from '../worker/install.mjs'
 import { backupPlan, rehearsalPlan, prodPlan, applyJail, jailPlan } from '../worker/jail.mjs'
 
@@ -171,7 +171,12 @@ export function createDeployer(i) {
   // host's `/proc/self/fd/N/…` form (fd N is not the dirfd in its table — DESIGN I1.13): every path handed to one is
   // `i.realPath`'d; the host's own reads and writes keep the dirfd form.
   const real = (p) => i.realPath(p)
-  async function copyInto(src, dst, ms) { const r = await run(os, cpSpec(real(src), real(dst), hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `cp -a: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
+  async function copyInto(row, src, dst, ms) {
+    for (const spec of copySpecs(real(src), real(dst), { uid: row.uid, hostEnv, privileged: !!os.privileged })) {
+      const r = await run(os, spec, { timeoutMs: ms })
+      if (r.code !== 0) throw { error: `${spec.argv[0]}: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` }
+    }
+  }
   async function rmrf(p, ms = 60_000) { if (!exists(p)) return; const r = await run(os, rmSpec(real(p), hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `rm -rf: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
   async function dirBytes(p) { if (!exists(p)) return 0; const r = await run(os, duSpec(real(p), hostEnv), { timeoutMs: 30_000 }); const kb = parseKb(r.stdout); return kb == null ? 0 : kb * 1024 }
   // hasData(p): a `<uid>:19999 2770` data dir is not readable by userns-root itself (no DAC caps; the row-9 drill's finding) — the question goes to a root+19999 child
@@ -251,7 +256,7 @@ export function createDeployer(i) {
     let at = os.now(), id = backupId(at, rev, commit), dst = i.dot(REL.backup(row.instance, id))
     while (exists(dst)) { at += 1000; id = backupId(at, rev, commit); dst = i.dot(REL.backup(row.instance, id)) }   // the id has second granularity: two releases of one rev inside a second never share a dir
     applyPlan(row, [...backupPlan(i.dot(REL.backupRoot(row.instance))), ...backupPlan(dst)], 'backup dir')
-    await copyInto(src, dst, D().backupMs)
+    await copyInto(row, src, dst, D().backupMs)
     const bytes = await dirBytes(dst)
     const meta = readJsonMarker(row, 'backups.json') ?? {}
     meta[id] = { bytes, rev, commit, at: nowIso(os.now()) }
@@ -381,7 +386,7 @@ export function createDeployer(i) {
             if (!row.prod || !(await hasData(prodData))) return { note: MESSAGES.step.notes.copy(0) }
             const bytes = await dirBytes(prodData)
             if (bytes > DATA_CAP_BYTES) { partial = true; return { note: MESSAGES.step.notes.copySkipped(gb(bytes)) } }
-            await copyInto(prodData, copyDir, D().copyMs)
+            await copyInto(row, prodData, copyDir, D().copyMs)
             return { note: MESSAGES.step.notes.copy(Math.round(mb(bytes))) }
           })
           const finalRel = REL.prodExport(inst, commit), tmpRel = finalRel + '.tmp'
@@ -555,7 +560,7 @@ export function createDeployer(i) {
               const spec = await i.workerSpec(row, slot, cur.rev, cur.dir, {})
               if (i.jail) applyPlan(row, jailPlan(spec), 'data dir')
               else { try { fs.mkdirSync(spec.dataDir, { recursive: true, mode: 0o700 }) } catch {} }
-              await copyInto(i.dot(REL.backup(inst, backup)), data, D().backupMs)
+              await copyInto(row, i.dot(REL.backup(inst, backup)), data, D().backupMs)
               return { note: backup }
             })
           },

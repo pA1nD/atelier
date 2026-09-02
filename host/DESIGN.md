@@ -216,7 +216,7 @@ spread from `process.env` anywhere. `SECRETS = [ATELIER_BOOTSTRAP, CHANNEL_TOKEN
 | A archive | host | `git -C /work/apps/<slug> archive --format=tar <commit>` (stdout = row T's stdin) | 1000:1000 / `[]` | row G's | 022 | `/work/apps/<slug>` | `['ignore','pipe','pipe']` |
 | T extract | host | `tar -x -C /work/.atelier/prod/<inst>/<commit12>.tmp -f -` (then chmod-then-chown `0:<uid>` 0750/0640 over what it wrote) | 0:0 / `[]` | `{PATH}` | 077 | `/` | `['pipe','pipe','pipe']` |
 | K hook | host | `node host/worker/hookrun.mjs <module.json deploy\|test\|smoke>` (hookrun reads the config on stdin after the drop, then `sh -c <cmd>`) | `20000+i` : same / `[]` | row W + `DATA_DIR` (+ `ATELIER_SOCK`, `BASE_URL=http://localhost` for smoke) — no config key in the env | 002 | `/work/.atelier/prod/<inst>/<commit12>` | `['pipe','pipe','pipe']` — stdin = the config lane |
-| C copy | host | `cp -dR --preserve=ownership,timestamps,links <src>/. <dst>` (umask 007: modes 0660/0770 — root has no FOWNER to re-chmod a `<uid>` inode) · `rm -rf <dir>` · `du -sk <dir>` · `find <dir> -mindepth 1 -maxdepth 1 -print -quit` (prod data ↔ rehearsal copy / backup) | 0:0 / `[19999]` | `{PATH}` | 007 / 022 | `/` | `['ignore','pipe','pipe']` |
+| C copy | host | `cp -dR --preserve=timestamps,links <src>/. <dst>` (umask 007 → 0660/0770 at creation; NEVER `--preserve=ownership`: GNU cp creates each inode without its g/o bits and chmods them back after the chown — EPERM without FOWNER) then `find <dst> -mindepth 1 -exec chown -h <uid>:19999 {} +` · `rm -rf <dir>` · `du -sk <dir>` · `find <dir> -mindepth 1 -maxdepth 1 -print -quit` (prod data ↔ rehearsal copy / backup) | 0:0 / `[19999]` | `{PATH}` | 007 / 022 | `/` | `['ignore','pipe','pipe']` |
 
 Wrapper for W, I and K (built by `os.spawn`, §5): `sh -c 'umask 002; echo 1000 > /proc/self/oom_score_adj; exec "$@"' sh prlimit --data=<bytes> --core=0 --nproc=<n> --nofile=<n> -- setpriv --reuid=<u> --regid=<g> --clear-groups -- <argv>`.
 Row C runs `setpriv --reuid=0 --regid=0 --groups=19999`: a `<uid>:19999 2770` data dir is EACCES to userns-root without the group (no DAC caps).
@@ -268,7 +268,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/.atelier/prod/<inst>/<commit12>` | `0:<uid> 0750`; files 0640; `node_modules` `0:<uid>` (`|050`/`|040`) | host at a deploy (rows A/T, then `freeze.py --dest`) | the released commit's export = the prod worker's cwd (`createRequire` base, static files); no `.git`, no `data/`; the current and the previous release's are kept, older ones removed; EACCES to uid 1000 |
 | `/work/.atelier/rehearsal/<inst>` | `0:<uid> 0750` | host at a deploy | `data/` `<uid>:19999 2770` = the `cp -a` copy of prod data the rehearsal worker and hooks run against; deleted when the rehearsal ends |
 | `/work/.atelier/backup` | `0:0 0711` | host (`hostDirs`) | |
-| `/work/.atelier/backup/<inst>/<YYYYMMDDTHHMMSSZ-revN-commit12>` | `0:19999 0750`; inside: ownership and times preserved (`<uid>:19999`), modes from umask 007 (files 0660, dirs 0770+setgid) — cp chowns then chmods and root has no FOWNER, so modes are not preserved | host under the gate (row C) | the pre-migration snapshot of prod data; last 3 per app, ≤ 1 GiB total; the agent reads through gid 19999, no worker traverses; never auto-restored (`atelier restore`) |
+| `/work/.atelier/backup/<inst>/<YYYYMMDDTHHMMSSZ-revN-commit12>` | `0:19999 0750`; inside: `<uid>:19999` (one chown pass after the copy), times preserved, modes from umask 007 (files 0660, dirs 0770+setgid) — modes are never "preserved": that would be a chmod after a chown | host under the gate (row C) | the pre-migration snapshot of prod data; last 3 per app, ≤ 1 GiB total; the agent reads through gid 19999, no worker traverses; never auto-restored (`atelier restore`) |
 | `/work/.atelier/last-good` | `0:0 0711` | launcher | |
 | `/work/.atelier/last-good/<inst>` | `0:<uid> 0750` | host at claim | the worker resumes from it; agent EACCES |
 | `/work/.atelier/last-good/<inst>/rev-N/` | `0:<uid> 0750`; files 0640 | host per LIVE build | `backend.js` (bundle), `frontend/<file>.js` (transformed), `styles.css`, `revision.json`; written to `rev-N.tmp-<pid>`, fsynced, renamed; the previous rev kept, older pruned |
@@ -1207,13 +1207,13 @@ rehearsal's own install (`withInstalling`) takes the same hold; a dev install ar
 root owns it (`ownTree` over the export, the jail plans for `data-dev/`, `rehearsal/`, `backup/`, `prod/`); root never
 writes into the agent's tree (the export is a `git archive` stream as 1000 into a root `tar -x`; the `.gitignore` and
 every git step run as 1000); the hook's config never enters the env the root wrapper chain receives (stdin, as row W);
-`cp -a`/`rm -rf`/`du`/`find` on `<uid>:19999 2770` data run as root with group 19999 (no DAC caps — root cannot even
-`readdir` that dir itself, so "does prod have data" is a `find -quit` child, row C); every path a child receives is
+`cp`/`rm -rf`/`du`/`find`/`chown` on `<uid>:19999 2770` data run as root with group 19999 (no DAC caps — root cannot even
+`readdir` that dir itself, so "does prod have data" is a `find -quit` child, row C); the copy never preserves ownership (GNU cp's way is a chmod after the chown: modes come from umask 007 at creation, one chown pass follows — the CAP_CHOWN direction only); every path a child receives is
 the real one, never the host's `/proc/self/fd/N/…` form; git runs from cwd `/` (node chdirs before the uid drop —
 root cannot enter the 2750 app folder, `git -C` does as 1000); the rehearsal socket is `0:<uid> 0770` (connect
 needs write on the inode: the host and the smoke hook's worker uid both dial it); the worker reads its export
 through its gid, uid 1000 gets EACCES; the backup is `0:19999 0750` — the agent reads, no worker traverses. Each
-of these four is a row-9 drill finding (2026-09-02): none shows on a laptop, every one bites under the userns caps.
+of these five is a row-9 drill finding (2026-09-02): none shows on a laptop, every one bites under the userns caps.
 
 **The apps view** (`GET /_atelier/apps`, both doors): rows carry `rev`/`state` (the prod slot's; `undeployed` before
 the first deploy), `deployed_rev` (40 hex or null), `prod_rev`, `dev_rev`, `prod_state` (`live|stopped|loading|failed|
