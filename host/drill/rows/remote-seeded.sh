@@ -3,17 +3,19 @@
 # `ghcr-pull` is copied out of `agents`, read-only). Ends in VERDICT. Row 9s — the SEEDED road (DESIGN §10.3 "seeded rows")
 # on the integrated host under the REAL permission model (review 2026-09-02, B1/S1/S2: macOS cannot show any of it — setgroups
 # is a no-op there and the folders are 0755): the step-2 pod with ATELIER_SEEDED_APPS=1 in its env and a folder seeded by
-# seed.sh (uid 1000, `.atelier-seeded` + `.image-stamp`, the portal entrypoint's shape) BEFORE the launcher runs.
-#   9s-a  Ready ⇒ LIVE (S1): the first /_atelier/apps answer after the pod turns Ready already shows seedy prod-live at
-#         rev 1 with a 40-hex deployed_rev and no dev slot; the host log has `rev 1 LIVE (prod)`, `host: ready … after the
-#         first scan`, never `module.json missing`, never a `(dev)` line for seedy
+# seed.sh (uid 1000, `.atelier-seeded` + `.image-stamp`, the portal entrypoint's shape) BEFORE the launcher runs: `seedy`
+# (declares ctx.suspendable()) and `steady` (`hello` as is — no declaration, a handle held: R14 leaves it running).
+#   9s-a  Ready ⇒ LIVE (S1): the first /_atelier/apps answer after the pod turns Ready already shows BOTH rows prod-live at
+#         rev 1 with a 40-hex deployed_rev and no dev slot (built side by side inside the first scan); the host log has
+#         `rev 1 LIVE (prod)` for each, agent.log `host: ready … seeded host: after the first scan`, never `module.json
+#         missing`, never a `(dev)` line
 #   9s-b  the permission model is REAL and the road holds the gid (B1): the folder is `1000:<uid> 2750` after the claim, root
 #         (no DAC_OVERRIDE) cannot read its module.json, the host's env carries ATELIER_SEEDED_APPS=1
 #   9s-c  the prod road answers: the signer's assertion from the peer against :1845 → 200 `pong`
 #   9s-d  the release: releases.jsonl holds ONE adopt row (commit = deployed_rev, `at` a ms epoch) and the fake spine saw the
 #         POST /v1/host/release (it answers 404 — tolerated)
-#   9s-e  R14 on the pod (S2): 70 s quiet → `rev 1 STOPPED`, prod_state stopped, no worker process; the next request from
-#         the peer → 200 and `rev 1 RESUMED`
+#   9s-e  R14 on the pod (S2): 70 s quiet → seedy `rev 1 STOPPED`, prod_state stopped, no worker process; the next request
+#         from the peer → 200 and `rev 1 RESUMED`; steady (no declaration) stays live across the window and answers
 #   9s-f  a re-seed over the kept /work: uid 1000 changes a byte in the folder → within a sweep rev 2 LIVE (prod), a new
 #         40-hex deployed_rev, a second adopt row, the prod road answers
 set -u
@@ -38,7 +40,7 @@ apps(){ D /_atelier/apps; }
 appfield(){ apps | py "import json,sys; a=[r for r in json.load(sys.stdin) if r['slug']=='$1']; v=a[0].get('$2') if a else ''; print('' if v is None else v)"; }
 hostlog(){ $K logs computer -c session 2>&1; }
 agentlog(){ X 'cat /work/.atelier/agent.log 2>/dev/null'; }
-PING(){ P "cd /code && node host/drill/step2/signer.mjs GET http://$IP:1845/api/acme/seedy/ping --app $INST"; }
+PING(){ P "cd /code && node host/drill/step2/signer.mjs GET http://$IP:1845/api/acme/${2:-seedy}/ping --app ${1:-$INST}"; }
 
 log "other spike namespaces on the node (untouched): $(kubectl get ns -o name | grep 'spike-' | grep -v "/$NS\$" | tr '\n' ' ')"
 kubectl delete ns $NS --wait=true --timeout=90s >/dev/null 2>&1 || true
@@ -90,14 +92,20 @@ INST=$(appfield seedy instance); WUID=$(X "cat /work/.atelier/$INST/uid 2>/dev/n
 C1=$(appfield seedy deployed_rev)
 log "row 9s-a: seedy instance=$INST uid=$WUID prod_state=$(appfield seedy prod_state) prod_rev=$(appfield seedy prod_rev) dev_rev=$(appfield seedy dev_rev) deployed_rev=$C1"
 [ "$(appfield seedy prod_state)" = live ] || rowfail 9s-a "not prod-live at Ready: prod_state='$(appfield seedy prod_state)' (S1: host-ready must follow the first scan)"
+INST2=$(appfield steady instance); C1B=$(appfield steady deployed_rev)
+log "row 9s-a: steady instance=$INST2 prod_state=$(appfield steady prod_state) prod_rev=$(appfield steady prod_rev) dev_rev=$(appfield steady dev_rev) deployed_rev=$C1B"
+[ "$(appfield steady prod_state)" = live ] && [ "$(appfield steady prod_rev)" = 1 ] && [ -z "$(appfield steady dev_rev)" ] && echo "$C1B" | grep -qE '^[0-9a-f]{40}$' || rowfail 9s-a "steady is not prod-live rev 1 with a 40-hex id and no dev slot at Ready (built side by side with seedy)"
+[ "$C1B" != "$C1" ] || rowfail 9s-a "the two folders share one content id"
 [ "$(appfield seedy prod_rev)" = 1 ] || rowfail 9s-a "prod_rev is '$(appfield seedy prod_rev)', want 1"
 [ -z "$(appfield seedy dev_rev)" ] || rowfail 9s-a "a dev slot exists (dev_rev=$(appfield seedy dev_rev)) — a seeded row must have none"
 echo "$C1" | grep -qE '^[0-9a-f]{40}$' || rowfail 9s-a "deployed_rev is not 40 hex: '$C1'"
-grep -E "\[seedy\]|host: ready|seeded" $OUT/host-boot.log | sed 's/^/    | host: /'
+grep -E "\[(seedy|steady)\] (rev|seeded)|seeded host" $OUT/host-boot.log | sed 's/^/    | host: /'
 grep -q "\[seedy\] rev 1 LIVE (prod) commit ${C1:0:12}" $OUT/host-boot.log || rowfail 9s-a "no '[seedy] rev 1 LIVE (prod) commit ${C1:0:12}' line in the host log"
-grep -q "host: ready .*seeded host: after the first scan" $OUT/host-boot.log || rowfail 9s-a "the 'host: ready' line does not say 'seeded host: after the first scan'"
+grep -q "\[steady\] rev 1 LIVE (prod) commit ${C1B:0:12}" $OUT/host-boot.log || rowfail 9s-a "no '[steady] rev 1 LIVE (prod) commit ${C1B:0:12}' line in the host log"
+agentlog > $OUT/agent-log-boot.txt; grep "host: ready" $OUT/agent-log-boot.txt | sed 's/^/    | agent.log: /'
+grep -q "host: ready .*seeded host: after the first scan" $OUT/agent-log-boot.txt || rowfail 9s-a "agent.log's 'host: ready' line does not say 'seeded host: after the first scan'"
 grep -q "module.json missing" $OUT/host-boot.log && rowfail 9s-a "'module.json missing' in the host log — the B1 outage signature (a read without the gid)"
-grep -qE "\[seedy\].*\(dev\)" $OUT/host-boot.log && rowfail 9s-a "a '(dev)' line for seedy — the new-folder road ran"
+grep -qE "\[(seedy|steady)\].*\(dev\)" $OUT/host-boot.log && rowfail 9s-a "a '(dev)' line for a seeded row — the new-folder road ran"
 grep -q "\[seedy\] seeded: rev 1" $OUT/host-boot.log || rowfail 9s-a "no '[seedy] seeded: rev 1 …' line"
 
 # ---- row 9s-b: the permission model is real, and the road holds the gid
@@ -128,7 +136,8 @@ log "row 9s-d: releases.jsonl: $REL; the fake spine saw $NREL POST(s) to /v1/hos
 [ "${NREL:-0}" -ge 1 ] 2>/dev/null || rowfail 9s-d "the spine never saw the adopt row"
 
 # ---- row 9s-e: R14 on the real pod — 70 s quiet (idleMs 60 s), then the first request resumes
-log "row 9s-e: 70 s quiet for the prod idle window (idleMs 60 s)"
+PING $INST2 steady > $OUT/prod-steady-1.txt; grep -q '^STATUS 200' $OUT/prod-steady-1.txt || rowfail 9s-c "the prod road does not answer steady: $(head -1 $OUT/prod-steady-1.txt)"
+log "row 9s-e: 70 s quiet for the prod idle window (idleMs 60 s) — seedy declared suspendable, steady did not"
 sleep 70
 hostlog > $OUT/host-idle.log
 ST=$(appfield seedy prod_state); WP=$(X "pgrep -u $WUID | wc -l" | tr -d '\r\n ')
@@ -141,6 +150,10 @@ t0=$(now); PING > $OUT/prod-2.txt; T2=$(el $t0); sed 's/^/    | prod after idle:
 grep -q '^STATUS 200' $OUT/prod-2.txt && grep -q '"pong"' $OUT/prod-2.txt || rowfail 9s-e "the first request after the stop is not 200: $(head -1 $OUT/prod-2.txt) (S2: never a 404, held and answered)"
 hostlog | grep -q "\[seedy\] rev 1 RESUMED" || rowfail 9s-e "no '[seedy] rev 1 RESUMED' line"
 log "row 9s-e: the resume answered in $T2 s: $(hostlog | grep -o '\[seedy\] rev 1 RESUMED [0-9]* ms' | tail -1)"
+ST2=$(appfield steady prod_state); log "row 9s-e: steady after the window: prod_state=$ST2 (want live — no declaration, a handle held: R14 leaves it running)"
+[ "$ST2" = live ] || rowfail 9s-e "steady (no suspendable declaration) is '$ST2' after the window"
+grep -q "\[steady\] rev 1 STOPPED" $OUT/host-idle.log && rowfail 9s-e "steady was idle-stopped without declaring suspendable"
+PING $INST2 steady > $OUT/prod-steady-2.txt; grep -q '^STATUS 200' $OUT/prod-steady-2.txt || rowfail 9s-e "steady after the window: $(head -1 $OUT/prod-steady-2.txt)"
 
 # ---- row 9s-f: a re-seed over the kept /work — new bytes, the next sweep (≤ 30 s) is a new rev
 X "$AS1000 sh -c 'echo \"// re-seed\" >> /work/apps/seedy/backend.js'" | sed 's/^/    | /'
@@ -160,5 +173,5 @@ X "find /work/.atelier -maxdepth 3 -printf '%m %u:%g %p\n' | sort" > $OUT/tree-f
 
 log "== VERDICT"
 SUM="9s-a:${R[9s-a]} 9s-b:${R[9s-b]} 9s-c:${R[9s-c]} 9s-d:${R[9s-d]} 9s-e:${R[9s-e]} 9s-f:${R[9s-f]}"
-[ $FAILS = 0 ] && echo "VERDICT: PASS — $SUM; Ready $RDY s ⇒ seedy rev 1 LIVE (prod) ${C1:0:12} (folder $OWN, root EACCES, the host configured); prod road 200; one adopt row (ms at), the spine saw $NREL; idle: STOPPED after 70 s, the first request 200 in $T2 s + RESUMED; re-seed → rev 2 ${C2:0:12}" \
+[ $FAILS = 0 ] && echo "VERDICT: PASS — $SUM; Ready $RDY s ⇒ seedy rev 1 LIVE (prod) ${C1:0:12} + steady ${C1B:0:12} (folder $OWN, root EACCES, the host configured); prod road 200; one adopt row (ms at), the spine saw $NREL; idle: seedy STOPPED after 70 s, the first request 200 in $T2 s + RESUMED, steady stayed live; re-seed → rev 2 ${C2:0:12}" \
                 || echo "VERDICT: FAIL — $SUM"
