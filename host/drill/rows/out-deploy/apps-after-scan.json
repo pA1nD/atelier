@@ -1,1 +1,0 @@
-[{"instance":"i-4273e0907ec4a493","slug":"hello","company":"acme","rev":null,"state":"undeployed","deployed_rev":null,"prod_rev":null,"dev_rev":1,"prod_state":null,"dev_state":"live"},{"instance":"i-06005cf53088113d","slug":"locker","company":"acme","rev":null,"state":"undeployed","deployed_rev":null,"prod_rev":null,"dev_rev":1,"prod_state":null,"dev_state":"live"}]

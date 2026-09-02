@@ -1,2 +1,0 @@
-cat: /work/.atelier/data/i-06005cf53088113d/hook-env: No such file or directory
-command terminated with exit code 1
