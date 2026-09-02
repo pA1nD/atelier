@@ -11,7 +11,7 @@
 //   2  Host         gate.hostAllowed → portal / company / 404 (never a redirect)              fleet
 //   3  ticket       gate.ticket on /_t/<opaque> — creates the session                        fleet
 //   4a assets       /assets/* — public bytes; /_chrome/<digest>/<path> — a chrome release's bytes off the
-//                   shell's read-only store (chrome-store.mjs; immutable, etag = the digest; 404 without
+//                   shell's read-only store (chrome-store.mjs; immutable, etag = digest:path; 404 without
 //                   a store, for an unknown digest or a path its manifest does not name)               both
 //   4b documents    Host-first: Host = path company (fleet) → identity → 302-to-/go (fleet) →
 //                   the APP's host waking (its row's computer; the company's freshest for an
@@ -140,7 +140,7 @@ export async function laneAssets(ctx) {
 }
 // /_chrome/<digest>/<path> (step 7 ship C, decision 4): a release's bytes off the read-only store, public
 // (no identity — the same bytes for everyone, as /assets/*), `cache-control: public, max-age=31536000,
-// immutable` + `etag: "<digest>"` (the URL names the bytes), gzip ≥ 1 KiB for text. No store (local mode,
+// immutable` + `etag: "<digest>:<path>"` (the URL names the bytes; one validator per resource), gzip ≥ 1 KiB for text. No store (local mode,
 // a portal without the artifacts mount), an unknown digest or a path the manifest does not name → 404.
 export async function laneChrome(ctx) {
   if (ctx.upgrade) return jsonR('chrome', 426, {})
@@ -149,7 +149,7 @@ export async function laneChrome(ctx) {
   const { digest, rest } = ctx.route
   const body = store ? store.open(digest, rest) : null
   if (!body) return jsonR('chrome', 404, {})
-  send(ctx.req, ctx.res, 200, body, store.type(rest), { etag: `"${digest}"`, 'cache-control': CHROME_CACHE_CONTROL })
+  send(ctx.req, ctx.res, 200, body, store.type(rest), { etag: `"${digest}:${rest}"`, 'cache-control': CHROME_CACHE_CONTROL })   // one validator per resource, not per bundle (N3)
   return { lane: 'chrome', handled: true }
 }
 

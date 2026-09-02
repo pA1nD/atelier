@@ -165,12 +165,12 @@ async function rig(t, { mode = 'fleet', store = true, chrome, rows = null } = {}
   return { shell, registry, bus, root, go, logs, traces, companies }
 }
 
-test('lane 4a: the bytes public (no session), immutable + etag = the digest, 304 on the etag, gzip ≥ 1 KiB for text only, HEAD; 404 for an unknown digest, an unlisted path, the manifest, a POST; 404 without a store (local mode)', async (t) => {
+test('lane 4a: the bytes public (no session), immutable + etag = digest:path (one validator per resource, N3), 304 on the etag, gzip ≥ 1 KiB for text only, HEAD; 404 for an unknown digest, an unlisted path, the manifest, a POST; 404 without a store (local mode)', async (t) => {
   const r = await rig(t)
   const D = writeBundle(r.root, BUNDLE)
   const js = await r.go(`/_chrome/${D}/frontend.js`, { headers: { cookie: '' } })
   assert.equal(js.status, 200); assert.equal(js.lane, 'chrome')
-  assert.equal(js.headers['cache-control'], CHROME_CACHE_CONTROL); assert.equal(js.headers.etag, `"${D}"`)
+  assert.equal(js.headers['cache-control'], CHROME_CACHE_CONTROL); assert.equal(js.headers.etag, `"${D}:frontend.js"`)
   assert.equal(js.headers['content-type'], 'application/javascript; charset=utf-8'); assert.equal(js.headers['x-content-type-options'], 'nosniff')
   assert.equal(js.headers['content-encoding'], undefined); assert.equal(js.text, BUNDLE['frontend.js'].toString())
   const gz = await r.go(`/_chrome/${D}/frontend.js`, { headers: { 'accept-encoding': 'gzip, br' } })
@@ -181,7 +181,7 @@ test('lane 4a: the bytes public (no session), immutable + etag = the digest, 304
   assert.equal(font.status, 200); assert.equal(font.headers['content-type'], 'font/woff2'); assert.equal(font.headers['content-encoding'], undefined, 'a font is not text: never gzipped'); assert.equal(font.body.length, 2004)
   const css = await r.go(`/_chrome/${D}/chrome.css`)
   assert.equal(css.headers['content-type'], 'text/css; charset=utf-8'); assert.equal(css.headers['cache-control'], CHROME_CACHE_CONTROL)
-  const notModified = await r.go(`/_chrome/${D}/chrome.css`, { headers: { 'if-none-match': `"${D}"` } })
+  const notModified = await r.go(`/_chrome/${D}/chrome.css`, { headers: { 'if-none-match': `"${D}:chrome.css"` } })
   assert.equal(notModified.status, 304); assert.equal(notModified.headers['cache-control'], CHROME_CACHE_CONTROL); assert.equal(notModified.body.length, 0)
   const head = await r.go(`/_chrome/${D}/chrome.css`, { method: 'HEAD' })
   assert.equal(head.status, 200); assert.equal(head.body.length, 0); assert.equal(Number(head.headers['content-length']), BUNDLE['chrome.css'].length)
