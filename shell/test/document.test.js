@@ -7,6 +7,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { renderDocument, escapeBootstrap, relativeImports, composeDocument, FALLBACK_TEMPLATE, SLOTS } from '../document.mjs'
+import { createConfig } from '../config.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
@@ -90,6 +91,13 @@ test('CSP: one nonce on both inline scripts, no-store, nosniff, font hosts, form
   assert.ok(cspv.includes("font-src 'self' data: https://rsms.me"))
   assert.ok(cspv.includes("style-src 'self' 'unsafe-inline' https://rsms.me"))
   assert.ok(cspv.includes("form-action 'self' https://portal.pa1nd.de"))
+  // the defaults (review 2026-09-02, S3): the fleet self-hosts the chrome's fonts (`/_chrome/<digest>/fonts/`) → no font host;
+  // local runs the chrome folder, whose frontend.jsx loads Inter from rsms.me → that host; a config's own list wins in both
+  assert.deepEqual(createConfig({ mode: 'fleet', config: {}, env: {} }).cfg.csp.fontHosts, [])
+  assert.deepEqual(createConfig({ mode: 'local', config: {}, env: {} }).cfg.csp.fontHosts, ['https://rsms.me'])
+  assert.deepEqual(createConfig({ mode: 'fleet', config: { csp: { fontHosts: ['https://fonts.example'] } }, env: {} }).cfg.csp.fontHosts, ['https://fonts.example'])
+  const fleet = renderDocument({ cfg: createConfig({ mode: 'fleet', config: {}, env: {} }).cfg, company: 'acme', person, modules: [], chrome, portal: 'https://portal.pa1nd.de' }).headers['content-security-policy']
+  assert.ok(fleet.includes("font-src 'self' data:;") && fleet.includes("style-src 'self' 'unsafe-inline';"), fleet)
   assert.ok(cspv.includes("frame-ancestors 'none'"))
   assert.equal(r.headers['cache-control'], 'no-store')
   assert.equal(r.headers['x-content-type-options'], 'nosniff')
