@@ -7,14 +7,14 @@ description: Build, change, deploy, roll back or restore an atelier app — a fo
 
 An app is one folder, `/work/apps/<slug>/`: `module.json`, `frontend.jsx`, `backend.js` (optionally `styles.css`), plus a git
 repo the host keeps for you. It has two slots. **DEV** is yours: every save rebuilds it within a second, you check it with curl
-and screenshots, nobody in the chat can see it. **PROD** is what the chat uses, and it changes only when you run `atelier deploy
-<slug> -m "<what changed, one line>"`. A new app does not exist for the chat until its first green deploy. A save that does not
-build changes nothing anywhere; a deploy that goes red deploys nothing. An app belongs to its chat and only its chat.
+and screenshots, nobody in the chat can see it. **PROD** is what the chat uses; only `atelier deploy <slug> -m "<what changed,
+one line>"` (or `rollback` / `restore`, below) changes it. A new app does not exist for the chat until its first green deploy. A
+save that does not build changes nothing anywhere; a deploy that goes red deploys nothing. An app belongs to its chat alone.
 
 **Order of work (build → check → deploy → tell):** `mkdir -p /work/apps/<slug>`, write `backend.js` and `frontend.jsx`, then
 `module.json` LAST — it is the switch that makes the folder an app; written first, every save in between fails "file missing".
-Then ONE Bash call with every curl check against DEV, then `atelier deploy`, then answer the chat. Write files with the
-Write/Edit tools; do not copy `apps/hello` (a copied `.instance` file is refused). The slug is the URL: a lowercase DNS label.
+Then ONE Bash call with every curl check against DEV, then `atelier deploy`, then answer the chat. Do not copy `apps/hello`
+(a copied `.instance` file is refused). The slug is the URL: a lowercase DNS label.
 
 ## module.json — the folder is not an app until this exists
 
@@ -26,7 +26,8 @@ Write/Edit tools; do not copy `apps/hello` (a copied `.instance` file is refused
 `name` (rail label) and `icon` (a lucide name: `timer`, `list-checks`, `bar-chart-3`) are required; `group` (rail section),
 `primary` (the landing app), `color` are optional. Four release keys, optional, run by the deploy alone (§ Deploy): `deploy` — sh,
 migrations, ≤ 60 s; `test` — sh, ≤ 60 s; `smoke` — sh against the rehearsal worker, ≤ 30 s (`$ATELIER_SOCK` its Unix socket,
-`$BASE_URL` its API base); `healthz` — a mount-relative GET path answering < 500 (default `/`). No other keys — the rest is dropped.
+`$BASE_URL` its API base); `healthz` — a mount-relative GET path answering < 500 (default `/`). No other keys — the rest is
+dropped. Each release key names a script you wrote (`migrate.js` is § Migrations' example): a key without its file is a red deploy.
 
 ## backend.js — routes, relative to the app's mount
 
@@ -36,7 +37,6 @@ export default {
     router.get('/items', (req, res) => res.json(read()))          // served at /api/<company>/<slug>/items
     router.post('/items', async (req, res) => {
       const { text } = await req.json()                            // parsed JSON body (10 MB cap)
-      if (!text) return res.json({ error: 'text required' }, 400)
       write([...read(), { id: Date.now(), text, by: req.user.name }])
       ctx.broadcast({ type: 'changed' })                            // push to every open tab of this app
       res.json({ ok: true })
@@ -93,53 +93,53 @@ export default function Module() {
 everything it serves is the DEV slot. After the last save of a batch, in ONE Bash call:
 
 ```sh
-curl -s "127.0.0.1:1844/_atelier/apps?token=$T" | jq -c '.[]|select(.slug=="<slug>")'   # {instance, company, state, dev_rev, prod_rev, deployed_rev, prod_state, …}
+curl -s "127.0.0.1:1844/_atelier/apps?token=$T" | jq -c '.[]|select(.slug=="<slug>")'   # {instance, company, dev_rev, dev_state, prod_rev, prod_state, deployed_rev, …}
 curl -s "127.0.0.1:1844/api/<company>/<slug>/items?token=$T"                              # your DEV backend
 curl -s -X POST "127.0.0.1:1844/api/<company>/<slug>/items?token=$T" -H 'content-type: application/json' -d '{"text":"milk"}'
 curl -s "127.0.0.1:1844/_atelier/events?app=<instance>&token=$T"                          # the app's recent errors, newest last
 ```
 
-`state: "live"` with a `dev_rev` that moved = the save built. A save that does not build reaches you as an app-error whose
+`dev_state: "live"` with a `dev_rev` that moved = the save built. A save that does not build reaches you as an app-error whose
 message starts with `dev:` — nobody else saw it; fix and save again:
 
-```
-app-error <slug> rev <N> build at <at>
-<file>:<line>:<col> dev: <message>
-fix: <file>:<line>:<col> <message> — <fix>
-```
+    app-error <slug> rev <N> build at <at>
+    <file>:<line>:<col> dev: <message>
+    fix: <file>:<line>:<col> <message> — <fix>
 
 Screenshot the DEV document with horse-browser at `http://127.0.0.1:1844/<company>/<slug>?token=$T` — your screenshot is the
 preview. Act as a second person with `-H 'x-atelier-user: u2' -H 'x-atelier-name: Bea'`. Delete test data after. No servers.
 
-**Data.** `ctx.dataDir` differs for DEV and PROD. Dev starts empty; for a realistic test copy prod → dev once (never the
-reverse), while the dev worker is not mid-request: `cp -a /work/.atelier/data/<instance>/. /work/.atelier/data-dev/<instance>/`.
-The host wrote `.gitignore` (`data/`, `.env`, `.env.*`, `node_modules/`) — keep no state under the app folder; secrets never
-enter git (`.env` is ignored; configuration is the operator's, set per app in the portal).
+**Data.** `ctx.dataDir` differs for DEV and PROD. Dev starts empty; never touch prod's data folder by hand — the rehearsal
+copies it for you. The host wrote `.gitignore` (`data/`, `.env`, `.env.*`, `node_modules/`, `CLAIM-REFUSED.txt`, `.atelier`);
+keep no state under the app folder. Secrets never enter git (`.env` is ignored): the operator sets an app's configuration on
+the spine, and it arrives as `process.env.<KEY>` in `backend.js` and in the deploy hook.
 
 ## Deploy — the chat sees it
 
 `atelier deploy <slug> -m "<what changed, one line>"` commits your DEV tree (the message is the commit message), REHEARSES the
 commit against a copy of prod's data — export, install from the lockfile, build, the `deploy` hook, boot, probe (`healthz`),
-`test`, `smoke` — and only when everything is green gates the app's routes (requests wait ≤ 10 s, none are lost), backs prod's
-data up, runs the hook on prod's data, starts the new worker, probes it and releases (≤ 4 min; the steps stream as they
-run). It ends with ONE line — read it, then tell the chat what changed:
+`test`, `smoke` — and only when everything is green gates the app's routes (requests are held ≤ 10 s, then get the waking 503
+the client retries), stops the old worker, backs prod's data up, runs the hook on prod's data, starts the new worker, probes it
+and releases (a minute or two, up to ~6 min; the steps stream as they run). It ends with ONE line — read it, then tell the chat:
 
-- `deploy green: <slug> rev <N> commit <c12> live — <url>` — the chat has this version now (exit 0).
+- `deploy green: <slug> rev <N> commit <c12> live — <url>` — the chat has this version now (exit 0); the host says nothing — you do.
 - `deploy RED at <step>: <error> — nothing deployed, <slug> stays on rev <N> (<c12>)` — the rehearsal failed at that step; prod
   and its data are untouched. Fix and deploy again (exit 2). The chat's record gets an app-error `rehearsal red at <step>: …`.
 - `deploy FAILED at <step>: <error> — <slug> is DOWN, backup <id> kept` — rare: the rehearsal passed but prod did not come up.
   The app answers 503 `{"error":"app down after a failed deploy","backup":"<id>"}` until you act; nothing is restored for
   you. Fix forward and deploy again, or `atelier restore <slug> <id>` (below). Tell the chat at once (exit 3).
+- `deploy RED at backup: backup impossible: <why>` — refused before the gate (prod data > 1 GiB or free space < 2× it).
+  `--no-backup` skips the snapshot; a failure after the gate then ends `… is DOWN, no backup (--no-backup)` — ask the operator first.
+- `deploy aborted: <reason> — read atelier releases <slug> before running it again` — no verdict came (exit 1): read the list first.
 
-Green sends no message to the chat; you do. A new app is invisible until its first green deploy — do not announce it before.
-`atelier deploy` while one is running answers `deploy in progress` — wait for the verdict, never run two.
+`atelier deploy` while one runs is refused (`atelier: 409 deploy in progress`, exit 1) — wait for its verdict, never run two.
 
 - `atelier releases <slug>` — one line per release, newest first: `<at>  <kind> <verdict> rev <N>  <c12>  "<message>"`;
   `atelier backups <slug>` — the pre-migration snapshots the deploys kept (last 3, ≤ 1 GiB): `<id>  <MB> MB  rev <N>  <at>`.
-- `atelier rollback <slug> <commit>` — deploy an earlier commit (7–40 hex from the releases list): the same rehearsal and
-  gate, no hook, data untouched. Ends `rollback green: <slug> rev <N> commit <c12> live — <url>` or `rollback RED …`.
-- `atelier restore <slug> <backup-id>` — replaces prod's data with that snapshot under the gate; code stays. Ends `restore
-  green: <slug> rev <N> data from backup <id> live — <url>`. Everything written since the backup is gone — say so first.
+- `atelier rollback <slug> <commit>` — deploy an earlier commit (7–40 hex from the releases list): the same rehearsal and gate,
+  no hook, data untouched. Ends `rollback green: <slug> rev <N> commit <c12> live — <url>`, `rollback RED …` or `… FAILED …`.
+- `atelier restore <slug> <backup-id>` — prod's data becomes that snapshot, under the gate; code stays; everything written since
+  the backup is gone — say so first. Ends `restore green: <slug> rev <N> data from backup <id> live — <url>` or `… FAILED …`.
 
 ## Migrations — the `deploy` hook (forward-only, expand/contract)
 
@@ -157,4 +157,4 @@ it; drops come two deploys later. A rollback runs NO hook and touches no data �
 `import React` / `from 'react'` · a literal `/api/<slug>` path · a static `import` of an npm package in backend.js · `listen()` ·
 a missing `module.json` · state in module-level variables · module.json keys beyond the nine above · announcing an app before its
 first green deploy · a hook that drops, renames or rewrites data · `git push`, deleting `.git`, committing `.env` or `data/` ·
-copying dev data over prod · a second `atelier deploy` while one runs.
+touching prod's data folder by hand · a second `atelier deploy` while one runs.
