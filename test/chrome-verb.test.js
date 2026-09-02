@@ -116,3 +116,32 @@ test('the cli: `atelier chrome release …` dispatches to chrome.js and prints t
   assert.throws(() => execFileSync(process.execPath, [CLI, 'chrome', 'release', d, '--out', out], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), (e) => e.status === 1 && /--version/.test(e.stderr) && /usage: atelier chrome release/.test(e.stderr))
   assert.throws(() => execFileSync(process.execPath, [CLI, 'chrome'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), (e) => e.status === 2 && /usage/.test(e.stderr))
 })
+
+// the published package (review 2026-09-02, B1): `npm pack` → the tarball, unpacked into a scratch project exactly where
+// npm puts it (`node_modules/@pa1nd/atelier`, the `bin` entries linked into `node_modules/.bin`, the dependencies from
+// this checkout — the packed package resolves them from the project as it would after `npm install`), then `npx atelier
+// chrome release` through the bin: every module the verb imports must ship, and the digest must be the in-tree verb's.
+test('from the published package: `npm pack` + `npx atelier chrome release …` in a scratch project yields the in-tree digest (host/ ships, the bin resolves, no registry)', async () => {
+  const root = tmp()
+  const d = chromeDir(root)
+  fs.writeFileSync(path.join(root, 'CHANGELOG.md'), 'packed\n')
+  const inTree = await bundleChrome(d)
+  const packDir = path.join(root, 'pack'); fs.mkdirSync(packDir)
+  const npmBin = (name) => { const p = path.join(path.dirname(process.execPath), name); return fs.existsSync(p) ? p : name }
+  const [info] = JSON.parse(execFileSync(npmBin('npm'), ['pack', '--json', '--pack-destination', packDir], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }))
+  const proj = path.join(root, 'proj'), pkgDir = path.join(proj, 'node_modules', '@pa1nd', 'atelier')
+  fs.mkdirSync(pkgDir, { recursive: true })
+  execFileSync('tar', ['-xzf', path.join(packDir, info.filename), '--strip-components=1', '-C', pkgDir])
+  const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
+  assert.ok(pkg.bin && pkg.bin.atelier, 'package.json names the atelier bin')
+  fs.mkdirSync(path.join(proj, 'node_modules', '.bin'))
+  for (const [name, file] of Object.entries(pkg.bin)) fs.symlinkSync(path.join('..', '@pa1nd', 'atelier', file), path.join(proj, 'node_modules', '.bin', name))
+  for (const dep of Object.keys(pkg.dependencies ?? {})) { const at = path.join(proj, 'node_modules', dep); fs.mkdirSync(path.dirname(at), { recursive: true }); fs.symlinkSync(path.join(REPO, 'node_modules', dep), at) }
+  fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify({ name: 'scratch', private: true, dependencies: { '@pa1nd/atelier': info.version } }))
+  const out = path.join(proj, 'release.json')
+  const stdout = execFileSync(npmBin('npx'), ['--offline', 'atelier', 'chrome', 'release', d, '--version', '0.0.0-test', '--changelog', path.join(root, 'CHANGELOG.md'), '--out', out], { cwd: proj, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  assert.equal(stdout.trim(), inTree.digest, 'the packed verb computes the in-tree digest for the same dir')
+  const p = JSON.parse(fs.readFileSync(out, 'utf8'))
+  assert.equal(p.digest, inTree.digest); assert.equal(p.version, '0.0.0-test'); assert.deepEqual(Object.keys(p.files).sort(), [...inTree.files.keys()].sort())
+  for (const [f, buf] of inTree.files) assert.ok(Buffer.from(p.files[f], 'base64').equals(buf), `${f} byte for byte`)
+})

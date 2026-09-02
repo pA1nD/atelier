@@ -12,7 +12,10 @@
  * computes the digest (protocol/registry.js: sha256 over the sorted `<path>\n<sha256(bytes)>\n` lines) and writes the
  * release payload `{version, changelog, agent_notes, breaking, notice, digest, files:{path: base64}}` to `--out`.
  * No network: ops/chrome-release.sh ships the payload to the spine's loopback door (`POST /v1/chromes`) over ssh.
- * Deterministic: the same dir twice is the same digest.
+ * Deterministic: the same dir twice is the same digest (esbuild and tailwind are pinned exact; the chrome's sources are
+ * walked in name order). Across MACHINES the digest also depends on @tailwindcss/oxide's native build — the publishing
+ * machine's digest is authoritative, every consumer verifies against it, and a rollback re-releases by `--digest`.
+ * Runs from the published package: `files` carries `host/` (buildSheet's home) and the `atelier` bin (test/chrome-verb).
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -34,7 +37,7 @@ export function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--breaking') { o.breaking = true; continue }
-    if (a in takes) { const v = argv[++i]; if (v === undefined || v.startsWith('--')) throw new Error(`${a} needs a value`); o[takes[a]] = v; continue }
+    if (Object.hasOwn(takes, a)) { const v = argv[++i]; if (v === undefined || v.startsWith('--')) throw new Error(`${a} needs a value`); o[takes[a]] = v; continue }
     if (a.startsWith('--')) throw new Error(`unknown option ${a}`)
     if (o.dir) throw new Error(`one <dir> only (got ${o.dir} and ${a})`)
     o.dir = a
@@ -133,8 +136,11 @@ export async function release(argv, { log = (l) => process.stderr.write(l + '\n'
   return { digest, version: o.version, out: o.out, files: bundle ? [...bundle.files.keys()].sort() : [] }
 }
 
-// run as `node chrome.js release …` or through cli.js (`atelier chrome release …`, which splices the verb off argv)
-const entry = process.argv[1] ? path.resolve(process.argv[1]) : ''
+// run as `node chrome.js release …` or through cli.js (`atelier chrome release …`, which splices the verb off argv).
+// The entry is realpath'd: `npx atelier` runs the bin SYMLINK (`node_modules/.bin/atelier`) while `HERE` is the
+// resolved package dir — without the realpath the guard never matches through the published package's bin.
+const real = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+const entry = process.argv[1] ? real(process.argv[1]) : ''
 if (entry === fileURLToPath(import.meta.url) || entry === path.join(HERE, 'cli.js')) {
   const [sub, ...rest] = process.argv.slice(2)
   if (sub !== 'release') { process.stderr.write(USAGE + '\n'); process.exit(2) }

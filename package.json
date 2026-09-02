@@ -15,6 +15,7 @@
     "publish.js",
     "list.js",
     "chrome.js",
+    "host",
     "collections.js",
     "gate.js",
     "server.js",
