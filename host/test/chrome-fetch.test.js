@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { ensureChrome, createChromeCache, currentOf, verifyBundle, pruneChrome, writeBundle, CURRENT } from '../chrome/fetch.mjs'
+import { ensureChrome, createChromeCache, currentOf, verifyBundle, verifyOnDisk, pruneChrome, writeBundle, CURRENT } from '../chrome/fetch.mjs'
 import { chromeDigestOf, sha256Hex } from '../../protocol/index.js'
 
 const bundle = (stamp = 'a') => ({
@@ -200,4 +200,40 @@ test('built(): the REPORTED digest moves only when onSwap/onHold settle complete
   assert.equal(cc2.digest(), dA); assert.equal(cc2.built(), null)
   cc2.want({ digest: dA }); await cc2.settle()
   assert.equal(cc2.built(), null); assert.ok(logs.some((l) => l.includes('after swap') && l.includes('boom')) && logs.some((l) => l.includes('after hold') && l.includes('hold-boom')), logs.join('\n'))
+})
+
+test('a bundle on disk is verified before it is swapped to or adopted (review 2026-09-02, Codex 2): a corrupt file, a manifest without a sha, a missing required file — the dir is removed and fetched again; a corrupt `current` is not adopted at boot; open() never reads a prototype name', async () => {
+  const cache = path.join(tmp(), 'chrome')
+  const A = bundle('a'), B = bundle('b')
+  const dA = digestOf(A), dB = digestOf(B)
+  const t = fakeTransport({ [dA]: answerOf(A), [dB]: answerOf(B) })
+  const logs = []
+  await ensureChrome({ digest: dA, transport: t, cache }); await ensureChrome({ digest: dB, transport: t, cache })
+  assert.equal(link(cache), dB); assert.equal(t.calls.length, 2)
+  assert.equal(verifyOnDisk(path.join(cache, dA), dA), true)
+  // A (cached, not current) gets a byte flipped: swapping back to A refetches it instead of trusting the manifest
+  fs.writeFileSync(path.join(cache, dA, 'kit.js'), 'export const Button = "evil"\n')
+  assert.equal(verifyOnDisk(path.join(cache, dA), dA), false)
+  const r = await ensureChrome({ digest: dA, transport: t, cache, log: (l) => logs.push(l) })
+  assert.equal(r.digest, dA); assert.equal(r.fetched, true); assert.equal(t.calls.length, 3, 'fetched again'); assert.equal(link(cache), dA)
+  assert.equal(fs.readFileSync(path.join(cache, dA, 'kit.js'), 'utf8'), A['kit.js'].toString(), 'the good bytes are back')
+  assert.ok(logs.some((l) => /on disk does not verify — removed, fetching again/.test(l)), logs.join('\n'))
+  // a manifest that names a file without a sha, or lacks a required file, does not verify either
+  const m = JSON.parse(fs.readFileSync(path.join(cache, dA, 'manifest.json'), 'utf8'))
+  fs.writeFileSync(path.join(cache, dA, 'manifest.json'), JSON.stringify({ ...m, files: { ...m.files, 'kit.js': { bytes: 1 } } }))
+  assert.equal(verifyOnDisk(path.join(cache, dA), dA), false)
+  const { 'chrome.css': _, ...rest } = m.files
+  fs.writeFileSync(path.join(cache, dA, 'manifest.json'), JSON.stringify({ ...m, files: rest }))
+  assert.equal(verifyOnDisk(path.join(cache, dA), dA), false)
+  fs.writeFileSync(path.join(cache, dA, 'manifest.json'), JSON.stringify(m))
+  assert.equal(verifyOnDisk(path.join(cache, dA), dA), true)
+  // `current` (A) corrupted on disk: a new host life does not adopt it — no chrome dir until the next want refetches
+  fs.writeFileSync(path.join(cache, dA, 'chrome.css'), '.evil{}')
+  assert.equal(currentOf(cache), null)
+  const cc = createChromeCache({ cache, transport: t, log: (l) => logs.push(l), onSwap: () => {} })
+  assert.equal(cc.digest(), null); assert.equal(cc.dir(), null)
+  cc.want({ digest: dA }); await cc.settle()
+  assert.equal(cc.digest(), dA); assert.equal(t.calls.length, 4); assert.equal(verifyOnDisk(path.join(cache, dA), dA), true)
+  // open(): a prototype name is not a manifest path
+  for (const p of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) assert.equal(cc.open(dA, p), null, p)
 })

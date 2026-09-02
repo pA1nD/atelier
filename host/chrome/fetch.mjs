@@ -32,14 +32,35 @@ export const CHROME_CACHE_CONTROL = 'public, max-age=31536000, immutable'
 const TYPES = { js: 'application/javascript; charset=utf-8', css: 'text/css; charset=utf-8', json: 'application/json; charset=utf-8', woff2: 'font/woff2', woff: 'font/woff', svg: 'image/svg+xml', png: 'image/png' }
 export const chromeType = (p) => TYPES[path.posix.extname(String(p)).slice(1).toLowerCase()] ?? 'application/octet-stream'
 
-// currentOf(cache, fs) → {digest, dir} | null: the `current` link's target when it names a bundle (a manifest is there)
+// verifyOnDisk(dir, digest, fs) → true when the bundle on disk IS the digest: a manifest naming every required file with
+// a sha, every listed file hashing to its sha, the shas recomputing to `digest`. The cache is root's under a root 0711
+// parent, but a disk is a disk (a torn write, a corruption, a previous host life): a bundle is never swapped to, and
+// `current` is never adopted at boot, on the strength of its manifest alone (review 2026-09-02, Codex 2).
+export function verifyOnDisk(dir, digest, fs = nodeFs) {
+  let m
+  try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')) } catch { return false }
+  if (!m || typeof m !== 'object' || !m.files || typeof m.files !== 'object' || Array.isArray(m.files)) return false
+  if (m.digest !== undefined && m.digest !== digest) return false
+  const shas = Object.create(null)
+  for (const p of Object.keys(m.files)) {
+    if (!validChromePath(p) || typeof m.files[p]?.sha256 !== 'string') return false
+    let bytes
+    try { bytes = fs.readFileSync(path.join(dir, p)) } catch { return false }
+    shas[p] = sha256Hex(bytes)
+    if (shas[p] !== m.files[p].sha256) return false
+  }
+  if (CHROME_REQUIRED_FILES.some((f) => !(f in shas))) return false
+  return chromeDigestOf(shas) === digest
+}
+
+// currentOf(cache, fs) → {digest, dir} | null: the `current` link's target when it names a bundle that verifies (above)
 export function currentOf(cache, fs = nodeFs) {
   let target
   try { target = fs.readlinkSync(path.join(cache, CURRENT)) } catch { return null }
   const digest = path.basename(target)
   if (!DIGEST_RE.test(digest)) return null
   const dir = path.join(cache, digest)
-  try { if (!fs.statSync(path.join(dir, 'manifest.json')).isFile()) return null } catch { return null }
+  if (!verifyOnDisk(dir, digest, fs)) return null
   return { digest, dir }
 }
 
@@ -139,7 +160,13 @@ export async function ensureChrome({ digest, transport, cache, fs = nodeFs, log 
   // refused to boot on a cache dir root does not own — the fence is that parent, this mkdir is for a cache never made
   try { fs.mkdirSync(cache, { mode: DIR_MODE }); fs.chmodSync(cache, DIR_MODE) } catch (e) { if (e.code !== 'EEXIST') return held(`cache: ${e.code ?? e.message}`) }
   let fetched = false
-  const have = (() => { try { return fs.statSync(path.join(cache, digest, 'manifest.json')).isFile() } catch { return false } })()
+  const dir = path.join(cache, digest)
+  const present = (() => { try { return fs.statSync(path.join(dir, 'manifest.json')).isFile() } catch { return false } })()
+  const have = present && verifyOnDisk(dir, digest, fs)
+  if (present && !have) {   // a bundle dir that is not its digest (a torn write, a corruption): removed, fetched again — never swapped to
+    log(`chrome: ${digest.slice(0, 12)}… on disk does not verify — removed, fetching again`)
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch (e) { return held(`remove ${digest.slice(0, 12)}…: ${e.code ?? e.message}`) }
+  }
   if (!have) {
     let answer
     try { answer = await withTimeout(transport.chrome(digest), fetchMs, `chrome ${digest.slice(0, 12)}…`) } catch (e) {
@@ -201,7 +228,7 @@ export function createChromeCache({ cache, fixedDir = null, transport, fs = node
       if (!DIGEST_RE.test(String(digest)) || !validChromePath(p)) return null
       let m = manifests.get(digest)
       if (!m) { try { m = JSON.parse(fs.readFileSync(path.join(cache, digest, 'manifest.json'), 'utf8')) } catch { return null }; if (!m?.files || typeof m.files !== 'object') return null; manifests.set(digest, m) }
-      if (!m.files[p]) return null
+      if (!Object.hasOwn(m.files, p)) return null   // hasOwn: `constructor`/`__proto__` are URL segments too (N1)
       try { return fs.readFileSync(path.join(cache, digest, p)) } catch { return null }
     },
     // want(answer): the register/heartbeat answer's `chrome` — `{digest, version}` | null (no release yet: nothing to do)
