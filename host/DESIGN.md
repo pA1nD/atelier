@@ -30,6 +30,7 @@ host/
   launcher.mjs                   launcher   root, ~60 lines, steps §2.1
   hygiene.mjs                    launcher   env scrub, token files, marker mkdirs, group constants
   metrics.mjs                    integrator the PLAN §4.5 rows: bounded rings + counters, Prometheus exposition (§6.6)
+  resources.mjs                  protocol-server  the heartbeat's `resources` row: cgroup v2 + statfs(/work) readers over an injectable io (§4.4, §6.5)
   supervisor/index.mjs           supervisor Supervisor class: apps table, revisions, swap, idle/resume
   supervisor/discovery.mjs       supervisor /work/apps scan by module.json (pure over a readdir fn)
   supervisor/watcher.mjs         supervisor exclusion list + 100 ms fingerprint quiescence + overflow rescan
@@ -456,7 +457,9 @@ export function createRegistrar({ os, dirfd, transport, cfg, log, now = Date.now
   //                        meta split by protocol/registry allowMeta (primary → requested); refusal → CLAIM-REFUSED.txt as uid 1000
   // .unlink(instance)      tombstone (24 h); folder re-created by the same computer → revive with the same instance id
   // .modulesChanged(instance, rev)   → transport.modulesChanged({apps:[{instance, slug, rev}]})  (spine calls setRunning)
-  // .heartbeat(ms)         every 10 s: transport.heartbeat({visible_apps, last_served_at, pod_ip, chrome_digest}); visible_apps = live workers + served in 10 min;
+  // .heartbeat(ms)         every 10 s: transport.heartbeat({visible_apps, last_served_at, pod_ip, chrome_digest, resources?}); visible_apps = live workers + served in 10 min;
+  //                        resources = {cpu: 0..1, ram:{used,total}, disk:{used,total}} (bytes) from `resources()` (host/resources.mjs `sample`: cgroup v2
+  //                        cpu.stat/cpu.max/memory.current/memory.max + statfs(/work)); the field is ABSENT when a reader answers null (no cgroup files, the first sample);
   //                        chrome_digest = the digest every prod sheet is BUILT with (`chromeDigest()` → the cache's `built()`; null = none). `beat()` returns the answer;
   //                        its `chrome: {digest, version} | null` (the register answer's too) → `onChrome` (host/chrome/fetch.mjs createChromeCache.want)
   // .chromeFetch(digest)   GET /v1/host/chrome/<digest> through call() → {digest, version, files:{path: base64}} (15 s bound)
@@ -650,6 +653,13 @@ dev shell serves the same dir (`chrome.dir()` — the held one, ahead of the rep
   `supervisor.handle` (the rest of the query kept).
 - `refuse()`: while the host is in the fault state (§I1 item 17) every request on both listeners
   is answered 503 `{error:'host fault', reason}` before auth or any route.
+- Heartbeat `resources` (API 50 `machine.resources`; `host/resources.mjs`): `{cpu, ram:{used,total}, disk:{used,total}}`,
+  bytes, from THIS container's cgroup v2 root — `cpu.stat` `usage_usec` delta over the wall ms since the previous
+  sample, divided by the quota's cores (`cpu.max` `<quota> <period>`; `max` = the node's core count), `memory.current`
+  against `memory.max` (`max` = `/proc/meminfo` MemTotal) — and `statfs(/work)` (used = total − bfree × bsize, df's
+  Used). cpu is clamped to 0..1, three decimals. Any reader answering null (a laptop, a cgroup v1 node, an unreadable
+  file) and the first sample (no interval yet) → the beat goes out WITHOUT the field, never zeros; the spine shows a
+  dash. An early beat (a chrome rebuild) measures cpu over that shorter gap. Ignored by a spine before API 50.
 
 ### 6.6 Metrics (`metrics.mjs`)
 `GET /_host/metrics` on the protocol port, behind the same bearer as `/_host/healthz` (401 without it,
@@ -699,7 +709,7 @@ against a fake server in `test/protocol-registrar.test.js`.
 | method | HTTP (bearer = registrar token; `register` uses the bootstrap secret) | body → reply |
 |---|---|---|
 | `register()` | `POST /v1/host/register` | `{pod_ip, host_started_at}` → `{host_id, epoch, token, company, origin, chat, principal:{id,name}, apps:[{instance, slug, uid, rev, deployed_rev}], shell_public_key_hex, chrome}` — the previous epoch is revoked here; `chrome` = `{digest, version}` the computer's effective release, null while the spine names none (§6.4) |
-| `heartbeat(b)` | `POST /v1/host/heartbeat` | `{visible_apps, last_served_at, pod_ip, chrome_digest}` → `{ok, config:[{instance, updated}], chrome}` — `chrome_digest` = the digest the host holds (null = none); `chrome` as on register |
+| `heartbeat(b)` | `POST /v1/host/heartbeat` | `{visible_apps, last_served_at, pod_ip, chrome_digest, resources?}` → `{ok, config:[{instance, updated}], chrome}` — `chrome_digest` = the digest the host holds (null = none); `resources` = `{cpu: 0..1, ram:{used,total}, disk:{used,total}}` in bytes (§6.5), present only when the host could read it; `chrome` as on register |
 | `putApp(instance, b)` | `PUT /v1/apps/<instance>` | `{slug, meta}` (protocol/registry `BODY_KEYS`; `company`/`computer` never sent) → `201 {claimed}` \| `200 {adopted\|updated\|renamed, revived?}` \| `403/409/400 {error}`; the uid is not in this body — it travels in `modulesChanged` and comes back in `register().apps` |
 | `unlink(instance)` | `POST /v1/apps/<instance>/unlink` | → `{tombstone_at}` |
 | `modulesChanged(b)` | `POST /v1/host/modules-changed` | `{apps:[{instance, slug, uid, rev}]}` → `{ok}` (spine: `setRunning`, `apps.uid` persisted) |
@@ -729,7 +739,7 @@ and run inside the drill pod (§8.2).
 | supervisor | `supervisor-discovery.test.js`, `-watcher`, `-bundle`, `-tailwind`, `-lastgood`, `-swap`, `-idle` | module.json rule + slug refusals; exclusion list (100 `data/` writes → 0 rebuilds; a `node_modules` storm → 1 rebuild after quiescence); two-fingerprint quiescence; real esbuild bundle with `import.meta.url` rewritten (createRequire resolves from the app folder); the 8 failure classes with `file:line:col` + hint; one-sheet CSS over a 3-file chrome fixture, long line split, no candidate leak between two apps; rev dirs fsync+rename, `current` swap, checksum, previous kept, `?rev=` window; 200 four-fetch observations across 3 saves → 0 mixed revs, 0 non-2xx (real workers, `unprivileged()`); a syntax error / throwing mount / half-written save → users on old rev, report called once each; a broken save and an unparsable `module.json` each survive three sweeps as ONE rev and ONE report while a change the watcher missed is still built; MOUNT-ERROR retry after old exit; idle-stop only on empty resources; resume held, never 502; broken folder while stopped → served from snapshot |
 | workers | `worker-spawn.test.js`, `-runtime`, `-router`, `-proxy`, `-jail`, `-install` | SpawnSpec → exact argv/env/cwd/stdio for linuxRoot and unprivileged; READY parsed from fd 3, 8 s timeout, EAGAIN/134 → `spawn-eagain`; router = b6's 20 asserts + `req.json` 413 + HEAD→GET; ctx frozen, `req.user` only from internal headers; teardown runs on SIGTERM before exit (child process of the module killed); resources report shape; proxy streams 1 MiB in / 4 MiB out with byte counts, 502/504/426 mapping, header filters; jailPlan step list per §3 byte-exact; claimRoundTrip order; install orchestration with a fake spawn (scratch layout, freeze argv, cleanup on abort). Drill-gated: real uid drop rows (secret EACCES, peer dir/socket EACCES, `groups=[uid]`, env keys exact, `RLIMIT_DATA` RangeError in-worker, fork EAGAIN at the cap), freeze.py 10/10 |
 | errors | `errors-collector.test.js`, `-report`, `-agentlog`, `-push`, `-watchdog`, `-limits` | fingerprint = protocol's; 1 s tally → count; stale-rev dropped before sinks; setRunning reset; frontend `rev-mismatch`; agent.log lines, mode 0640 root:1000 (memory), ENOSPC swallowed + stderr; push validates first, one in flight, retry ladder, 4xx drop; watchdog with fake `/proc`: RSS kill at cap, throttle duty cycle bounded 400 ms, no kill on CPU, statfs 95 % → SIGSTOP the largest dataDir, SIGCONT at 90 %; limits: 512M refused, default 1 GiB, core 0, `--max-old-space-size` formula |
-| protocol-server | `protocol-auth.test.js`, `-headers`, `-server`, `-events`, `-registrar`, `-devshell`, `-samebytes` | verify with `hostStartedAt`, nonce replay 401, epoch-moved 401, dev token paths; act-as only with token; headers both ways + framing + 413; routes with a fake supervisor (404 unresolved, `?rev=`, report → collector, Upgrade 426); events: seq per topic, one invalidate per instance per flush, batch ≤ 128, stream = `hostId:epoch`; registrar against a fake spine server: register/heartbeat/claim/adopt/409 → `CLAIM-REFUSED.txt` (as uid 1000, memory-recorded), tombstone/revive, uid 20000+i persisted and reused, reconcile settle + ≤ 5 per pass, `401 host-epoch-moved` → re-register; local transport twin; dev shell: 401 without token on socket and loopback, document bootstrap shape, import map, one `<link>`; `/modules/<c>/<s>/frontend.js` and `styles.css` bytes identical via `server` and `devshell` |
+| protocol-server | `protocol-auth.test.js`, `-headers`, `-server`, `-events`, `-registrar`, `-devshell`, `-samebytes`, `resources.test.js` | verify with `hostStartedAt`, nonce replay 401, epoch-moved 401, dev token paths; act-as only with token; headers both ways + framing + 413; routes with a fake supervisor (404 unresolved, `?rev=`, report → collector, Upgrade 426); events: seq per topic, one invalidate per instance per flush, batch ≤ 128, stream = `hostId:epoch`; registrar against a fake spine server: register/heartbeat/claim/adopt/409 → `CLAIM-REFUSED.txt` (as uid 1000, memory-recorded), tombstone/revive, uid 20000+i persisted and reused, reconcile settle + ≤ 5 per pass, `401 host-epoch-moved` → re-register; local transport twin; dev shell: 401 without token on socket and loopback, document bootstrap shape, import map, one `<link>`; `/modules/<c>/<s>/frontend.js` and `styles.css` bytes identical via `server` and `devshell`; resources: the readers on the live pod's cgroup fixtures incl. `max` lines, the usage_usec delta over two samples (clamped), a missing file → null (never zeros) and re-primes, the beat body carries `resources` only when a row exists |
 
 ### 8.2 The Linux drill — `host/drill/launcher/run.sh` (one backgrounded task, ≤ 20 min, ends in `VERDICT:`)
 
@@ -1007,6 +1017,7 @@ Implemented: `host/protocol/{auth,headers,events,registrar,server,devshell}.mjs`
    construction, §1.1 order). `.drain(capMs)` is the §2.3 step-3 flush; `.stop()` clears timers.
 4. **`createRegistrar`** takes `fsx` (plain file reads/writes with a mode; default node:fs),
    `liveWorkers()` (the supervisor's live instances, the heartbeat's `visible_apps` input),
+   `resources()` (host/resources.mjs `sample`: the heartbeat's `resources` row; null = the field is absent),
    `backoffMs`, `now`. `apps` rows carry `meta` (the dev shell's rail). `claim` reads the
    `<inst>/uid` marker before allocating (a uid on disk is never re-allocated). `.beat()` is
    one heartbeat (tests); `.stop()` ends the interval. `reconcile(null)` = `/work/apps` unreadable.
