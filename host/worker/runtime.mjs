@@ -10,6 +10,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { format } from 'node:util'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isMain } from '../entry.mjs'
 
 export const JSON_BODY_CAP = 10 * 1024 * 1024
 export const CTL_FD = 3
@@ -285,6 +286,6 @@ export async function main({ spec = JSON.parse(process.env.ATELIER_WORKER), ctlF
   send({ t: 'ready', mountMs, importMs, resources, teardown: !!teardown })
 }
 
-if (process.env.ATELIER_WORKER && process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.env.ATELIER_WORKER && isMain(import.meta.url)) {   // real paths (entry.mjs): a symlinked entry must not be a silent no-op
   main().catch((e) => { try { fs.writeSync(CTL_FD, JSON.stringify({ t: 'load-failed', code: 'LOAD-ERROR', ...errorDetail(e) }) + '\n') } catch {} ; process.exit(1) })
 }

@@ -8,6 +8,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadLanes, isModuleDir } from './report/lanes.mjs'
+import { isMain } from '../host/entry.mjs'
 import { mergeModule } from './report/merge.mjs'
 import { buildRows, rowsMd, summaryOf } from './report/table.mjs'
 import { finalVerdict, failVerdict } from './report/verdict.mjs'
@@ -124,7 +125,8 @@ export async function run(argv, io = { stdout: (l) => process.stdout.write(l + '
   return refused.length ? 2 : 0
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)
-if (isMain || process.env.ATELIER_DOCTOR_MAIN === '1' || (process.argv[1] && /(^|\/)cli\.js$/.test(process.argv[1]))) {
+// the entry guard compares REAL paths (host/entry.mjs) — the skills dir links this file (/work/.claude/skills/atelier-app → doctor/),
+// and the old `new URL(...).pathname` compare was also wrong for a path with a space or a `%`
+if (isMain(import.meta.url) || process.env.ATELIER_DOCTOR_MAIN === '1' || (process.argv[1] && /(^|\/)cli\.js$/.test(process.argv[1]))) {
   process.exitCode = await run(process.argv.slice(2))
 }

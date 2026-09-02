@@ -12,8 +12,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { networkInterfaces } from 'node:os'
+import { isMain } from './entry.mjs'
 import { randomBytes } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
 import { linuxRoot, unprivileged } from './adapters/os.mjs'
 import { createSupervisor } from './supervisor/index.mjs'
 import { buildSheet } from './supervisor/tailwind.mjs'
@@ -411,6 +411,6 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   return { cfg, os, dirfd, supervisor, registrar, server, dev, events, collector, watchdog, metrics, chrome, teardown, fault: () => fault, enterFault }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {   // real paths (entry.mjs): a symlinked entry must not be a silent no-op
   main().catch((e) => { process.stderr.write(`[host] fatal: ${e?.stack ?? e}\n`); process.exit(2) })
 }
