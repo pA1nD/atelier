@@ -100,11 +100,11 @@ EXP=/work/.atelier/prod/$INST/$C12
 TREE=$(X "find $EXP -printf '%m %U:%G %y %p\n' | sort"); echo "$TREE" > $OUT/export-tree.txt; echo "$TREE" | head -8 | sed 's/^/    | /'
 echo "$TREE" | grep -q "^750 0:$WUID d $EXP\$" || rowfail 9a "the export dir is not 0:$WUID 0750: $(echo "$TREE" | grep " $EXP\$")"
 echo "$TREE" | grep " f " | grep -vq "^640 0:$WUID f " && rowfail 9a "an export file is not 0:$WUID 0640: $(echo "$TREE" | grep ' f ' | grep -v "^640 0:$WUID f " | head -2)"
-E1000=$(X "$AS1000 cat $EXP/backend.js 2>&1 | grep -c 'Permission denied'"); EW=$(X "$AS_WORKER head -c 40 $EXP/backend.js 2>&1 | grep -c 'Permission denied'")
+E1000=$(X "$AS1000 cat $EXP/backend.js 2>&1 | grep -c 'Permission denied'; true" | tr -d '\r\n '); EW=$(X "$AS_WORKER head -c 40 $EXP/backend.js 2>&1 | grep -c 'Permission denied'; true" | tr -d '\r\n ')
 log "row 9a: export as uid 1000 → EACCES lines: $E1000 (want 1); as the worker uid $WUID → EACCES lines: $EW (want 0)"
 [ "$E1000" = 1 ] || rowfail 9a "the export is readable by uid 1000"
 [ "$EW" = 0 ] || rowfail 9a "the export is not readable by the worker uid"
-WCWD=$(X "for p in \$(pgrep -u $WUID -f worker/runtime.mjs); do readlink /proc/\$p/cwd; done" | sort -u | tr '\n' ' ')
+WCWD=$(X "for p in \$(pgrep -u $WUID -f worker/runtime.mjs); do $AS_WORKER readlink /proc/\$p/cwd; done; true" | sort -u | tr '\n' ' ')   # /proc/<pid>/cwd of a foreign uid needs ptrace access: read as the worker itself
 log "row 9a: prod worker cwd(s): $WCWD"
 echo "$WCWD" | grep -q "$EXP" || rowfail 9a "no prod worker runs from the export (cwds: $WCWD)"
 X "grep -E 'locker' /work/.atelier/agent.log | tail -6" | sed 's/^/    | agent.log: /'
@@ -142,7 +142,7 @@ log "row 9c: backup id $BID"
 [ -n "$BID" ] || rowfail 9c "no backup dir after the second deploy"
 BT=$(X "stat -c '%a %u:%g' /work/.atelier/backup/$INST/$BID; stat -c '%a %u:%g' /work/.atelier/backup/$INST" | tr '\n' ' '); log "row 9c: backup dir + root: $BT (want 750 0:19999 both)"
 echo "$BT" | grep -q "^750 0:19999 750 0:19999" || rowfail 9c "the backup dirs are not 0:19999 0750: $BT"
-BW=$(X "$AS_WORKER ls /work/.atelier/backup/$INST/$BID 2>&1 | grep -c 'Permission denied'"); B1000=$(X "$AS1000 ls /work/.atelier/backup/$INST/$BID 2>&1 | grep -vc 'Permission denied'")
+BW=$(X "$AS_WORKER ls /work/.atelier/backup/$INST/$BID 2>&1 | grep -c 'Permission denied'; true" | tr -d '\r\n '); B1000=$(X "$AS1000 ls /work/.atelier/backup/$INST/$BID 2>&1 | grep -vc 'Permission denied'; true" | tr -d '\r\n ')
 log "row 9c: backup as the worker → EACCES lines: $BW (want 1); as uid 1000 (group 19999) → entries: $B1000 (want > 0)"
 [ "$BW" = 1 ] || rowfail 9c "the backup is listable by the worker"
 [ "$B1000" -gt 0 ] 2>/dev/null || rowfail 9c "the backup is not readable by uid 1000"

@@ -66,6 +66,8 @@ export const cpSpec = (src, dst, hostEnv = process.env) => ({ ...ROOT_G, argv: [
 export const rmSpec = (dir, hostEnv = process.env) => ({ ...ROOT_G, argv: ['rm', '-rf', '--', dir], env: envOf(hostEnv) })
 /** `du -sk <dir>` → KiB on stdout. */
 export const duSpec = (dir, hostEnv = process.env) => ({ ...ROOT_G, argv: ['du', '-s', '-k', '--', dir], env: envOf(hostEnv) })
+/** `find <dir> -mindepth 1 -maxdepth 1 -print -quit` → one line when the dir has an entry, nothing when empty (root cannot readdir a 2770 data dir itself). */
+export const lsSpec = (dir, hostEnv = process.env) => ({ ...ROOT_G, argv: ['find', dir, '-mindepth', '1', '-maxdepth', '1', '-print', '-quit'], env: envOf(hostEnv) })
 /** Row T: `tar -x -C <dest> -f -` as root, stdin = row A's stdout (git archive as uid 1000). */
 export const extractSpec = (dest, hostEnv = process.env) => ({ argv: ['tar', '-x', '-C', dest, '-f', '-'], env: envOf(hostEnv), cwd: '/', uid: 0, gid: 0, groups: [], umask: 0o077, stdio: ['pipe', 'pipe', 'pipe'] })
 

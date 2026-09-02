@@ -21,7 +21,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { archiveSpec, commitAll, resolveCommit, gitInit } from './lastgood.mjs'
 import { formatHint, classifyWorkerFailure } from './bundle.mjs'
-import { REL, commit12, backupId, parseBackupId, newReleaseId, cpSpec, rmSpec, duSpec, extractSpec, parseKb, ownTree, pruneBackups, backupFeasible, mb, deferred, RELEASES_KEEP, COMMIT_RE, DATA_CAP_BYTES, sockName } from './slots.mjs'
+import { REL, commit12, backupId, parseBackupId, newReleaseId, cpSpec, rmSpec, duSpec, lsSpec, extractSpec, parseKb, ownTree, pruneBackups, backupFeasible, mb, deferred, RELEASES_KEEP, COMMIT_RE, DATA_CAP_BYTES, sockName } from './slots.mjs'
 import { run } from '../worker/install.mjs'
 import { backupPlan, rehearsalPlan, prodPlan, applyJail, jailPlan } from '../worker/jail.mjs'
 
@@ -174,7 +174,8 @@ export function createDeployer(i) {
   async function copyInto(src, dst, ms) { const r = await run(os, cpSpec(real(src), real(dst), hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `cp -a: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
   async function rmrf(p, ms = 60_000) { if (!exists(p)) return; const r = await run(os, rmSpec(real(p), hostEnv), { timeoutMs: ms }); if (r.code !== 0) throw { error: `rm -rf: ${tail(r.stderr) || `rc=${r.code ?? r.signal}`}` } }
   async function dirBytes(p) { if (!exists(p)) return 0; const r = await run(os, duSpec(real(p), hostEnv), { timeoutMs: 30_000 }); const kb = parseKb(r.stdout); return kb == null ? 0 : kb * 1024 }
-  const dirEmpty = (p) => { try { return fs.readdirSync(p).length === 0 } catch { return true } }
+  // hasData(p): a `<uid>:19999 2770` data dir is not readable by userns-root itself (no DAC caps; the row-9 drill's finding) — the question goes to a root+19999 child
+  async function hasData(p) { if (!exists(p)) return false; const r = await run(os, lsSpec(real(p), hostEnv), { timeoutMs: 30_000 }); return r.code === 0 && String(r.stdout ?? '').trim().length > 0 }
   function applyPlan(row, plan, what) {
     if (!i.jail) { for (const s of plan) if (s.op === 'mkdir') { try { fs.mkdirSync(s.path, { recursive: true, mode: s.mode & 0o777 }) } catch {} } return }
     const r = applyJail(os, plan, (l) => emit(`[${row.slug}] ${l}`))
@@ -377,7 +378,7 @@ export function createDeployer(i) {
           await R.step('copy', budget(D().copyMs), async () => {
             await rmrf(copyDir)
             applyPlan(row, rehearsalPlan({ uid: row.uid }, i.dot(REL.rehearsalRoot(inst))), 'rehearsal dir')
-            if (!row.prod || !exists(prodData) || dirEmpty(prodData)) return { note: MESSAGES.step.notes.copy(0) }
+            if (!row.prod || !(await hasData(prodData))) return { note: MESSAGES.step.notes.copy(0) }
             const bytes = await dirBytes(prodData)
             if (bytes > DATA_CAP_BYTES) { partial = true; return { note: MESSAGES.step.notes.copySkipped(gb(bytes)) } }
             await copyInto(prodData, copyDir, D().copyMs)
@@ -453,8 +454,8 @@ export function createDeployer(i) {
         const rehearsalMs = Math.round(os.now() - rT0)
         // ---- the backup feasibility check, BEFORE the gate (D11): a backup that cannot land is never discovered after prod stopped
         const prodData = i.dot(REL.prodData(inst))
-        const hasData = !!row.prod && exists(prodData) && !dirEmpty(prodData)
-        if (hasData && !noBackup) {
+        const withData = !!row.prod && (await hasData(prodData))
+        if (withData && !noBackup) {
           const bytes = await dirBytes(prodData)
           const free = os.statfs?.(i.dot(''))?.free ?? null
           const why = backupFeasible({ dataBytes: bytes, freeBytes: free })
@@ -474,7 +475,7 @@ export function createDeployer(i) {
           body: async (slot) => {
             await R.step('backup', D().backupMs + 500, async () => {
               if (noBackup) return { note: MESSAGES.step.notes.backupSkipped() }
-              if (!hasData) return { note: 'none (first deploy: no prod data yet)' }
+              if (!withData) return { note: 'none (first deploy: no prod data yet)' }
               backup = await takeBackup(row, { rev: prevSnapshot?.rev ?? 0, commit: prevSnapshot?.commit })
               const dropped = await pruneOldBackups(row)
               return { note: `${MESSAGES.step.notes.backup(backup.id, Math.round(mb(backup.bytes)))}${dropped.length ? `, pruned ${dropped.length}` : ''}` }
