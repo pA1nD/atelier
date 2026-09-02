@@ -19,6 +19,7 @@
 //   worker restarts  supervisor/index.mjs   the respawn counter (restartLater, one per backoff)
 //   watchdog trips   errors/watchdog.mjs    rss (kill) | cpu (throttle) | disk (stop) | shm (stop)
 //   events batch     protocol/events.mjs    frames per push to the spine — the host DOES batch (≤ 128, coalesced per instance)
+//   deploy           supervisor/deploy.mjs  `atelier deploy` verb → verdict, by outcome green|red|failed (DESIGN §10.3)
 // The other half of the C4 row — the per-host SHARE of shell ingest time — is the shell's to
 // measure: a host cannot see how long its batch cost the ring.
 //
@@ -57,7 +58,7 @@ const keyOf = (labels) => labels.map(([k, v]) => `${k}=${v}`).join(',')
 /**
  * createMetrics({ring, maxApps}) — the recorders the lanes call and the exposition the route serves.
  *   .save(app, ms, 'live'|'error')   .tailwind(app, ms, {cold})   .resume(app, ms)
- *   .restart(app)   .watchdogTrip(app, 'rss'|'cpu'|'disk'|'shm')   .eventsBatch(frames)
+ *   .restart(app)   .watchdogTrip(app, 'rss'|'cpu'|'disk'|'shm')   .eventsBatch(frames)   .deploy(app, ms, 'green'|'red'|'failed')
  *   .exposition() → the Prometheus text body (always ends in a newline)
  * The default instance is a real one: a lane constructed without `metrics` records into its own,
  * which nothing scrapes — no null checks on any hot path.
@@ -76,6 +77,9 @@ export function createMetrics({ ring = RING, maxApps = MAX_APPS } = {}) {
   const resumeMs = summary(
     'atelier_host_worker_resume_ms', 'a worker resumed from the last-good snapshot to READY, in ms — BOTH roads into resume(): the request that wakes an idle-stopped worker and the crash ladder\'s respawn, one series (alarm 100 ms is the wake\'s; the ladder\'s own backoff is outside the clock)',
     'atelier_host_worker_resume_last_ms', 'the last resume of this app, in ms')
+  const deployMs = summary(
+    'atelier_host_deploy_ms', 'one `atelier deploy` of this app from the verb to its verdict, in ms, by outcome (green = released, red = the rehearsal refused it and prod is untouched, failed = the release failed after the gate and the app is down)',
+    'atelier_host_deploy_last_ms', 'the last deploy of this app, by outcome, in ms')
   const batchSize = summary(
     'atelier_host_events_batch', 'invalidation frames per push to the spine (_count = pushes, _sum = frames; coalesced per instance, batches <= 128)',
     'atelier_host_events_batch_last', 'the frames in the last push to the spine')
@@ -83,6 +87,7 @@ export function createMetrics({ ring = RING, maxApps = MAX_APPS } = {}) {
   const verdicts = counter('atelier_host_save_verdicts_total', 'saves that reached a verdict, by outcome (live = the swap, error = the app-error emitted)')
   const restarts = counter('atelier_host_worker_restarts_total', 'worker respawns scheduled by the supervisor\'s crash ladder')
   const trips = counter('atelier_host_watchdog_trips_total', 'watchdog trips: rss (kill), cpu (throttle cycle), disk (stop), shm (stop)')
+  const deploys = counter('atelier_host_deploy_total', 'deploys that reached a verdict, by outcome (green | red | failed)')
 
   function record(f, labels, v) {
     const k = keyOf(labels)
@@ -127,7 +132,7 @@ export function createMetrics({ ring = RING, maxApps = MAX_APPS } = {}) {
   // deleted app holding a slot for the rest of the host life is how a first-come cap latches shut.
   function forget(app) {
     const mine = (s) => s.labels.some(([k, v]) => k === 'app' && v === app)   // the labels, not the key string: a slug is a folder name
-    for (const f of [saveMs, tailwindMs, resumeMs, verdicts, restarts, trips]) for (const [k, s] of [...f.series]) if (mine(s)) f.series.delete(k)
+    for (const f of [saveMs, tailwindMs, resumeMs, deployMs, verdicts, restarts, trips, deploys]) for (const [k, s] of [...f.series]) if (mine(s)) f.series.delete(k)
   }
 
   return {
@@ -137,11 +142,12 @@ export function createMetrics({ ring = RING, maxApps = MAX_APPS } = {}) {
     restart(app) { bump(restarts, [['app', app]]) },
     watchdogTrip(app, kind) { bump(trips, [['app', app], ['kind', kind]]) },
     eventsBatch(frames) { record(batchSize, [], frames) },
+    deploy(app, ms, outcome) { const o = ['green', 'red', 'failed'].includes(outcome) ? outcome : 'failed'; record(deployMs, [['app', app], ['outcome', o]], ms); bump(deploys, [['app', app], ['outcome', o]]) },
     forget,
     exposition() {
       const out = []
-      for (const f of [saveMs, tailwindMs, resumeMs, batchSize]) renderSummary(out, f)
-      for (const c of [verdicts, restarts, trips]) renderCounter(out, c)
+      for (const f of [saveMs, tailwindMs, resumeMs, deployMs, batchSize]) renderSummary(out, f)
+      for (const c of [verdicts, restarts, trips, deploys]) renderCounter(out, c)
       out.push('# HELP atelier_host_metrics_series_dropped_total samples dropped because a family already holds maxApps series')
       out.push('# TYPE atelier_host_metrics_series_dropped_total counter')
       out.push(`atelier_host_metrics_series_dropped_total ${dropped}`)

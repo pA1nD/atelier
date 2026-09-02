@@ -1,11 +1,16 @@
 // host/supervisor/lastgood.mjs — the last-good revision store (PLAN §4.3 "Last-good", DESIGN §3, §6.1).
 //
 // Layout under the `.atelier` dirfd (every path is `os.at(dirfd, rel)` — never re-resolved by name):
-//   <inst>/revision.json   {rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug}
-//                          `rev` = the counter (bumped on LIVE and FAILED alike, persisted BEFORE the
-//                          worker starts); `live` = the rev `current` names; `fingerprint` = the
-//                          watcher fingerprint of the source the live rev was built from.
-//   <inst>/current         symlink → ../last-good/<inst>/rev-N, swapped by rename
+//   <inst>/revision.json   {rev, live, sha256, bytes, builtAt, host, chrome, protocol, fingerprint, slug, prod}
+//                          `rev` = the counter (bumped by dev and prod builds alike, LIVE and FAILED,
+//                          persisted BEFORE the worker starts); `live` = the DEV rev `current-dev`
+//                          names; `fingerprint` = the watcher fingerprint of the source the dev rev was
+//                          built from; `prod` = {rev, commit, deployedAt, message, legacy?} — the PROD
+//                          slot (DESIGN §10.3 D4): `commit` is the deployed git sha, `legacy` marks a
+//                          row adopted from the pre-release layout (served from the app folder).
+//   <inst>/current         symlink → ../last-good/<inst>/rev-N — the PROD rev (what boot() resumes and
+//                          `?rev=` addresses); swapped by rename
+//   <inst>/current-dev     symlink → ../last-good/<inst>/rev-N — the DEV rev (the dev shell's)
 //   <inst>/slug, uid, registered.json   markers (0600 — the host's alone), written by the supervisor/registrar
 //   last-good/<inst>/rev-N/{backend.js, backend.js.map, frontend/<rel>.js, styles.css}
 //                          written to rev-N.tmp-<pid>, every file fsynced, the dir renamed into
@@ -13,7 +18,8 @@
 //                          THEN chown, both through the adapter; never a chmod on a foreign inode).
 // The checksum (sha256 over the artefacts in a fixed order) stamps revision.json; a snapshot survives
 // a broken folder and a host restart. Old rev dirs are removed by `remove()` (the supervisor's
-// 10-minute window). `commitGit` = row G: one `git commit` per LIVE rev as uid 1000, never fatal.
+// 10-minute window). The git helpers at the bottom run as uid 1000 (row G): `gitInit` at claim/adopt,
+// `commitAll` + `resolveCommit` + `archiveSpec` for the deploy (supervisor/deploy.mjs).
 import nodeFs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -93,27 +99,30 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       return { dir: final, sha256: hash.digest('hex'), bytes }
     },
 
-    // commit(inst, rev, meta) — revision.json + the `current` symlink, both atomic (write-then-rename).
+    // commit(inst, rev, meta) — the DEV build: revision.json (`live`, `fingerprint`, …) + the `current-dev`
+    // symlink, both atomic (write-then-rename). The `prod` block and `current` are commitProd's.
     commit(inst, rev, { slug, sha256, bytes, fingerprint = null, chrome = null }) {
       const cur = store.revision(inst) ?? {}
       writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), {
-        rev: Math.max(cur.rev ?? 0, rev), live: rev, sha256, bytes, builtAt: new Date(os.now()).toISOString(),
+        ...cur, rev: Math.max(cur.rev ?? 0, rev), live: rev, sha256, bytes, builtAt: new Date(os.now()).toISOString(),
         host: hostVersion, chrome, protocol: PROTOCOL, fingerprint, slug,
       }, 0o600)
-      const link = path.join(markerDir(inst), 'current'), tmp = path.join(markerDir(inst), `.current-tmp-${process.pid}`)
-      fs.rmSync(tmp, { force: true })
-      fs.symlinkSync(`../last-good/${inst}/rev-${rev}`, tmp)
-      fs.renameSync(tmp, link)
-      fsyncDir(markerDir(inst))
+      link(inst, 'current-dev', rev)
     },
-    current(inst) {
-      let target
-      try { target = fs.readlinkSync(path.join(markerDir(inst), 'current')) } catch { return null }
-      const m = /rev-(\d+)$/.exec(target)
-      if (!m) return null
-      const rev = Number(m[1])
-      return fs.existsSync(revDir(inst, rev)) ? { rev, dir: revDir(inst, rev) } : null
+    // commitProd(inst, rev, prod) — the PROD release: `revision.json.prod = {rev, commit, deployedAt, message, legacy?}`
+    // + the `current` symlink. The counter is bumped to `rev` when a deploy minted it.
+    commitProd(inst, rev, { commit, deployedAt = new Date(os.now()).toISOString(), message = null, legacy = false }) {
+      const cur = store.revision(inst) ?? {}
+      const prod = { rev, commit, deployedAt, message }
+      if (legacy) prod.legacy = true
+      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev: Math.max(cur.rev ?? 0, rev), prod }, 0o600)
+      link(inst, 'current', rev)
     },
+    // link(inst, name, rev) — one pointer symlink, swapped by rename
+    link: (inst, name, rev) => link(inst, name, rev),
+    // current(inst) → {rev, dir} the PROD pointer; currentDev(inst) the DEV pointer; null when unset or pruned
+    current(inst) { return pointer(inst, 'current') },
+    currentDev(inst) { return pointer(inst, 'current-dev') },
     list(inst) {
       let ents
       try { ents = fs.readdirSync(lastGood(inst)) } catch { return [] }
@@ -143,6 +152,21 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       return ents.filter((n) => INSTANCE_RE.test(n)).sort()
     },
   }
+  function link(inst, name, rev) {
+    const p = path.join(markerDir(inst), name), tmp = path.join(markerDir(inst), `.${name}-tmp-${process.pid}`)
+    fs.rmSync(tmp, { force: true })
+    fs.symlinkSync(`../last-good/${inst}/rev-${rev}`, tmp)
+    fs.renameSync(tmp, p)
+    fsyncDir(markerDir(inst))
+  }
+  function pointer(inst, name) {
+    let target
+    try { target = fs.readlinkSync(path.join(markerDir(inst), name)) } catch { return null }
+    const m = /rev-(\d+)$/.exec(target)
+    if (!m) return null
+    const rev = Number(m[1])
+    return fs.existsSync(revDir(inst, rev)) ? { rev, dir: revDir(inst, rev) } : null
+  }
   function walkDirs(root) {
     const out = []
     const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) { const p = path.join(d, e.name); out.push(p); walk(p) } }
@@ -152,37 +176,61 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
   return store
 }
 
-// commitGit({os, appDir, rev, log}) → Promise<{ok, step?, code?}> — row G, never throws.
-// `.git/info/exclude` (written as uid 1000 after `init`, every time) keeps node_modules/ (the frozen
-// tree), data/ (1.x apps that write there), .atelier and CLAIM-REFUSED.txt out of every commit: the
-// dependency tree is never duplicated into .git on the volume, and a save costs one pass over the
-// sources only. The supervisor serializes commits per app (swap → `row.git` chain).
+// Git as uid 1000 (row G env, cleared groups, umask 022) — DESIGN §2.2 row G, §10.3 D7. Never throws.
+//   gitInit({os, appDir})          `git init -q` (a no-op on a repo) + `.gitignore` written `wx` (noclobber: the
+//                                  agent's own file is never overwritten) — once at claim and at adopt.
+//   commitAll({os, appDir, message}) `git add -A && git commit -m <message>` → {ok, commit} — `nothing to commit`
+//                                  → ok with the HEAD; the deploy's step 1.
+//   resolveCommit({os, appDir, ref}) → {ok, commit} the full sha of a ref/abbrev (the rollback's argument).
+// The per-LIVE-rev auto-commit is retired: history = releases; Bayard may commit himself.
 export const GIT_ENV = { HOME: '/work', GIT_AUTHOR_NAME: 'atelier', GIT_AUTHOR_EMAIL: 'atelier@local', GIT_COMMITTER_NAME: 'atelier', GIT_COMMITTER_EMAIL: 'atelier@local' }
-export const GIT_EXCLUDE = 'node_modules/\ndata/\n.atelier\nCLAIM-REFUSED.txt\n'
-export function gitSpec({ appDir, args, home = GIT_ENV.HOME }) {
-  return { argv: ['git', '-C', appDir, ...args], uid: 1000, gid: 1000, groups: [], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...GIT_ENV, HOME: home }, umask: 0o022, cwd: appDir, stdio: ['ignore', 'pipe', 'pipe'] }
+export const GITIGNORE = ['data/', '.env', '.env.*', 'node_modules/', 'CLAIM-REFUSED.txt', '.atelier'].join('\n') + '\n'   // = deploy.mjs MESSAGES.git.gitignore
+export function gitSpec({ appDir, args, home = GIT_ENV.HOME, stdio = ['ignore', 'pipe', 'pipe'] }) {
+  return { argv: ['git', '-C', appDir, ...args], uid: 1000, gid: 1000, groups: [], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...GIT_ENV, HOME: home }, umask: 0o022, cwd: appDir, stdio }
 }
-/** The exclude write: uid 1000, `mkdir -p .git/info` then the list — through the adapter like every git step. */
-export function excludeSpec({ appDir }) {
-  return { ...gitSpec({ appDir, args: [] }), argv: ['sh', '-c', 'mkdir -p -- "$1/.git/info" && printf %s "$2" > "$1/.git/info/exclude"', 'sh', appDir, GIT_EXCLUDE] }
+/** The .gitignore write: uid 1000, `set -C` (O_EXCL) so an existing file — the agent's — stays. */
+export function gitignoreSpec({ appDir, home }) {
+  return { ...gitSpec({ appDir, args: [], home }), argv: ['sh', '-c', 'set -C; printf %s "$2" > "$1/.gitignore" 2>/dev/null || true', 'sh', appDir, GITIGNORE] }
 }
-export async function commitGit({ os, appDir, rev, log = () => {}, home }) {
-  const run = (args) => new Promise((resolve) => {
+/** Row A: `git archive --format=tar <commit>` as uid 1000, stdout = the tar stream (piped into row T). */
+export function archiveSpec({ appDir, commit, home }) {
+  return gitSpec({ appDir, args: ['archive', '--format=tar', commit], home })
+}
+export function runGit(os, spec) {
+  return new Promise((resolve) => {
     let child
-    try { child = os.spawn(args === 'exclude' ? excludeSpec({ appDir }) : gitSpec({ appDir, args, home })) } catch (e) { return resolve({ code: -1, err: e.message }) }
-    let err = ''
-    child.stdout?.on?.('data', (d) => { err += d })
+    try { child = os.spawn(spec) } catch (e) { return resolve({ code: -1, out: '', err: e.message }) }
+    let out = '', err = ''
+    child.stdout?.on?.('data', (d) => { out += d })
     child.stderr?.on?.('data', (d) => { err += d })
-    child.on('error', (e) => resolve({ code: -1, err: e.message }))
-    child.on('exit', (code) => resolve({ code, err }))
+    child.on('error', (e) => resolve({ code: -1, out, err: e.message }))
+    child.on('exit', (code) => resolve({ code, out, err }))
   })
-  for (const [step, args] of [['init', ['init', '-q']], ['exclude', 'exclude'], ['add', ['add', '-A', '.']], ['commit', ['commit', '-qm', `rev ${rev}`]]]) {
-    const r = await run(args)
-    if (r.code !== 0) {
-      if (step === 'commit' && /nothing to commit/.test(r.err)) return { ok: true, noop: true }
-      log(`git ${step} in ${appDir}: rc=${r.code} ${String(r.err).trim().split('\n')[0]}`)
-      return { ok: false, step, code: r.code }
-    }
+}
+const firstLine = (s) => String(s).trim().split('\n')[0]
+export async function gitInit({ os, appDir, log = () => {}, home }) {
+  for (const [step, spec] of [['init', gitSpec({ appDir, args: ['init', '-q'], home })], ['gitignore', gitignoreSpec({ appDir, home })]]) {
+    const r = await runGit(os, spec)
+    if (r.code !== 0) { log(`git ${step} in ${appDir}: rc=${r.code} ${firstLine(r.err)}`); return { ok: false, step, code: r.code, error: firstLine(r.err) } }
   }
   return { ok: true }
+}
+export async function commitAll({ os, appDir, message, log = () => {}, home }) {
+  const add = await runGit(os, gitSpec({ appDir, args: ['add', '-A', '.'], home }))
+  if (add.code !== 0) { log(`git add in ${appDir}: rc=${add.code} ${firstLine(add.err)}`); return { ok: false, step: 'add', error: firstLine(add.err) || `git add rc=${add.code}` } }
+  const c = await runGit(os, gitSpec({ appDir, args: ['commit', '-q', '-m', message], home }))
+  if (c.code !== 0 && !/nothing to commit|nothing added to commit|no changes added/.test(c.out + c.err)) {
+    log(`git commit in ${appDir}: rc=${c.code} ${firstLine(c.err || c.out)}`)
+    return { ok: false, step: 'commit', error: firstLine(c.err || c.out) || `git commit rc=${c.code}` }
+  }
+  const head = await resolveCommit({ os, appDir, ref: 'HEAD', home })
+  if (!head.ok) return head
+  return { ok: true, commit: head.commit, noop: c.code !== 0 }
+}
+export async function resolveCommit({ os, appDir, ref, home }) {
+  if (typeof ref !== 'string' || !/^[0-9a-zA-Z_./-]{1,64}$/.test(ref) || ref.startsWith('-')) return { ok: false, step: 'rev-parse', error: `bad commit '${String(ref).slice(0, 40)}'` }
+  const r = await runGit(os, gitSpec({ appDir, args: ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], home }))
+  const sha = firstLine(r.out)
+  if (r.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) return { ok: false, step: 'rev-parse', error: `unknown commit '${ref}'` }
+  return { ok: true, commit: sha }
 }

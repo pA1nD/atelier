@@ -42,10 +42,10 @@ export function copyManifestSpec(spec, { scratchDir, hostEnv }) {
   }
 }
 
-/** Row F: `python3 freeze.py <mode> <inst> <slug> <uid> <appgid>` as root with groups cleared; fd 3 = the .atelier dirfd. */
-export function freezeSpec(mode, spec, { dirfd, hostEnv, freeze = FREEZE_PATH }) {
+/** Row F: `python3 freeze.py <mode> <inst> <slug> <uid> <appgid> --dirfd 3 [--dest <rel>]` as root with groups cleared; fd 3 = the .atelier dirfd. */
+export function freezeSpec(mode, spec, { dirfd, hostEnv, freeze = FREEZE_PATH, dest = null }) {
   return {
-    argv: ['python3', freeze, mode, spec.instance, spec.slug, String(spec.uid), String(appgid(spec)), '--dirfd', '3'],
+    argv: ['python3', freeze, mode, spec.instance, spec.slug, String(spec.uid), String(appgid(spec)), '--dirfd', '3', ...(dest ? ['--dest', dest] : [])],
     env: { PATH: hostEnv.PATH },
     cwd: '/',
     uid: 0, gid: 0, groups: [],
@@ -100,12 +100,15 @@ const tail = (s, n = 5) => String(s).split('\n').filter(Boolean).slice(-n).join(
  * @returns {Promise<{ok:true, ms:number, files:number|null} | {ok:false, class:'install'|'freeze-abort'|'setuid-refused', message:string}>}
  *   `beforeFreeze` (optional, async): the supervisor stops the live worker here — freeze.py SIGKILLs every process
  *   of the worker uid, so a still-running worker dies without its teardown otherwise.
+ *   `dest` (DESIGN §10.3 D8): the PROD export, dirfd-relative (`prod/<inst>/<commit12>`) — `spec.appDir` is the
+ *   export's real path (the manifest copy reads it as the worker through appgid); the freeze lands the tree there
+ *   `0:<appgid>` instead of in the agent's folder. Unprivileged: npm runs in the export itself.
  */
-export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = process.env, freeze = FREEZE_PATH, beforeFreeze, timeoutMs = INSTALL_TIMEOUT_MS }) {
+export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = process.env, freeze = FREEZE_PATH, beforeFreeze, timeoutMs = INSTALL_TIMEOUT_MS, dest = null }) {
   const t0 = os.now()
   const ms = () => os.now() - t0
   if (!os.privileged) {
-    log(`install ${spec.slug}: unprivileged — npm in the app folder as the current user, freeze skipped`)
+    log(`install ${spec.slug}: unprivileged — npm in the ${dest ? 'export' : 'app folder'} as the current user, freeze skipped`)
     const r = await run(os, {
       argv: NPM_ARGV,
       env: { PATH: hostEnv.PATH, NODE_ENV: hostEnv.NODE_ENV ?? 'production', APP_ID: spec.instance, HOME: hostEnv.HOME },
@@ -144,7 +147,7 @@ export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = p
   if (npm.code !== 0) return { ok: false, class: 'install', message: `npm exit ${npm.code ?? npm.signal}: ${tail(npm.stderr)}` }
 
   await beforeFreeze?.()
-  const fr = await run(os, freezeSpec('freeze', spec, { dirfd, hostEnv, freeze }), { timeoutMs })
+  const fr = await run(os, freezeSpec('freeze', spec, { dirfd, hostEnv, freeze, dest }), { timeoutMs })
   const frV = parseFreeze(fr.stdout)
   if (fr.code === 0 && frV.ok) {
     log(`install ${spec.slug}: freeze ${JSON.stringify(frV.stats)}`)
