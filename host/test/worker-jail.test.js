@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { memory } from '../adapters/os.mjs'
-import { jailPlan, installPlan, backupPlan, rehearsalPlan, prodPlan, applyJail, afterReady, claimRoundTrip, dataFileRoundTrip, AGENT, AGENT_DATA_GID, WORKER_UID_BASE, INSTANCE_RE } from '../worker/jail.mjs'
+import { jailPlan, installPlan, backupPlan, rehearsalPlan, prodPlan, applyJail, afterReady, lockSockDir, claimRoundTrip, dataFileRoundTrip, AGENT, AGENT_DATA_GID, WORKER_UID_BASE, INSTANCE_RE } from '../worker/jail.mjs'
 
 const spec = { instance: 'i-0123456789abcdef', uid: 20001, dataDir: '/work/.atelier/data/i-0123456789abcdef', tmpDir: '/work/.atelier/tmp/i-0123456789abcdef', sockDir: '/run/atelier/w/i-0123456789abcdef', sock: '/run/atelier/w/i-0123456789abcdef/w.sock' }
 
@@ -134,6 +134,14 @@ test('afterReady: the socket becomes 0:0 0700 (chown first, chmod while root own
   assert.equal(afterReady(os2, spec, () => {}, { shared: true }).ok, true)
   assert.deepEqual(s2.calls, [['chown', spec.sock, 0, 20001], ['chmod', spec.sock, 0o770], ['chmod', spec.sockDir, 0o710]])
   assert.deepEqual(s2.fs[spec.sock], { uid: 0, gid: 20001, mode: 0o770, type: 'socket' })
+  // the worker lane's call (spawn.mjs): the socket only — the dir's bit is the supervisor's, dropped by the LAST spawn in flight (lockSockDir)
+  const s3 = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o755, type: 'socket' }, [spec.sockDir]: { uid: 0, gid: 20001, mode: 0o730, type: 'dir' } } }
+  const os3 = memory(s3)
+  assert.equal(afterReady(os3, spec, () => {}, { lockDir: false }).ok, true)
+  assert.deepEqual(s3.calls, [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700]]); assert.equal(s3.fs[spec.sockDir].mode, 0o730)
+  assert.equal(lockSockDir(os3, spec).ok, true)
+  assert.deepEqual(s3.calls.at(-1), ['chmod', spec.sockDir, 0o710]); assert.equal(s3.fs[spec.sockDir].mode, 0o710)
+  assert.deepEqual(lockSockDir(os3, { ...spec, sockDir: undefined }), { ok: true, results: [] })
 })
 
 test('claimRoundTrip §6.2(a) on an fd: setgroups([uid]) → openDir O_NOFOLLOW → fstat guard → fchown 0:<uid> → fchmod 2750 → fchown 1000:<uid> → close → groups restored', () => {

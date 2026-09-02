@@ -155,7 +155,7 @@ export function spawnWorker({ os, spec, onControl = () => {}, onExit = () => {},
       if (!ready && msg.t === 'ready') {
         ready = true
         handle.ready = msg
-        if (lockSocket) afterReady(os, spec, log, { shared: lockSocket === 'shared' })   // 'shared' = the rehearsal socket: host + worker uid dial it
+        if (lockSocket) afterReady(os, spec, log, { shared: lockSocket === 'shared', lockDir: false })   // 'shared' = the rehearsal socket: host + worker uid dial it; the DIR's write bit is the supervisor's (lockSockDir: the last spawn in flight drops it)
         settle(() => resolve(handle))
         return
       }

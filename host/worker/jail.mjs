@@ -131,12 +131,21 @@ export function applyJail(os, steps, log = () => {}) {
  * userns-root has no DAC caps, so a `0:0 0700` socket is the host's alone and a worker-owned 0775 one
  * is EACCES to root. Chown first, chmod while root owns it.
  */
-export function afterReady(os, spec, log = () => {}, { shared = false } = {}) {
+export function afterReady(os, spec, log = () => {}, { shared = false, lockDir = true } = {}) {
   return applyJail(os, [
     { op: 'chown', path: spec.sock, uid: 0, gid: shared ? spec.uid : 0 },
     { op: 'chmod', path: spec.sock, mode: shared ? 0o770 : 0o700 },
-    ...(spec.sockDir ? [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }] : []),
+    ...(lockDir && spec.sockDir ? [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }] : []),
   ], log)
+}
+/**
+ * lockSockDir(os, spec) — the socket dir drops the worker write bit (0730 → 0710) once every worker of the instance that
+ * was binding is READY. The dir is shared by the dev, prod AND rehearsal workers of one instance (`w/<inst>/w-<slot>-<rev>.sock`),
+ * so the supervisor calls this when the LAST spawn in flight settles, never from one worker's READY: a prod resume that
+ * landed READY while the rehearsal worker was still binding dropped the bit under its `listen` (EACCES — drill row 9e).
+ */
+export function lockSockDir(os, spec, log = () => {}) {
+  return spec.sockDir ? applyJail(os, [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }], log) : { ok: true, results: [] }
 }
 
 // The fd-based round trips (§6.2). chown(2)/chmod(2) follow symlinks, and both round trips act on

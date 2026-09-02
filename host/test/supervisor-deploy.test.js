@@ -10,7 +10,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { world, api, deploy, waitFor, sleep, APP_JSON, BACKEND, FRONTEND, CARD, fs, path } from './supervisor-harness.test.js'
+import { world, api, deploy, waitFor, sleep, makeSpawn, APP_JSON, BACKEND, FRONTEND, CARD, fs, path } from './supervisor-harness.test.js'
 import { WAKING_BODY, WAKING_HEADERS } from '../../shell/proxy.mjs'
 import { MESSAGES } from '../supervisor/deploy.mjs'
 import { TransportError } from '../protocol/registrar.mjs'
@@ -728,4 +728,42 @@ test('S5: the install step with a dependency — a package.json + one dependency
     assert.equal(rb.outcome, 'green', JSON.stringify(rb)); assert.equal(rb.steps.find((s) => s.name === 'export').note, 'kept from the previous attempt of this commit'); assert.equal(rb.steps.find((s) => s.name === 'install').note, 'kept')
     assert.deepEqual(JSON.parse((await api(sup, row, '/dep', prod)).body), { answer: 42, cwd: exp })
   } finally { await w.done(sup) }
+})
+
+test('the socket dir\'s write bit (0730 at spawn → 0710 after READY) is dropped only by the LAST spawn of the instance in flight — a prod resume landing READY while the rehearsal worker is still binding (drill row 9e run 2: `listen EACCES … w-rehearsal-6.sock`) leaves the dir writable until the rehearsal is READY too; the deploy is green', async () => {
+  const w = world({ gitCommit: true })
+  const base = makeSpawn(path.join(w.root, 'runtime.mjs'))
+  let sup = null, inst = null, armed = false, onProdReady = null, prodReadyAt = null
+  const chmods = []   // every chmod of the instance's socket dir once armed: [mode, spawns in flight at that moment]
+  const realChmod = w.osx.chmod
+  w.osx.chmod = (p, m) => { const r = inst ? sup?.rows.get(inst) : null; if (armed && r && p === r.sockDir) chmods.push([m, r.spawning]); return realChmod(p, m) }
+  const spawnWrapped = async (a) => {
+    const h = await base(a)   // resolves at READY: the worker is bound; the supervisor has not yet settled this spawn
+    if (armed && a.spec.sock.includes('w-rehearsal-')) {
+      // the drill's window: prod dies now and its restart lands READY while this rehearsal spawn is still in flight
+      const prodBack = new Promise((r) => { onProdReady = r })
+      sup.kill(inst, 'test: the resume-during-boot race', 'prod')
+      await prodBack
+    }
+    if (armed && a.spec.sock.includes('w-prod-') && onProdReady) { prodReadyAt = sup.rows.get(inst).spawning; const r = onProdReady; onProdReady = null; r() }   // the RESUMED worker only (the gate's `start` spawns prod again later, alone)
+    return h
+  }
+  const { dir, sup: s, row } = await setup(w, 'todo', { 'module.json': MJ(), 'backend.js': DATA_BACKEND(1) }, { spawn: spawnWrapped, timing: { quiesceMs: 40, swapStopMs: 100, drainMs: 1000, backoffMs: [10] } })
+  sup = s; inst = row.instance
+  try {
+    assert.equal((await deploy(sup, row, { message: 'first' })).outcome, 'green')
+    assert.equal(sup.rows.get(inst).spawning, 0)
+    fs.writeFileSync(path.join(dir, 'backend.js'), DATA_BACKEND(2))
+    await waitFor(() => sup.resolve('acme', 'todo').dev_rev === 3)
+    armed = true
+    const v = await deploy(sup, row, { message: 'second' })
+    armed = false
+    assert.equal(v.outcome, 'green', JSON.stringify(v))
+    assert.equal(prodReadyAt, 2, 'the resumed prod worker went READY while the rehearsal spawn was in flight (the overlap happened)')
+    const locks = chmods.filter(([m]) => m === 0o710)
+    assert.ok(locks.length >= 2, `the rehearsal's and the gate's spawns each locked the dir once they were the last in flight (${JSON.stringify(chmods)})`)
+    assert.ok(locks.every(([, n]) => n === 0), `never locked with a spawn in flight: ${JSON.stringify(chmods)}`)
+    assert.equal(sup.rows.get(inst).spawning, 0)
+    assert.equal(JSON.parse((await api(sup, row, '/rev', prod)).body).rev, 2)
+  } finally { w.osx.chmod = realChmod; await w.done(sup) }
 })

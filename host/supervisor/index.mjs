@@ -31,6 +31,7 @@ import { createServe } from './serve.mjs'
 import { mkSlot, sockName, REL, deferred, COMMIT_RE, commit12 } from './slots.mjs'
 import { createDeployer, MESSAGES, DEPLOY_TIMING } from './deploy.mjs'
 import { createMetrics } from '../metrics.mjs'
+import { lockSockDir } from '../worker/jail.mjs'
 
 export const DEFAULT_TIMING = Object.freeze({
   quiesceMs: 100, idleMs: 60_000, devIdleMs: 600_000, keepMs: 600_000, swapStopMs: 500, drainMs: 2000, readyTimeoutMs: 8000,
@@ -83,7 +84,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       tmpDir: rel(`tmp/${instance}`), sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
       counter: 0, fingerprint: null, attempted: null,
       building: null, pending: false, broken: null, watcher: null, installing: null, installPending: false, git: Promise.resolve(),
-      savedAt: null, tailwindWarm: false, deploying: null, configStamp: null, rehearsal: null, releasing: null,
+      savedAt: null, tailwindWarm: false, deploying: null, configStamp: null, rehearsal: null, releasing: null, spawning: 0,
       dev: mkSlot('dev', { appDir: dir, dataDir: rel(REL.devData(instance)) }),
       prod: null,
       armIdle: (slot) => armIdle(row, slot ?? row.prod ?? row.dev),
@@ -130,9 +131,22 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   //   error: 'no-ready' | 'spawn-eagain' | 'load-failed' | 'jail' | 'host-fault' (the .atelier tree moved: no real path may leave the host)
   //   opts: {appDir, dataDir, sockFile, lockSocket, ephemeral} — the rehearsal worker (deploy.mjs) is ephemeral: its
   //   exit is nobody's crash; its socket is `0:<uid> 0770` (lockSocket 'shared') so the smoke step dials it as the worker.
+  //   The socket dir `w/<inst>` is shared by every worker of the instance (dev, prod, rehearsal): its write bit is opened by
+  //   prepareDirs before each bind and dropped (0710) only when the LAST spawn in flight has settled — `row.spawning` counts
+  //   them. One worker's READY must never lock the dir under another's `listen` (drill row 9e: a prod resume landing READY
+  //   while the rehearsal worker bound → `listen EACCES … w-rehearsal-6.sock`).
   async function startWorker(row, slot, rev, codeDir, opts = {}) {
     if (!treeOk()) throw { error: 'host-fault', msg: '/work/.atelier renamed or removed' }
-    const spec = await workerSpec(row, slot, rev, codeDir, opts)
+    row.spawning++
+    let spec
+    try {
+      spec = await workerSpec(row, slot, rev, codeDir, opts)
+      return await startPrepared(row, slot, rev, spec, opts)
+    } finally {
+      if (--row.spawning === 0 && spec) { const r = lockSockDir(os, spec, (l) => emit(`[${row.slug}] ${l}`)); if (!r.ok) emit(`[${row.slug}] socket dir lock: ${r.results.at(-1)?.code ?? '?'}`) }
+    }
+  }
+  async function startPrepared(row, slot, rev, spec, opts) {
     prepareDirs(row, spec)
     const st = { ready: null, failed: null, suspendable: false }
     const live = { rev, sock: spec.sock, pid: null, handle: null, slot: slot.name }

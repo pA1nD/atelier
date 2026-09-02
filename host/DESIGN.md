@@ -282,7 +282,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/run/atelier/host-ready` | `0:0 0644` | host after the audit passed and both listeners are up (fleet: after registration) | the kube readiness probe (step 5); unlink + exclusive create (`wx`) — a pre-existing entry is never adopted; unlinked by the launcher on host exit, by the host at teardown and on a host fault |
 | `/run/atelier/dev/` | `0:1000 0710` | launcher | |
 | `/run/atelier/dev/shell.sock` | `0:1000 0660` | host (dev shell) | agent connects; workers EACCES |
-| `/run/atelier/w/<inst>/` | `0:<uid> 0730` at spawn → `0710` after READY | host at spawn (`jailPlan`, re-set before every spawn) / `afterReady` | socket dir: the worker binds, cannot list; after READY it cannot write there either (no filling the `/run/atelier` tmpfs for life) |
+| `/run/atelier/w/<inst>/` | `0:<uid> 0730` at spawn → `0710` once the LAST spawn of the instance in flight is READY | host at spawn (`jailPlan`, re-set before every spawn) / `lockSockDir` from the supervisor (`row.spawning` counts the spawns in flight — the dir is shared by the dev, prod and rehearsal workers, so one worker's READY never drops the bit under another's `listen`; drill row 9e found the prod resume doing exactly that to the rehearsal worker) | socket dir: the worker binds, cannot list; after READY it cannot write there either (no filling the `/run/atelier` tmpfs for life) |
 | `/run/atelier/w/<inst>/w-<slot>-<rev>.sock` | `<uid>:<uid>` at bind → `0:0 0700` after READY | worker binds; host chowns+chmods after READY | one name per slot and rev (`dev`, `prod`, `rehearsal` — §10.3 D5); the rehearsal socket stays `<uid>`-dialable (the smoke step's `ATELIER_SOCK`) until the rehearsal ends; `prepareDirs` re-sets the dir 0730 before the next spawn so a resumed worker can re-bind |
 | `/control/.host-crash` | `1000:1000 0600` | launcher via the uid-1000 helper | JSON lines; the spine reads it (spine lane) |
 | `/tmp/tmux-1000` | `1000:1000 0700` | launcher | |
@@ -1202,6 +1202,12 @@ before (the bundle from the rev dir, static files and `createRequire` from the f
 onto an export; the `prod` block is the idempotence marker across restarts. At every boot the host re-announces the
 prod commit it holds to the spine (`adopt-<c12>`, skipped when the register reply already carries that
 `deployed_rev`) so a migrated registry (`deployed_rev = "legacy"`) converges.
+
+**The socket dir under two spawns.** `w/<inst>` is one dir for the dev, prod and rehearsal sockets; its write bit is
+opened before every bind and dropped after READY — by the supervisor when `row.spawning` (spawns of the instance in
+flight) reaches 0, never from one worker's READY (`afterReady` locks the socket inode only). The install hold makes the
+overlap ordinary: prod is stopped for the freeze, the first request after it resumes prod while the rehearsal worker of
+the same deploy is binding (row 9e's second run: `listen EACCES … w-rehearsal-6.sock`).
 
 **The install hold.** `freeze.py` SIGKILLs every process of the worker uid and BOTH slots run as it: at
 `beforeFreeze` the supervisor stops the dev worker and holds prod under its gate (`holdProd`: stop, the gate released
