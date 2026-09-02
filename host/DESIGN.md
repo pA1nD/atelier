@@ -1207,8 +1207,13 @@ rehearsal's own install (`withInstalling`) takes the same hold; a dev install ar
 root owns it (`ownTree` over the export, the jail plans for `data-dev/`, `rehearsal/`, `backup/`, `prod/`); root never
 writes into the agent's tree (the export is a `git archive` stream as 1000 into a root `tar -x`; the `.gitignore` and
 every git step run as 1000); the hook's config never enters the env the root wrapper chain receives (stdin, as row W);
-`cp -a`/`rm -rf`/`du` on `<uid>:19999 2770` data run as root with group 19999 (no DAC caps); the worker reads its
-export through its gid, uid 1000 gets EACCES; the backup is `0:19999 0750` — the agent reads, no worker traverses.
+`cp -a`/`rm -rf`/`du`/`find` on `<uid>:19999 2770` data run as root with group 19999 (no DAC caps — root cannot even
+`readdir` that dir itself, so "does prod have data" is a `find -quit` child, row C); every path a child receives is
+the real one, never the host's `/proc/self/fd/N/…` form; git runs from cwd `/` (node chdirs before the uid drop —
+root cannot enter the 2750 app folder, `git -C` does as 1000); the rehearsal socket is `0:<uid> 0770` (connect
+needs write on the inode: the host and the smoke hook's worker uid both dial it); the worker reads its export
+through its gid, uid 1000 gets EACCES; the backup is `0:19999 0750` — the agent reads, no worker traverses. Each
+of these four is a row-9 drill finding (2026-09-02): none shows on a laptop, every one bites under the userns caps.
 
 **The apps view** (`GET /_atelier/apps`, both doors): rows carry `rev`/`state` (the prod slot's; `undeployed` before
 the first deploy), `deployed_rev` (40 hex or null), `prod_rev`, `dev_rev`, `prod_state` (`live|stopped|loading|failed|
