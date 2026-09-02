@@ -59,3 +59,26 @@ deploys of `locker` (node:sqlite, EXCLUSIVE lock, writing every 50 ms) under `lo
 assertion per request against `:1845` (the shell's road) every 50 ms — 0 non-200, no lower rev after a higher one,
 max latency < the 10 s hold. Evidence in `out-deploy/` (the in-pod test log, every deploy's stream, the export tree,
 the hook's env, the prod loop samples, agent.log, the final tree).
+
+## Row 9s — the seeded road under the real permission model (DESIGN §10.3 "seeded rows"), `run-seeded.sh` / `remote-seeded.sh` / `seed.sh`
+
+One backgrounded task, ≤ 15 min, throwaway namespace `spike-seeded` (trap-deleted), last line `VERDICT:`:
+
+```
+bash host/drill/rows/run-seeded.sh > host/drill/rows/run-seeded.log
+```
+
+The same pod + fake spine as row 9, with two patches applied to the step-2 template on the node: `ATELIER_SEEDED_APPS=1`
+in the session container's env (the portal-host image's ENV — the launcher keeps `ATELIER_*` for the host) and `seed.sh`
+before the launcher (root makes `/work/apps` 0755 → chown 1000; uid 1000 copies `hello` in as `seedy` with `.atelier-seeded`
++ `.image-stamp` through a `.seeding` rename — the portal entrypoint's shape). Why it exists (review 2026-09-02): B1 was
+invisible to the Mac suite — `setgroups` is a no-op unprivileged and `world()` folders are 0755 — while on the pod the
+claimed folder is `1000:<uid> 2750` and the host is userns root WITHOUT `DAC_OVERRIDE`, so an ungrouped read is EACCES.
+Rows: **9s-a** Ready ⇒ LIVE (S1) — the FIRST `/_atelier/apps` answer after the pod turns Ready already shows `seedy`
+prod-live at rev 1 with a 40-hex `deployed_rev`, no dev slot; the host log has `rev 1 LIVE (prod)`, `host: ready … seeded
+host: after the first scan`, never `module.json missing`, never a `(dev)` line; **9s-b** the model is real and the road
+holds the gid (B1): the folder is `2750 1000:<uid>`, root cannot read its `module.json`, the host's env carries the flag;
+**9s-c** the prod road (the signer from the peer, `:1845`) → 200 `pong`; **9s-d** `releases.jsonl` = ONE adopt row
+(commit = `deployed_rev`, `at` a ms epoch), the fake spine saw the POST; **9s-e** R14 on the pod (S2): 70 s quiet → `rev 1
+STOPPED`, no worker process, the next request 200 + `RESUMED`; **9s-f** a re-seed over the kept `/work` (uid 1000 changes a
+byte) → rev 2 LIVE within a sweep, a new id, a second adopt row. Evidence in `out-seeded/`.
