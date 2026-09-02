@@ -266,7 +266,9 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       throw { error: e?.error ?? 'no-ready', msg: e?.msg ?? e?.message ?? String(e), failed: st.failed }
     }
     slot.configAt = row.configStamp
-    slot.configUsed = JSON.stringify(spec.configEnv); slot.configStale = !!spec.configStale; slot.configHeld = false   // the document this worker runs on
+    // the document this worker runs on — the whole PLAINTEXT, held on the slot for the worker's life so settleStale can compare it;
+    // nothing serialises a slot (appRow picks its fields) and nothing may: a status door that dumped a slot would print secrets
+    slot.configUsed = JSON.stringify(spec.configEnv); slot.configStale = !!spec.configStale; slot.configHeld = false
     return { live, resources: st.ready?.resources ?? null, suspendable: st.suspendable, teardown: !!st.ready?.teardown }
   }
   async function stopLive(row, slot, live, reason) {
