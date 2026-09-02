@@ -504,9 +504,15 @@ function App() {
     if (chromeRev != null && want != null && String(want) !== String(chromeRev)) { window.location.assign(target); return; }
     navigateTo(target);
   }
-  // The picker: a full page load in both modes (client/picker.js).
+  // The picker: a full page load in both modes (client/picker.js). Our own company's home is an app-less document: it
+  // renders the rail's DEFAULT digest, so from an app document on another digest it is a page load too (client/chrome.js).
   function pickWorkspace(ws) {
-    if (ws === COMPANY) { navigateTo(buildUrl(ws, null)); return; }
+    if (ws === COMPANY) {
+      const target = buildUrl(ws, null);
+      const want = targetDigest({ row: null, railDefault: railDefaultRef.current, bootRev: chromeRev });
+      if (chromeRev != null && want != null && String(want) !== String(chromeRev)) { window.location.assign(target); return; }
+      navigateTo(target); return;
+    }
     performPick(document, pickTarget(boot, ws));
   }
 
