@@ -60,8 +60,16 @@ export function deferred() {
 // --- root + group 19999 process specs (the adapter wraps them in setpriv --groups=19999; unprivileged ignores) ---
 const ROOT_G = { uid: 0, gid: 0, groups: [AGENT_DATA_GID], umask: 0o022, cwd: '/', stdio: ['ignore', 'pipe', 'pipe'] }
 const envOf = (hostEnv) => ({ PATH: hostEnv.PATH ?? '/usr/bin:/bin' })
-/** `cp -a <src>/. <dst>` — the contents of src into an existing dst (owners, modes and times kept: root has CAP_CHOWN). */
-export const cpSpec = (src, dst, hostEnv = process.env) => ({ ...ROOT_G, argv: ['cp', '-a', '--', `${String(src).replace(/\/+$/, '')}/.`, dst], env: envOf(hostEnv) })
+/**
+ * The data copy — the contents of src into an existing dst. On Linux (GNU cp, the fleet): ownership, timestamps and
+ * links preserved (root has CAP_CHOWN), modes NOT — cp chowns each copied inode to `<uid>` and then chmods it, and
+ * userns-root has no CAP_FOWNER (`preserving permissions … Operation not permitted`, the row-9 drill); umask 007
+ * gives files 0660 and dirs 0770 (the setgid bit is inherited from the 2770 parent) — DESIGN §3's data shape.
+ * Elsewhere (a laptop, BSD cp) `cp -a` as the developer.
+ */
+export const cpSpec = (src, dst, hostEnv = process.env, { gnu = process.platform === 'linux' } = {}) => (gnu
+  ? { ...ROOT_G, umask: 0o007, argv: ['cp', '-dR', '--preserve=ownership,timestamps,links', '--', `${String(src).replace(/\/+$/, '')}/.`, dst], env: envOf(hostEnv) }
+  : { ...ROOT_G, argv: ['cp', '-a', '--', `${String(src).replace(/\/+$/, '')}/.`, dst], env: envOf(hostEnv) })
 /** `rm -rf <dir>` — a data dir or a rehearsal copy; root enters the `2770` dir through group 19999. */
 export const rmSpec = (dir, hostEnv = process.env) => ({ ...ROOT_G, argv: ['rm', '-rf', '--', dir], env: envOf(hostEnv) })
 /** `du -sk <dir>` → KiB on stdout. */

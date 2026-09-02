@@ -38,10 +38,14 @@ test('pruneBackups (D11): the newest 3 stay; past 1 GiB the oldest go first; the
 })
 
 test('the root+19999 specs (cp -a / rm -rf / du -sk) and row T (tar -x as root, stdin = the archive); ownTree = chmod-then-chown 0:<uid> over what tar left (dirs 0750, files 0640, symlinks lchown only)', () => {
-  for (const s of [cpSpec('/a', '/b', { PATH: '/p' }), rmSpec('/a', { PATH: '/p' }), duSpec('/a', { PATH: '/p' }), lsSpec('/a', { PATH: '/p' })]) {
+  for (const s of [cpSpec('/a', '/b', { PATH: '/p' }, { gnu: false }), rmSpec('/a', { PATH: '/p' }), duSpec('/a', { PATH: '/p' }), lsSpec('/a', { PATH: '/p' })]) {
     assert.equal(s.uid, 0); assert.equal(s.gid, 0); assert.deepEqual(s.groups, [19999]); assert.deepEqual(s.env, { PATH: '/p' }); assert.equal(s.cwd, '/'); assert.deepEqual(s.stdio, ['ignore', 'pipe', 'pipe'])
   }
-  assert.deepEqual(cpSpec('/a', '/b', { PATH: '/p' }).argv, ['cp', '-a', '--', '/a/.', '/b'])
+  assert.deepEqual(cpSpec('/a', '/b', { PATH: '/p' }, { gnu: false }).argv, ['cp', '-a', '--', '/a/.', '/b'])
+  // the fleet (GNU cp): no mode preservation — cp chowns each inode to <uid> then chmods it, EPERM without CAP_FOWNER; umask 007 → 0660/0770
+  const g = cpSpec('/a', '/b', { PATH: '/p' }, { gnu: true })
+  assert.deepEqual(g.argv, ['cp', '-dR', '--preserve=ownership,timestamps,links', '--', '/a/.', '/b']); assert.equal(g.umask, 0o007); assert.deepEqual(g.groups, [19999])
+  assert.equal(cpSpec('/a', '/b').argv.includes('-a'), process.platform !== 'linux')
   assert.deepEqual(rmSpec('/a', { PATH: '/p' }).argv, ['rm', '-rf', '--', '/a'])
   assert.deepEqual(duSpec('/a', { PATH: '/p' }).argv, ['du', '-s', '-k', '--', '/a'])
   assert.deepEqual(lsSpec('/a', { PATH: '/p' }).argv, ['find', '/a', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit'], 'root cannot readdir a 2770 data dir: the has-entries question is a root+19999 child')
