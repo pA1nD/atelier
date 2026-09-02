@@ -406,11 +406,27 @@ test('D14 adopt: a pre-release layout (revision.json without `prod`, `current` �
     assert.ok(w.lines.some((l) => l === `[legacy] adopt: rev 1 (${r.deployed_rev.slice(0, 12)}) committed — prod = the legacy tree until its first deploy`))
     assert.deepEqual(w.modules, [], 'adopt never calls modulesChanged: the registry already holds the prod rev')
     assert.equal((await api(sup, row, '/rev', prod)).status, 200, 'nothing went dark')
-    // idempotent: a second host life over the same tree does not adopt again
+    // idempotent: a second host life over the same tree does not adopt again (one commit, the prod block kept) — it ANNOUNCES
+    // the prod commit it holds to the spine as `adopt-<c12>` (the same id as the adopt: the spine replays it), no ledger row
     await sup.teardown()
     sup = w.make(); await sup.boot(); await sup.scan()
-    assert.equal(w.releases.length, 1); assert.equal(gitLog(dir).length, 1); assert.equal(revJson(w, inst).prod.legacy, true)
+    assert.equal(gitLog(dir).length, 1); assert.equal(revJson(w, inst).prod.legacy, true)
     assert.equal(sup.resolve('acme', 'legacy').deployed_rev, r.deployed_rev)
+    assert.equal(w.releases.length, 2); assert.equal(w.releases[1].id, `adopt-${r.deployed_rev.slice(0, 12)}`); assert.equal(w.releases[0].id, w.releases[1].id); assert.equal(w.releases[1].kind, 'adopt'); assert.equal(w.releases[1].commit, r.deployed_rev); assert.equal(w.releases[1].verdict, 'green')
+    assert.equal(sup.releases(inst).length, 1, 'the announce is not a new release — no ledger row')
+    await sup.scan()
+    assert.equal(w.releases.length, 2, 'one announce per host life')
+    // a migrated registry answers deployed_rev = "legacy" at registration → announced; the commit itself → nothing to announce
+    await sup.teardown()
+    w.registrar.apps = () => new Map([[inst, { slug: 'legacy', deployed_rev: 'legacy' }]])
+    sup = w.make(); await sup.boot(); await sup.scan()
+    assert.equal(w.releases.length, 3); assert.equal(w.releases[2].id, `adopt-${r.deployed_rev.slice(0, 12)}`)
+    assert.ok(w.lines.some((l) => /^\[legacy\] announced prod commit [0-9a-f]{12} \(rev 1\) to the spine \(spine had legacy\)$/.test(l)))
+    await sup.teardown()
+    w.registrar.apps = () => new Map([[inst, { slug: 'legacy', deployed_rev: r.deployed_rev }]])
+    sup = w.make(); await sup.boot(); await sup.scan()
+    assert.equal(w.releases.length, 3, 'the spine already holds the commit: nothing to announce')
+    delete w.registrar.apps
     // a dev save after the adopt: dev moves, prod stays on the legacy rev
     fs.writeFileSync(path.join(dir, 'backend.js'), DATA_BACKEND(2))
     await waitFor(() => sup.resolve('acme', 'legacy').dev_rev === 2)

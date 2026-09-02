@@ -94,7 +94,8 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     st.startedAt = now()
     for (const a of r.apps ?? []) {
       const prev = apps.get(a.instance)
-      apps.set(a.instance, { slug: a.slug, uid: a.uid ?? prev?.uid ?? null, rev: a.rev ?? prev?.rev ?? null, meta: a.meta ?? prev?.meta ?? {}, tombstone_at: a.tombstone_at ?? null })
+      // `deployed_rev` (DESIGN §10.3): a 40-hex commit, "legacy" (a migrated registry, no release row yet) or null — the boot announce's anchor
+      apps.set(a.instance, { slug: a.slug, uid: a.uid ?? prev?.uid ?? null, rev: a.rev ?? prev?.rev ?? null, meta: a.meta ?? prev?.meta ?? {}, tombstone_at: a.tombstone_at ?? null, deployed_rev: a.deployed_rev ?? prev?.deployed_rev ?? null })
     }
     transport.setToken?.(st.token)
   }
@@ -209,9 +210,15 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
     return r
   }
   const hooks = { onConfigStamp }
-  // release(row) → the spine's {ok, id} | null (logged, never thrown): the release row is the host's first
+  // release(row) → the spine's {ok, id} | null (logged, never thrown): the release row is the host's first;
+  // a green deploy/rollback/adopt moves the local `deployed_rev` too (the next boot's anchor)
   async function release(row) {
-    try { return await call('release', row) } catch (e) {
+    try {
+      const r = await call('release', row)
+      const a = apps.get(row?.instance)
+      if (a && row.verdict === 'green' && ['deploy', 'rollback', 'adopt'].includes(row.kind) && typeof row.commit === 'string') a.deployed_rev = row.commit
+      return r
+    } catch (e) {
       const why = e instanceof TransportError ? `spine ${e.status} ${e.body?.error ?? ''}`.trim() : (e?.message ?? String(e))
       log(`registrar: release ${row?.instance ?? '?'} ${row?.kind ?? ''}/${row?.verdict ?? ''} not recorded at the spine (${why}) — kept in releases.jsonl`)
       return null

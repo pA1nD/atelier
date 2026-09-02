@@ -539,6 +539,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         }
         watchRow(row)
         if (row.prod?.adoptPending) await deployer.adopt(row)
+        else if (row.prod?.commit && !row.prod.announced) await deployer.announce(row)   // the boot announce (DESIGN §10.3): the spine learns the prod commit this host holds
         if (needsBuild(row)) rebuild(row)
       }
       // boot reconcile (PLAN §4.3): the registrar tombstones rows with no folder on disk — the DISCOVERED

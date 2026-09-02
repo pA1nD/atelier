@@ -25,7 +25,7 @@ function fakeSpine({ computer = 'computer-1', company = 'acme', bootstrap = 'boo
       if (s.failRegister > 0) { s.failRegister--; return json(res, 503, { error: 'busy' }) }
       s.token = randomBytes(8).toString('hex'); s.epoch = randomBytes(8).toString('hex')
       return json(res, 200, { host_id: computer, epoch: s.epoch, token: s.token, company, origin: `https://${company}.portal.pa1nd.de`, chat: 'chat-1', principal: { id: 'p-agent', name: 'Bayard' },
-        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey) })
+        apps: [...s.apps.entries()].map(([instance, a]) => ({ instance, slug: a.slug, uid: a.uid, rev: a.rev, tombstone_at: a.tombstone_at, deployed_rev: a.deployed_rev ?? null })), shell_public_key_hex: publicKeyHex(shellKeys.publicKey) })
     }
     if (auth !== s.token) return json(res, 401, { error: EPOCH_MOVED })
     let m
@@ -259,6 +259,15 @@ test('release: POST /v1/host/release through call() (epoch-moved re-registers); 
     assert.deepEqual(await r.registrar.release(row), { ok: true, id: 'r-0011223344556677' })
     assert.deepEqual(spine.calls.at(-1).body, row, 'the row goes as is (the body shape Lane R validates)')
     assert.equal(spine.apps.get(a.instance).deployed_rev, 'a'.repeat(40))
+    assert.equal(r.registrar.apps().get(a.instance).deployed_rev, 'a'.repeat(40), 'a green deploy row moves the local deployed_rev too')
+    // the register reply carries deployed_rev ("legacy" | commit | null) — the boot announce's anchor
+    const r2 = rig(spine, { fsx: r.fsx })
+    await r2.registrar.register()
+    assert.equal(r2.registrar.apps().get(a.instance).deployed_rev, 'a'.repeat(40))
+    spine.apps.get(a.instance).deployed_rev = 'legacy'
+    const r3 = rig(spine, { fsx: r.fsx })
+    await r3.registrar.register()
+    assert.equal(r3.registrar.apps().get(a.instance).deployed_rev, 'legacy')
     // epoch moved → re-register → retried once
     spine.revoke()
     assert.deepEqual(await r.registrar.release({ ...row, id: 'r-0011223344556678', verdict: 'red' }), { ok: true, id: 'r-0011223344556678' })

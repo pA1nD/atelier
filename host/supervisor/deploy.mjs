@@ -612,7 +612,8 @@ export function createDeployer(i) {
       store.commitProd(row.instance, rev, { commit: c.commit, message, deployedAt: nowIso(os.now()), legacy: true })
       if (!store.currentDev(row.instance)) store.link(row.instance, 'current-dev', row.dev.rev ?? rev)
       slot.commit = c.commit; slot.legacy = true; slot.appDir = row.dir; slot.adoptPending = false
-      const rel = { id: newReleaseId(), instance: row.instance, kind: 'adopt', commit: c.commit, message, at: nowIso(os.now()), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+      const rel = { id: `adopt-${commit12(c.commit)}`, instance: row.instance, kind: 'adopt', commit: c.commit, message, at: nowIso(os.now()), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+      slot.announced = true
       await recordRelease(row, rel)
       emit(MESSAGES.log.adopt(row.slug, rev, commit12(c.commit)))
       return rel
@@ -620,5 +621,22 @@ export function createDeployer(i) {
     return row.git
   }
 
-  return { deploy, restore, configRelease, adopt, releases, backups }
+  // announce(row): at every boot the host re-tells the spine the prod commit it holds — an `adopt-<c12>` row, green,
+  // idempotent by id (a replay answers 200) — unless the register reply already carried that `deployed_rev`. A
+  // migrated registry starts every app at `deployed_rev = "legacy"`; this is how it converges. One attempt per host
+  // life (a failure is logged; the next boot posts again); no local ledger row — it is not a new release.
+  async function announce(row) {
+    const slot = row.prod
+    if (!slot?.commit || slot.announced || slot.adoptPending) return null
+    slot.announced = true
+    const known = registrar?.apps?.()?.get(row.instance)?.deployed_rev ?? null
+    if (known === slot.commit) return null
+    const rel = { id: `adopt-${commit12(slot.commit)}`, instance: row.instance, kind: 'adopt', commit: slot.commit, message: MESSAGES.git.adoptMessage(slot.rev), at: nowIso(os.now()), by: 'host', verdict: 'green', rev: slot.rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+    if (!registrar?.release) return null
+    const r = await withBudget(Promise.resolve(registrar.release(rel)), D().recordMs).catch((e) => { emit(`[${row.slug}] announce: ${e?.error ?? e?.message ?? e}`); return null })
+    emit(`[${row.slug}] announced prod commit ${commit12(slot.commit)} (rev ${slot.rev}) to the spine${r ? (r.replay ? ' (replay)' : '') : ' — not recorded'}${known ? ` (spine had ${known === 'legacy' ? 'legacy' : commit12(known)})` : ''}`)
+    return rel
+  }
+
+  return { deploy, restore, configRelease, adopt, announce, releases, backups }
 }

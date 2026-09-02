@@ -75,11 +75,8 @@ TP=$(grep -o 'ℹ pass [0-9]*' $OUT/pod-tests.log | awk '{print $3}'); TF=$(grep
 log "row 9t: pass=${TP:-?} fail=${TF:-?} in $(el $t0) s"
 [ "${TF:-1}" = 0 ] && [ -n "$TP" ] || rowfail 9t "pass=${TP:-?} fail=${TF:-?}"
 
-# ---- the agent puts the apps in place (uid 1000): locker (sqlite exclusive) + hello (the peer); a module.json deploy hook records who ran it
-X "$AS1000 sh -c 'for a in locker hello; do cp -r /code/drill-apps/\$a /work/apps/\$a; done; python3 - <<PY
-import json; p=\"/work/apps/locker/module.json\"; j=json.load(open(p)); j[\"deploy\"]=\"id -u > \\\"\$DATA_DIR/hook-uid\\\"; env | sort > \\\"\$DATA_DIR/hook-env\\\"; pwd > \\\"\$DATA_DIR/hook-cwd\\\"\"; json.dump(j, open(p,\"w\"))
-PY
-ls -ldn /work/apps/*; cat /work/apps/locker/module.json'" | sed 's/^/    | /'
+# ---- the agent puts the apps in place (uid 1000): locker (sqlite exclusive; its module.json carries a deploy hook that records who ran it) + hello (the peer)
+X "$AS1000 sh -c 'for a in locker hello; do cp -r /code/drill-apps/\$a /work/apps/\$a; done; ls -ldn /work/apps/*; cat /work/apps/locker/module.json'" | sed 's/^/    | /'
 T_SAVE=$(now)
 for i in $(seq 1 150); do
   apps | py 'import json,sys; a=json.load(sys.stdin); sys.exit(0 if {r["slug"] for r in a if r["dev_state"]=="live"}=={"locker","hello"} else 1)' 2>/dev/null && break
