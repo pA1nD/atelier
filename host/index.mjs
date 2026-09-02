@@ -34,6 +34,7 @@ import { createEvents } from './protocol/events.mjs'
 import { createDevShell } from './protocol/devshell.mjs'
 import { createChromeCache, CACHE_REL } from './chrome/fetch.mjs'
 import { createMetrics } from './metrics.mjs'
+import { createResourceMeter } from './resources.mjs'
 
 export const TEARDOWN_CAP_MS = 30_000
 export const LISTENER_DRAIN_MS = 20_000      // §4.7's 25 s long-poll minus the rest of the teardown inside the 30 s cap
@@ -224,7 +225,10 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const chromeRef = { current: null }
   // the heartbeat reports the digest every prod sheet is BUILT with (`chrome.built()`, review 2026-09-02 S2), never the one
   // merely held: the shell composes an app document's JS from the reported digest and its CSS is the sheet the host built
-  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().filter((w) => w.slot === 'prod').map((w) => w.instance) ?? [], chromeDigest: () => chromeRef.current?.built() ?? null })
+  // the beat's `resources` row (API 50 `machine.resources`, host/resources.mjs): this container's cgroup v2 files + statfs(/work);
+  // absent on a laptop (no cgroup files) and on the first beat (the cpu delta needs two samples) — never zeros
+  const resources = createResourceMeter({ work: cfg.work })
+  const registrar = createRegistrar({ os, dirfd, transport, cfg: rcfg, log: hostLog, liveWorkers: () => supervisorRef.current?.workers().filter((w) => w.slot === 'prod').map((w) => w.instance) ?? [], chromeDigest: () => chromeRef.current?.built() ?? null, resources: resources.sample })
   // the chrome cache (DESIGN §6.4, step 7 ship C): the register/heartbeat answer names the computer's effective release
   // (`registrar.onChrome`), the cache fetches and verifies it AFTER `registered` resolves — never on the boot path. A swap,
   // and every later beat naming the held digest, rebuilds what is behind (`supervisor.rebuildAll`, all or nothing, once the

@@ -33,6 +33,9 @@
 //     (step 7 ship C) — from the register AND heartbeat answers into `onChrome` (host/chrome/fetch.mjs
 //     fetches it); the heartbeat body carries `chrome_digest` = the digest every prod sheet is BUILT with
 //     (`chromeDigest()` → the cache's `built()`; null = none yet). `chromeFetch(digest)` = `GET /v1/host/chrome/<digest>` through `call()`.
+//   - the heartbeat body carries `resources: {cpu, ram:{used,total}, disk:{used,total}}` (API 50 `machine.resources`,
+//     host/resources.mjs) ONLY when `resources()` answers a row — a null (no cgroup files, the first sample) or a
+//     throw sends the beat without the field, never zeros.
 import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
@@ -82,10 +85,11 @@ export function writeClaimRefused(os, dir, why, now = Date.now) {
 }
 
 /**
- * createRegistrar({ os, dirfd, transport, cfg, log, now, fsx, backoffMs, liveWorkers, setTimer })
+ * createRegistrar({ os, dirfd, transport, cfg, log, now, fsx, backoffMs, liveWorkers, resources, setTimer })
  *   liveWorkers: () => instance[] — the supervisor's live workers (heartbeat's visible_apps input)
+ *   resources: () => {cpu, ram, disk} | null — the heartbeat's `resources` row (host/resources.mjs `sample`); null = no field
  */
-export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}, now = Date.now, fsx = nodeFsx, backoffMs = REGISTER_BACKOFF_MS, liveWorkers = () => [], chromeDigest = () => null, setTimer = setTimeout, clearTimer = clearTimeout, onConfigStamp = null, onChrome = null }) {
+export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}, now = Date.now, fsx = nodeFsx, backoffMs = REGISTER_BACKOFF_MS, liveWorkers = () => [], chromeDigest = () => null, resources = () => null, setTimer = setTimeout, clearTimer = clearTimeout, onConfigStamp = null, onChrome = null }) {
   const st = { hostId: null, epoch: null, startedAt: null, company: cfg.company ?? null, origin: cfg.origin ?? null, chat: null, principal: null, token: null, pubKey: null, lastServedAt: null, chrome: null }
   const apps = new Map()              // instance → {slug, uid, rev, meta, tombstone_at}
   const lastServed = new Map()        // instance → ms
@@ -216,9 +220,11 @@ export function createRegistrar({ os, dirfd, transport, cfg = {}, log = () => {}
   }
   async function beat() {
     let r
-    let held = null
+    let held = null, res = null
     try { held = chromeDigest() ?? null } catch {}
-    try { r = await call('heartbeat', { visible_apps: visibleApps(), last_served_at: st.lastServedAt, pod_ip: cfg.podIp ?? null, chrome_digest: held }) } catch (e) { log(`registrar: heartbeat failed (${e?.message ?? e})`); return null }
+    try { res = resources() ?? null } catch {}
+    const body = { visible_apps: visibleApps(), last_served_at: st.lastServedAt, pod_ip: cfg.podIp ?? null, chrome_digest: held, ...(res ? { resources: res } : {}) }
+    try { r = await call('heartbeat', body) } catch (e) { log(`registrar: heartbeat failed (${e?.message ?? e})`); return null }
     // D16: a config PUT at the spine is a release — the reply names the instances whose app_config moved
     for (const c of Array.isArray(r?.config) ? r.config : []) {
       if (typeof c?.instance !== 'string' || c.updated == null) continue
