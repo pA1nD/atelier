@@ -61,21 +61,30 @@ export function deferred() {
 const ROOT_G = { uid: 0, gid: 0, groups: [AGENT_DATA_GID], umask: 0o022, cwd: '/', stdio: ['ignore', 'pipe', 'pipe'] }
 const envOf = (hostEnv) => ({ PATH: hostEnv.PATH ?? '/usr/bin:/bin' })
 /**
- * The data copy — the contents of src into an existing dst (the rehearsal copy, the backup, the restore) — as a LIST
- * of specs run in order. In the fleet (GNU cp, root + group 19999): `cp -dR` (links kept, no times, no modes) under umask
- * 007 (files 0660, dirs 0770, the setgid bit inherited from the 2770 parent — DESIGN §3's data shape) and then ONE
- * chown pass over the copied contents to `<uid>:19999` (CAP_CHOWN). Never `--preserve=ownership`: GNU cp implements it
- * by creating each inode WITHOUT its group/other bits and chmodding them back AFTER the chown — a chmod on a `<uid>`
- * inode, EPERM without CAP_FOWNER (`preserving permissions … Operation not permitted`, the row-9 drill). Unprivileged
- * (the same user copies): no chown pass; a laptop's BSD cp: `cp -a`.
+ * The data copy — the contents of src into an existing dst — as a LIST of specs run in order, by ROLE:
+ *   `data`   (the rehearsal copy, the restore's staging tree): umask 007, then — root still owns every new inode — one chmod
+ *            pass to DESIGN §3's data shape (dirs 2770, files 0660) and ONE chown pass to `<uid>:19999` (CAP_CHOWN).
+ *   `backup` (the pre-migration snapshot, the restore's snapshot): umask 027 (dirs 0750, files 0640) and the chown pass to
+ *            `0:19999` — root owns the bytes, the agent reads through gid 19999, the app's uid never owns (and can never
+ *            chmod) its own backups (~/.claude/rules/file-ownership.md: the owner can always chmod).
+ * In the fleet (GNU cp, root + group 19999): `cp -dR` (links kept, no times, no modes). Never `--preserve=ownership`: GNU cp
+ * implements it by creating each inode WITHOUT its group/other bits and chmodding them back AFTER the chown — a chmod on a
+ * `<uid>` inode, EPERM without CAP_FOWNER (`preserving permissions … Operation not permitted`, the row-9 drill). The chmod
+ * pass here runs BEFORE the chown pass for the same reason. Unprivileged (the same user copies): no chmod/chown passes; a
+ * laptop's BSD cp: `cp -a`.
  */
-export function copySpecs(src, dst, { uid, hostEnv = process.env, gnu = process.platform === 'linux', privileged = true } = {}) {
+export const BACKUP_OWNER = Object.freeze({ uid: 0, gid: AGENT_DATA_GID })
+export function copySpecs(src, dst, { uid, role = 'data', hostEnv = process.env, gnu = process.platform === 'linux', privileged = true } = {}) {
   const from = `${String(src).replace(/\/+$/, '')}/.`
   if (!gnu) return [{ ...ROOT_G, argv: ['cp', '-a', '--', from, dst], env: envOf(hostEnv) }]
   // `-d` = --no-dereference --preserve=links; no timestamps either: cp would utimensat the DESTINATION dir itself (`dst/.`,
   // a `<uid>:19999` inode) — EPERM without FOWNER; nobody reads a backup's mtimes
-  const specs = [{ ...ROOT_G, umask: 0o007, argv: ['cp', '-dR', '--', from, dst], env: envOf(hostEnv) }]
-  if (privileged) specs.push({ ...ROOT_G, argv: ['find', dst, '-mindepth', '1', '-exec', 'chown', '-h', `${uid}:${AGENT_DATA_GID}`, '{}', '+'], env: envOf(hostEnv) })
+  const backup = role === 'backup'
+  const specs = [{ ...ROOT_G, umask: backup ? 0o027 : 0o007, argv: ['cp', '-dR', '--', from, dst], env: envOf(hostEnv) }]
+  if (!privileged) return specs
+  const find = (args) => ({ ...ROOT_G, argv: ['find', dst, '-mindepth', '1', ...args, '{}', '+'], env: envOf(hostEnv) })
+  if (!backup) specs.push(find(['-type', 'd', '-exec', 'chmod', '2770']), find(['-type', 'f', '-exec', 'chmod', '0660']))
+  specs.push(find(['-exec', 'chown', '-h', backup ? `${BACKUP_OWNER.uid}:${BACKUP_OWNER.gid}` : `${uid}:${AGENT_DATA_GID}`]))
   return specs
 }
 /** `rm -rf <dir>` — a data dir or a rehearsal copy; root enters the `2770` dir through group 19999. */
@@ -125,8 +134,9 @@ export function pruneBackups(rows, { keep = BACKUP_KEEP, capBytes = BACKUP_CAP_B
   return [...drop]
 }
 
-/** backupFeasible({dataBytes, freeBytes}) → null | the refusal text (D11): data > 1 GiB or free < 2× its size. */
+/** backupFeasible({dataBytes, freeBytes}) → null | the refusal text (D11): data > 1 GiB, free < 2× its size, or a size that could not be measured. */
 export function backupFeasible({ dataBytes, freeBytes }, { capBytes = DATA_CAP_BYTES, factor = FREE_FACTOR } = {}) {
+  if (!Number.isFinite(dataBytes)) return 'prod data size unknown'   // an unmeasured size is never a safe one (`du` failed): refuse
   if (dataBytes > capBytes) return `prod data is ${mb(dataBytes)} MB (> ${Math.round(capBytes / 1024 / 1024)} MB cap)`
   if (freeBytes != null && freeBytes < factor * dataBytes) return `free space ${mb(freeBytes)} MB < ${factor}× the data (${mb(dataBytes)} MB)`
   return null

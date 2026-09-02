@@ -1,4 +1,5 @@
 // Shared fakes for the protocol-server lane's tests (host/test/protocol-*.test.js). Not a test file.
+import { MESSAGES } from '../supervisor/deploy.mjs'
 import http from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -82,11 +83,12 @@ export function fakeSupervisor({ rows = [], assets = {} } = {}) {
         } finally { row.deploying = false }
       })()
     },
-    restore(instance, backup, { by, onStep }) {
+    restore(instance, backup, { by, yes = false, onStep }) {
       const row = rows.find((r) => r.instance === instance)
       if (!row) throw Object.assign(new Error('unknown app'), { status: 404 })
       if (!backup || !/^\d{8}T\d{6}Z-rev\d+-[0-9a-f]+$/.test(backup)) throw Object.assign(new Error('unknown backup'), { status: 404 })
-      this.verbs.push({ verb: 'restore', instance, backup, by })
+      if (row.state !== 'down' && !yes) throw Object.assign(new Error(MESSAGES.refuse.restoreLive(row.slug, backup)), { status: 409 })
+      this.verbs.push({ verb: 'restore', instance, backup, yes, by })
       return (async () => { const v = { t: 'verdict', outcome: 'green', kind: 'restore', slug: row.slug, rev: row.rev, backup, url: `http://127.0.0.1:1844/acme/${row.slug}` }; onStep?.({ t: 'step', name: 'restore', ms: 2, ok: true }); onStep?.(v); return v })()
     },
     releases: (instance) => (rows.find((r) => r.instance === instance)?.releases ?? []),

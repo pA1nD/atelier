@@ -142,14 +142,15 @@ test('unprivileged(): npm runs in the app folder as the current user, no scratch
   assert.match(lines[0], /unprivileged .* freeze skipped/)
 })
 
-test('dest (DESIGN §10.3 D8): the prod export install — the manifest copy reads the export as the worker, the freeze lands the tree there with `--dest <rel>` (root-owned, no agent step)', async () => {
+test('dest (DESIGN §10.3 D8): the prod export install — `take` (never thaw: the dev tree keeps its node_modules), the manifest copy reads the export as the worker, the freeze lands the tree there with `--dest <rel>` (root-owned, no agent step)', async () => {
   const state = { fs: {}, fds: new Map([[3, '/work/.atelier']]) }
   const order = []
-  const os = driven(state, (argv) => { const k = kind(argv); order.push(k); if (k === 'freeze:thaw') return { code: 0, stdout: 'FREEZE-OK thaw demo files=0 noop=1 total_ms=0.3' }; if (k === 'freeze:freeze') return { code: 0, stdout: 'FREEZE-OK freeze demo killed=0 files=120 chown_ms=3.1 rename_ms=0.4 total_ms=5.0' } })
+  const os = driven(state, (argv) => { const k = kind(argv); order.push(k); if (k === 'freeze:take') return { code: 0, stdout: 'FREEZE-OK take demo files=1 total_ms=0.3' }; if (k === 'freeze:thaw') return { code: 2, stdout: 'FREEZE-ABORT thaw demo: a thaw would move the dev tree out of the app folder' }; if (k === 'freeze:freeze') return { code: 0, stdout: 'FREEZE-OK freeze demo killed=0 files=120 chown_ms=3.1 rename_ms=0.4 total_ms=5.0' } })
   const exportSpec = { ...spec, appDir: '/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp' }
   const r = await installDeps({ os, dirfd: 3, spec: exportSpec, hostEnv, log: () => {}, dest: 'prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp' })
   assert.deepEqual(r, { ok: true, ms: 0, files: 120 })
-  assert.deepEqual(order, ['freeze:thaw', 'cp', 'npm', 'freeze:freeze'])
+  assert.deepEqual(order, ['freeze:take', 'cp', 'npm', 'freeze:freeze'])
+  assert.deepEqual(state.calls.filter((c) => c[0] === 'spawn')[0][1].slice(-7), ['take', 'i-0123456789abcdef', 'demo', '20001', '20001', '--dirfd', '3'])
   const spawns = state.calls.filter((c) => c[0] === 'spawn').map((c) => ({ argv: c[1], spec: c[2] }))
   assert.deepEqual(spawns[1].spec.argv.slice(-2), ['/work/.atelier/prod/i-0123456789abcdef/0f3c9a1b2d4e.tmp', `${SCRATCH}/build`])
   assert.equal(spawns[1].spec.uid, 20001, 'the manifest copy reads the 0:<uid> export as the worker')
@@ -178,6 +179,7 @@ test('freeze.py: compiles, refuses an unknown mode, refuses a missing scratch un
   const bad = spawnSync('python3', [FREEZE_PATH, 'bogus', 'i-x', 'demo', '20001', '20001'], { encoding: 'utf8' })
   assert.equal(bad.status, 2)
   assert.equal(bad.stdout.trim(), 'FREEZE-ABORT bogus demo: mode?')
+  for (const mode of ['freeze', 'thaw', 'take', 'cleanup']) assert.notEqual(spawnSync('python3', [FREEZE_PATH, mode, 'i-x', 'demo', '20001', '20001', '--dirfd', '3'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', 'ignore'] }).stdout.trim(), `FREEZE-ABORT ${mode} demo: mode?`, `${mode} is a mode`)
   const root = fs.mkdtempSync(path.join('/tmp', 'atf-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const fd = fs.openSync(root, 'r')

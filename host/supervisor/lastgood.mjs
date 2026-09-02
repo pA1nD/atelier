@@ -5,9 +5,13 @@
 //                          `rev` = the counter (bumped by dev and prod builds alike, LIVE and FAILED,
 //                          persisted BEFORE the worker starts); `live` = the DEV rev `current-dev`
 //                          names; `fingerprint` = the watcher fingerprint of the source the dev rev was
-//                          built from; `prod` = {rev, commit, deployedAt, message, legacy?} — the PROD
-//                          slot (DESIGN §10.3 D4): `commit` is the deployed git sha, `legacy` marks a
-//                          row adopted from the pre-release layout (served from the app folder).
+//                          built from; `prod` = {rev, commit, deployedAt, message, legacy?, down?, releasing?}
+//                          — the PROD slot (DESIGN §10.3 D4): `commit` is the deployed git sha, `legacy`
+//                          marks a row adopted from the pre-release layout (served from the app folder);
+//                          `down` = {step, error, backup, commit, rev, at} the DOWN marker of a failed
+//                          release (D10 — on disk, so a host restart keeps the app down); `releasing` =
+//                          {id, commit, rev, backup, at} while a migration runs on prod data (a host that
+//                          dies inside that window boots the app DOWN, never the old rev over migrated data).
 //   <inst>/current         symlink → ../last-good/<inst>/rev-N — the PROD rev (what boot() resumes and
 //                          `?rev=` addresses); swapped by rename
 //   <inst>/current-dev     symlink → ../last-good/<inst>/rev-N — the DEV rev (the dev shell's)
@@ -117,6 +121,14 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       if (legacy) prod.legacy = true
       writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev: Math.max(cur.rev ?? 0, rev), prod }, 0o600)
       link(inst, 'current', rev)
+    },
+    // prodPatch(inst, patch) — merges fields into the `prod` block (a key set to undefined is removed): the DOWN
+    // marker and the in-flight release marker. commitProd writes a fresh block, so a green release clears both.
+    prodPatch(inst, patch) {
+      const cur = store.revision(inst) ?? {}
+      const prod = { ...(cur.prod ?? {}), ...patch }
+      for (const k of Object.keys(patch)) if (patch[k] === undefined) delete prod[k]
+      writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, prod }, 0o600)
     },
     // link(inst, name, rev) — one pointer symlink, swapped by rename
     link: (inst, name, rev) => link(inst, name, rev),

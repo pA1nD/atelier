@@ -1,5 +1,6 @@
 // host/protocol/devshell.mjs — the dev token on both listeners, the 1.x document, assets, same routes, WS frames.
 import test from 'node:test'
+import { MESSAGES } from '../supervisor/deploy.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -215,7 +216,9 @@ test('the release verbs (D6): POST /_atelier/deploy streams NDJSON step lines + 
     assert.deepEqual(ls.at(-1), r.supervisor.rows[0].script)
     // restore
     res = await post('/_atelier/restore', { app: 'todo', backup: '20260902T104702Z-rev3-0f3c9a1b2d4e' })
-    assert.equal(res.status, 200); assert.equal(lines(res).at(-1).kind, 'restore'); assert.equal(r.supervisor.verbs.at(-1).backup, '20260902T104702Z-rev3-0f3c9a1b2d4e')
+    assert.equal(res.status, 409, 'a LIVE app: the refusal names --yes'); assert.deepEqual(JSON.parse(res.body.toString()), { error: MESSAGES.refuse.restoreLive('todo', '20260902T104702Z-rev3-0f3c9a1b2d4e') })
+    res = await post('/_atelier/restore', { app: 'todo', backup: '20260902T104702Z-rev3-0f3c9a1b2d4e', yes: true })
+    assert.equal(res.status, 200); assert.equal(lines(res).at(-1).kind, 'restore'); assert.equal(r.supervisor.verbs.at(-1).backup, '20260902T104702Z-rev3-0f3c9a1b2d4e'); assert.equal(r.supervisor.verbs.at(-1).yes, true)
     assert.equal((await post('/_atelier/restore', { app: 'todo', backup: '../x' })).status, 404)
     // the lists
     r.supervisor.rows[0].releases = [{ id: 'r-1', kind: 'deploy', verdict: 'green', rev: 3, commit: 'c'.repeat(40), message: 'first', at: '2026-09-02T10:00:00.000Z', by: 'agent:p-agent' }]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""freeze.py freeze|thaw|cleanup <instance> <slug> <workeruid> <appgid> [--dirfd N] [--dest <rel>]
+"""freeze.py freeze|thaw|take|cleanup <instance> <slug> <workeruid> <appgid> [--dirfd N] [--dest <rel>]
 (runs as userns-root with caps {SETUID, SETGID, CHOWN, KILL} only — no DAC caps, no FOWNER)
 
 Layout (DESIGN §3): scratch/<instance> is root:appgid 0750 holding home/ (the worker's npm HOME + cache,
@@ -9,6 +9,10 @@ freeze:  build/node_modules (worker-owned) -> /work/apps/<slug>/node_modules own
          no group/other write, no setuid/setgid; package-lock.json copied beside it.
 thaw:    the reverse, so the worker can re-run `npm install` in place (second install = no-op). A no-op when the
          app folder holds no node_modules.
+take:    build/ becomes the worker's again WITHOUT touching the agent's tree (the prod-export install, --dest): a dev
+         freeze left build/ to uid 1000 and moved node_modules into /work/apps/<slug> — thaw would move that tree back
+         here and the DEV slot would lose its deps at every deploy. What build/ holds (the lock copy, a tree a dead
+         freeze left) is chowned to the worker; a root-owned build/ (a freeze that died mid-walk) is cleaned up first.
 cleanup: after an aborted freeze — take every dir, remove node_modules + lock from build/, hand build/ back.
 
 Mechanism: the worker's processes are SIGKILLed first (CAP_KILL); every step is dirfd-relative (openat /
@@ -123,7 +127,7 @@ def copy_at(src_name, sfd, dst_name, dfd, mode_bits=0o644):
     d = os.open(dst_name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode_bits, dir_fd=dfd)
     with os.fdopen(s, 'rb') as fi, os.fdopen(d, 'wb') as fo: shutil.copyfileobj(fi, fo)
 
-if mode not in ('freeze', 'thaw', 'cleanup'): die('mode?')
+if mode not in ('freeze', 'thaw', 'take', 'cleanup'): die('mode?')
 if DEST is not None and (DEST.startswith('/') or '..' in DEST.split('/')): die(f'dest must be dirfd-relative: {DEST}')
 t0 = time.monotonic()
 sfd = opendir('scratch', DIRFD, want_uid=0) if DIRFD is not None else opendir(f'{ATELIER}/scratch', want_uid=0)
@@ -213,33 +217,43 @@ elif mode == 'thaw':
         except FileNotFoundError: pass
         os.fchown(bfd, WUID, AGID)
         T['chown_ms'] = round((time.monotonic() - t1) * 1000, 1)
-elif mode == 'cleanup':
-    # after an aborted freeze: build/ may be root-, worker- or agent-owned with a half-taken tree. Take every dir
-    # (root can then unlink inside it without DAC caps), remove node_modules + lock, hand build back to the worker.
-    T['killed'] = kill_uid(WUID)
+elif mode in ('take', 'cleanup'):
     ifd = opendir(inst, sfd, want_uid=0)
     st = lstat_at('build', ifd)
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode): die('build is not a real directory')
-    os.chown('build', 0, AGID, dir_fd=ifd, follow_symlinks=False); bfd = opendir('build', ifd, want_uid=0)
-    def take_all(fd):
-        n = 0
-        for e in os.scandir(fd):
-            st = e.stat(follow_symlinks=False)
+    if mode == 'take' and st.st_uid == WUID:
+        T['files'] = 0; T['noop'] = 1                # the worker's already (a first install, or after a --dest freeze)
+    elif mode == 'take' and st.st_uid == AGENT:
+        # after a dev freeze: build/ is the agent's, holding its copy of the lock (and whatever a dead agent step left);
+        # everything below goes to the worker — a foreign inode aborts, as in every walk. The app folder is never opened.
+        os.chown('build', 0, AGID, dir_fd=ifd, follow_symlinks=False); bfd = opendir('build', ifd, want_uid=0)
+        T['files'] = chown_walk(bfd, AGENT, WUID, AGID)
+        os.fchmod(bfd, 0o755); os.fchown(bfd, WUID, AGID)
+    else:
+        # cleanup (after an aborted freeze), or take over a root-owned build/ (a freeze died mid-walk): build/ may be
+        # root-, worker- or agent-owned with a half-taken tree. Take every dir (root can then unlink inside it without
+        # DAC caps), remove node_modules + lock, hand build back to the worker.
+        T['killed'] = kill_uid(WUID)
+        os.chown('build', 0, AGID, dir_fd=ifd, follow_symlinks=False); bfd = opendir('build', ifd, want_uid=0)
+        def take_all(fd):
+            n = 0
+            for e in os.scandir(fd):
+                st = e.stat(follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    os.chown(e.name, 0, st.st_gid, dir_fd=fd, follow_symlinks=False)
+                    sub = opendir(e.name, fd, want_uid=0); os.fchmod(sub, 0o700); n += 1 + take_all(sub); os.close(sub)
+            return n
+        try:
+            st = lstat_at('node_modules', bfd)
             if stat.S_ISDIR(st.st_mode):
-                os.chown(e.name, 0, st.st_gid, dir_fd=fd, follow_symlinks=False)
-                sub = opendir(e.name, fd, want_uid=0); os.fchmod(sub, 0o700); n += 1 + take_all(sub); os.close(sub)
-        return n
-    try:
-        st = lstat_at('node_modules', bfd)
-        if stat.S_ISDIR(st.st_mode):
-            os.chown('node_modules', 0, st.st_gid, dir_fd=bfd, follow_symlinks=False)
-            nfd = opendir('node_modules', bfd, want_uid=0); os.fchmod(nfd, 0o700); T['dirs_taken'] = take_all(nfd); os.close(nfd)
-            shutil.rmtree('node_modules', dir_fd=bfd)
-        else: os.unlink('node_modules', dir_fd=bfd)
-    except FileNotFoundError: pass
-    try: os.unlink('package-lock.json', dir_fd=bfd)
-    except FileNotFoundError: pass
-    os.fchmod(bfd, 0o755); os.fchown(bfd, WUID, AGID)
+                os.chown('node_modules', 0, st.st_gid, dir_fd=bfd, follow_symlinks=False)
+                nfd = opendir('node_modules', bfd, want_uid=0); os.fchmod(nfd, 0o700); T['dirs_taken'] = take_all(nfd); os.close(nfd)
+                shutil.rmtree('node_modules', dir_fd=bfd)
+            else: os.unlink('node_modules', dir_fd=bfd)
+        except FileNotFoundError: pass
+        try: os.unlink('package-lock.json', dir_fd=bfd)
+        except FileNotFoundError: pass
+        os.fchmod(bfd, 0o755); os.fchown(bfd, WUID, AGID)
 
 T['total_ms'] = round((time.monotonic() - t0) * 1000, 1)
 print(f'FREEZE-OK {mode} {app} ' + ' '.join(f'{k}={v}' for k, v in T.items()))

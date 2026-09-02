@@ -268,7 +268,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/.atelier/prod/<inst>/<commit12>` | `0:<uid> 0750`; files 0640; `node_modules` `0:<uid>` (`|050`/`|040`) | host at a deploy (rows A/T, then `freeze.py --dest`) | the released commit's export = the prod worker's cwd (`createRequire` base, static files); no `.git`, no `data/`; the current and the previous release's are kept, older ones removed; EACCES to uid 1000 |
 | `/work/.atelier/rehearsal/<inst>` | `0:<uid> 0750` | host at a deploy | `data/` `<uid>:19999 2770` = the `cp -a` copy of prod data the rehearsal worker and hooks run against; deleted when the rehearsal ends |
 | `/work/.atelier/backup` | `0:0 0711` | host (`hostDirs`) | |
-| `/work/.atelier/backup/<inst>/<YYYYMMDDTHHMMSSZ-revN-commit12>` | `0:19999 0750`; inside: `<uid>:19999` (one chown pass after the copy), modes from umask 007 (files 0660, dirs 0770+setgid), times = the copy's — neither modes nor times are "preserved": that would be a chmod/utimensat on a `<uid>` inode | host under the gate (row C) | the pre-migration snapshot of prod data; last 3 per app, ≤ 1 GiB total; the agent reads through gid 19999, no worker traverses; never auto-restored (`atelier restore`) |
+| `/work/.atelier/backup/<inst>/<YYYYMMDDTHHMMSSZ-revN-commit12>` | `0:19999 0750`; inside: `0:19999` (one chown pass after the copy), modes from umask 027 (files 0640, dirs 0750), times = the copy's — root owns every byte, the agent reads through gid 19999, the app's uid never owns (so never chmods) its own backups; neither modes nor times are "preserved": that would be a chmod/utimensat on a foreign inode | host under the gate (row C) | the pre-migration snapshot of prod data (a deploy's `backup`, a restore's `snapshot`); listed only once its `backups.json` marker landed (a half-copied dir is swept, never restorable); last 3 per app, ≤ 1 GiB total; never auto-restored (`atelier restore`) |
 | `/work/.atelier/last-good` | `0:0 0711` | launcher | |
 | `/work/.atelier/last-good/<inst>` | `0:<uid> 0750` | host at claim | the worker resumes from it; agent EACCES |
 | `/work/.atelier/last-good/<inst>/rev-N/` | `0:<uid> 0750`; files 0640 | host per LIVE build | `backend.js` (bundle), `frontend/<file>.js` (transformed), `styles.css`, `revision.json`; written to `rev-N.tmp-<pid>`, fsynced, renamed; the previous rev kept, older pruned |
@@ -1177,16 +1177,21 @@ backup?, rehearsal:{ms, partial?}, release}` line; `atelier rollback <slug> <com
 |---|---|---|---|
 | 1 | `commit` | the dev tree committed as uid 1000 (row G: `add -A`, `commit -m`, `rev-parse HEAD`; `nothing to commit` = the HEAD); a rollback resolves its commit instead | verdict `red` at `commit` — the CLI line and the agent.log `RED` line, no app-error (nothing was rehearsed) |
 | 2 | `rehearsal` = `copy` → `export` → `install` → `build` → `hook` → `boot` → `probe` → `test` → `smoke`, ≤ 240 s | prod untouched: `cp -a` prod data → `rehearsal/<inst>/data` (> 1 GiB → skipped, `partial`); `git archive <commit>` as 1000 \| `tar -x` as root into `prod/<inst>/<c12>.tmp`, chmod-then-chown `0:<uid>` (rows A/T); `installDeps({dest})` when the export has a `package.json` (row I as the worker in scratch, `freeze.py --dest` renames `node_modules` in as root — same setuid refusal); the three artefacts into `rev-N` from the export; `module.json` `deploy` as the worker with `DATA_DIR` = the copy (row K, ≤ 60 s); a worker booted against the copy (`w-rehearsal-<rev>.sock`, READY ≤ 8 s); probe `GET /_atelier/health` then `healthz ?? '/'` (< 500, ≤ 5 s); `test` (≤ 60 s) and `smoke` (≤ 30 s, `ATELIER_SOCK` = the rehearsal socket, `BASE_URL=http://localhost`); stop, delete the copy | verdict `red`: ONE `build` report `rehearsal red at <step>: <error>` + hint `nothing deployed — <slug> stays on rev N (<c12>); fix and run atelier deploy again` at the prod rev; the rev dir removed; the export kept for the next attempt of the same commit |
-| — | backup feasibility | BEFORE the gate (D11): prod data > 1 GiB or free space < 2× its size → `red` at `backup` (`backup impossible: …`) unless `--no-backup` | prod never stopped |
-| 3 | the gate (D9): `drain` (inflight 0, ≤ 2 s) → `stop` old (its own 2 s drain) → `backup` (`cp -a` prod data → `backup/<inst>/<id>`, ≤ 30 s; last 3 / ≤ 1 GiB, oldest pruned, the newest always kept) → `migrate` (the hook on PROD data, ≤ 60 s; a rollback runs none) → `start` (≤ 8 s) → `probe` (≤ 5 s) → `release` | `slot.gate` is a promise: a prod request arriving while it is set waits ≤ `GATE_HOLD_MS` (10 s), then answers the shell's exact waking bytes (503 `{"waking":true}`, `retry-after: 2`, `x-atelier-waking: 1`, `cache-control: no-store` — `protocol-samebytes` pins them to `shell/proxy.mjs`); the host is the only party that knows in-flight counts | verdict `failed` (D10): `slot.state = 'down'`, every request 503 `{"error":"app down after a failed deploy","backup":"<id>"}` (no waking flag) until a green deploy or a restore; ONE `worker` report `deploy of <c12> failed at <step>: <error> — <slug> is DOWN` + hint naming the backup; no automatic rollback, no automatic restore |
+| — | the data question | BEFORE the rehearsal and again BEFORE the gate (D11): prod data > 1 GiB or free space < 2× its size → `red` at `backup` (`backup impossible: …`) unless `--no-backup`; an UNKNOWN answer — the `find -quit` or `du` child failed, was killed or timed out, EACCES — is `red` at `backup` too (`backup impossible: could not read/measure the data dir (…)`) and `--no-backup` does not lift it: unknown never means "no data", a migration never runs on prod data without a snapshot behind it | prod never stopped; nothing exported |
+| 3 | the gate (D9): `drain` (inflight 0, ≤ 2 s) → `stop` old (its own 2 s drain) → `backup` (`cp -a` prod data → `backup/<inst>/<id>`, ≤ 30 s; last 3 / ≤ 1 GiB, oldest pruned, the newest always kept) → `migrate` (the hook on PROD data, ≤ 60 s; a rollback runs none) → `start` (≤ 8 s) → `probe` (≤ 5 s) → `release` | `slot.gate` is a promise: a prod request arriving while it is set waits ≤ `GATE_HOLD_MS` (10 s), then answers the shell's exact waking bytes (503 `{"waking":true}`, `retry-after: 2`, `x-atelier-waking: 1`, `cache-control: no-store` — `protocol-samebytes` pins them to `shell/proxy.mjs`); the host is the only party that knows in-flight counts | verdict `failed` (D10): `slot.state = 'down'`, every request 503 `{"error":"app down after a failed deploy","backup":"<id>"}` (no waking flag) until a green deploy or a restore; ONE `worker` report `deploy of <c12> failed at <step>: <error> — <slug> is DOWN` + hint naming the backup; no automatic rollback, no automatic restore. DOWN is on disk: `revision.json.prod.down = {step, error, backup, commit, rev, at}` — a host restart boots the app DOWN and says so (`[<slug>] boot: rev N stays DOWN (…)`), a config stamp on a DOWN app is noted and never released; `prod.releasing = {id, commit, rev, backup, at}` is written before the migration and cleared by `record`, so a host that dies inside the gate boots DOWN too (never the old rev over migrated data). The new rev dir is pinned for the whole verb (`row.releasing`, kept by the rev-dir prune) |
 | 4 | `record` | `revision.json.prod = {rev, commit, deployedAt, message}` + `current` → the new rev (D4); `onSwap` (`modulesChanged`, invalidate, `setRunning`); the release row `{id, instance, kind, commit, message, at, by, verdict, rev, rehearsal:{ms, partial, steps}, backup, error, changelog:null}` appended to `<inst>/releases.jsonl` (0600, last 50) then `registrar.release()` = `POST /v1/host/release` (≤ 30 s; a 404/5xx/network failure is logged, never blocks); `atelier_host_deploy_ms{app,outcome}` + `_total`; agent.log `[<slug>] rev N LIVE (prod) commit <c12> in <ms> ms`; the export two releases back removed | — |
 
 Red and failed deploys record a release row too (`verdict` red/failed, `error` = the report's message). Ids: `r-<16 hex>`;
 an adopt's `adopt-<commit12>` (the spine replays by id).
 
-**Restore** (`atelier restore <slug> <id>`): the gate → drain → stop → `rm -rf` prod data (row C) → the jail plan
-re-creates it → `cp -a` the backup in → start the CURRENT prod rev → probe → release; a row `{kind:'restore'}`; the
-backup stays. **Config release** (D16): the heartbeat reply's `config: [{instance, updated}]` reaches
+**Restore** (`atelier restore <slug> <id> [--yes]`): refused unless the app is DOWN or the caller passed `--yes` (409,
+`<slug> is live: restore replaces its prod data with backup <id> (everything written since is lost) — run atelier restore
+<slug> <id> --yes to confirm`); the data question first (the snapshot impossible → `restore RED at snapshot: …`, nothing
+moved) → the gate → drain → stop → `snapshot` (today's prod data as a backup row like the deploy's, the same caps) →
+`restore` (the backup copied into `data/<inst>.restore` as `<uid>:19999`, then two renames: `data/<inst>` → `.old`,
+`.restore` → `data/<inst>`, then `.old` removed — prod is never left empty by a copy that died halfway; boot puts a
+`.old` back when no `data/<inst>` exists and sweeps both leftovers) → start the CURRENT prod rev → probe → release; a row
+`{kind:'restore'}`; the backup stays, the DOWN marker is cleared. **Config release** (D16): the heartbeat reply's `config: [{instance, updated}]` reaches
 `supervisor.onConfigStamp`; a prod worker spawned before that stamp (`slot.configAt`) is restarted under the gate
 (stop → start, the config is fetched at spawn) → probe → a row `{kind:'config'}`; at most one per app per beat; a
 stopped worker just notes the stamp (the next resume fetches the config). **Adopt** (D14): a row whose `revision.json`
@@ -1200,8 +1205,12 @@ prod commit it holds to the spine (`adopt-<c12>`, skipped when the register repl
 
 **The install hold.** `freeze.py` SIGKILLs every process of the worker uid and BOTH slots run as it: at
 `beforeFreeze` the supervisor stops the dev worker and holds prod under its gate (`holdProd`: stop, the gate released
-when `row.installing` settles) — requests wait, then resume the prod worker (≤ 100 ms held), none fails. The
-rehearsal's own install (`withInstalling`) takes the same hold; a dev install arriving meanwhile runs after it.
+when `row.installing` settles) — requests wait for the freeze (kill + chown walk + rename) and a cold resume of the
+prod worker; past the 10 s hold they get the waking 503. The rehearsal's own install (`withInstalling`) takes the same
+hold — so a deploy of an app WITH dependencies is not "prod untouched" for the length of the freeze; drill row 9e
+measures it (the numbers land in its VERDICT line). A dev install arriving meanwhile runs after it. Its install is
+`freeze.py take` (build/ back to the worker WITHOUT touching the agent's tree — a thaw would move the dev tree's
+`node_modules` into the export) → npm → `freeze.py --dest`.
 
 **Ownership** (the review lens): every new row is root-created under the dirfd tree and chmod-then-chown'ed while
 root owns it (`ownTree` over the export, the jail plans for `data-dev/`, `rehearsal/`, `backup/`, `prod/`); root never
@@ -1219,15 +1228,22 @@ of these five is a row-9 drill finding (2026-09-02): none shows on a laptop, eve
 the first deploy), `deployed_rev` (40 hex or null), `prod_rev`, `dev_rev`, `prod_state` (`live|stopped|loading|failed|
 down|null`), `dev_state`. `supervisor.workers()` lists every slot's worker with `key` (`<inst>/<slot>`) and `slot` — the
 watchdog keys its state by `key` and passes `slot` into `kill(instance, why, slot)`; the heartbeat's `visible_apps`
-counts prod workers only.
+counts prod workers only. Three workers of one app can be live at once (dev + prod + rehearsal), each under its own
+`rlimits.data` (1 GiB) — the pod's 8 Gi is the ceiling, not a per-app one; a rehearsal worker's watchdog kill is not
+reported on its own (the rehearsal step it served goes red, and that is the chat's one message).
 
 Local mode (`unprivileged()`): the same paths under `ATELIER_WORK`, chown/chmod no-ops, `cp`/`rm`/`du`/`tar`/`git` as
-the developer, no installer (the dev tree's `node_modules` is copied into the export), freeze skipped as today.
+the developer, the installer runs npm in the export itself (no installer wired → the dev tree's `node_modules` is copied
+into the export), freeze skipped as today.
 
 Tests: `host/test/supervisor-deploy.test.js` (real workers, git, hooks: green / red at every rehearsal step / the gate
 under a 20 ms request loop, the 3 s and the past-the-hold hook / failed after the gate + restore / rollback / config /
-adopt / backups + the refusal / the release door absent), `supervisor-slots`, `worker-hook`, `devcli`, the verbs in
+adopt / backups + the refusal / the release door absent; the 2026-09-02 review rows: the data question failing CLOSED
+for EACCES, a killed `find`, a failed or silent `du`; restore `--yes` + the snapshot + a copy that dies; the rev-dir prune
+fired mid-verb; DOWN across a restart, the `releasing` marker, the torn `commitProd`; the install with a real dependency),
+`supervisor-slots`, `worker-hook`, `devcli`, the verbs in
 `protocol-devshell`, `release` + `config` in `protocol-registrar`, the pointers + git in `supervisor-lastgood`, the
 plans in `worker-jail`, `--dest` in `worker-install`, the waking bytes in `protocol-samebytes`; the existing suites run
 on the slot model. Drill row 9: `host/drill/rows/run-deploy.sh` (the suite inside the pod as uid 1000; the export's
-ownership; the hook's uid/env; the backup's readers; `locker` 3/3 green under the prod loop from the peer).
+ownership; the hook's uid/env; the backup's readers; `locker` 3/3 green under the prod loop from the peer; `deps` — the
+only place `freeze.py --dest` can run: the chown walk needs CAP_CHOWN, a laptop's suite reaches the ownership guard only).

@@ -14,6 +14,7 @@ import { world, api, deploy, waitFor, sleep, APP_JSON, BACKEND, FRONTEND, CARD, 
 import { WAKING_BODY, WAKING_HEADERS } from '../../shell/proxy.mjs'
 import { MESSAGES } from '../supervisor/deploy.mjs'
 import { TransportError } from '../protocol/registrar.mjs'
+import { installDeps } from '../worker/install.mjs'
 
 const prod = { slot: 'prod' }
 const HEX40 = /^[0-9a-f]{40}$/
@@ -272,7 +273,9 @@ test('failed AFTER the gate: the migration fails on prod data → 503 down (no w
     const rs = []
     const rv = await sup.restore(inst, v.backup, { by: 'agent:p-agent', onStep: (l) => rs.push(l) })
     assert.equal(rv.outcome, 'green', JSON.stringify(rv)); assert.equal(rv.kind, 'restore'); assert.equal(rv.rev, 2); assert.equal(rv.backup, v.backup)
-    assert.deepEqual(rs.filter((l) => l.t === 'step').map((s) => s.name), ['drain', 'stop', 'restore', 'start', 'probe', 'release'])
+    assert.deepEqual(rs.filter((l) => l.t === 'step').map((s) => s.name), ['drain', 'stop', 'snapshot', 'restore', 'start', 'probe', 'release'], 'a DOWN app needs no --yes; today\'s data is snapshot first (B2)')
+    assert.match(rv.snapshot, /^\d{8}T\d{6}Z-rev2-[0-9a-f]{12}$/); assert.notEqual(rv.snapshot, v.backup)
+    assert.equal(fs.readFileSync(dot(w, 'backup', inst, rv.snapshot, 'counter.txt'), 'utf8'), 'MIGRATED', 'the snapshot holds the bytes the restore replaced')
     assert.deepEqual(JSON.parse((await api(sup, row, '/data', prod)).body), { v: 'v1', rev: 1 })
     assert.equal(sup.resolve('acme', 'todo').prod_state, 'live')
     assert.equal(w.releases.at(-1).kind, 'restore'); assert.equal(w.releases.at(-1).verdict, 'green'); assert.equal(w.releases.at(-1).backup, v.backup); assert.equal(w.releases.at(-1).commit, first.commit)
@@ -288,8 +291,8 @@ test('failed AFTER the gate: the migration fails on prod data → 503 down (no w
     assert.equal(v2.outcome, 'green'); assert.equal(v2.rev, 6, 'rev 4 = the failed release (its dir pruned), 5 = the dev save of module.json, 6 = this release')
     assert.ok(!sup.store.list(inst).includes(4), 'the failed release\'s rev dir is pruned')
     assert.deepEqual(JSON.parse((await api(sup, row, '/data', prod)).body), { v: 'v1+email', rev: 2 })
-    assert.equal(sup.backups(inst).length, 2)
-    assert.equal(fs.readFileSync(dot(w, 'backup', inst, v2.backup, 'counter.txt'), 'utf8'), 'v1', 'the second backup = the restored prod data before this migration')
+    assert.equal(sup.backups(inst).length, 3, 'the failed deploy\'s backup, the restore\'s snapshot, this deploy\'s backup')
+    assert.equal(fs.readFileSync(dot(w, 'backup', inst, v2.backup, 'counter.txt'), 'utf8'), 'v1', 'the third backup = the restored prod data before this migration')
   } finally { await w.done(sup) }
 })
 
@@ -477,5 +480,252 @@ test('D11 backups: the last 3 per app are kept (oldest pruned, the marker follow
     assert.equal(nb.outcome, 'green'); assert.equal(nb.backup, undefined); assert.equal(nb.steps.find((s) => s.name === 'backup').note, 'skipped (--no-backup)')
     assert.equal(JSON.parse((await api(sup, row, '/rev', prod)).body).rev, 6)
     w.osx.statfs = realStatfs
+  } finally { await w.done(sup) }
+})
+
+// ---- the 2026-09-02 review round (Opus B1–B3 / S1–S3 / S5 / S10, Codex 1–4, Grok 2–4): an unknown answer is never the permissive one
+test('B1/S3: the data question fails CLOSED — an unreadable data dir (EACCES), a killed `find`, a failed or a silent `du` → red at `backup` BEFORE the rehearsal (`backup impossible: could not read/measure the data dir (…)`), nothing exported, prod never stopped, no app-error, the hook never ran; --no-backup does not lift it', async () => {
+  const w = world({ gitCommit: true })
+  const { dir, sup, row } = await setup(w, 'todo', { 'module.json': MJ({ deploy: 'printf MIGRATED > "$DATA_DIR/counter.txt"' }), 'backend.js': DATA_BACKEND(1) })
+  const dataDir = dot(w, 'data', row.instance)
+  try {
+    const inst = row.instance
+    assert.equal((await deploy(sup, row, { message: 'first' })).outcome, 'green')
+    assert.equal((await api(sup, row, '/write?v=v1', prod)).status, 200)
+    const pid = sup.resolve('acme', 'todo').pid
+    fs.writeFileSync(path.join(dir, 'backend.js'), DATA_BACKEND(2))
+    await waitFor(() => sup.resolve('acme', 'todo').dev_rev === 3)
+    const realSpawn = w.osx.spawn
+    const fake = (name, argv) => { w.osx.spawn = (spec) => realSpawn(spec.argv[0] === name ? { ...spec, argv } : spec) }
+    const cases = [
+      ['EACCES', () => fs.chmodSync(dataDir, 0o000), /^backup impossible: could not read the data dir \(find: .*[Pp]ermission denied.*\)$/],
+      ['a killed find', () => fake('find', ['sh', '-c', 'kill -9 $$']), /^backup impossible: could not read the data dir \(find: killed by SIGKILL\)$/],
+      ['du rc=3', () => fake('du', ['sh', '-c', 'echo "du: boom" >&2; exit 3']), /^backup impossible: could not measure the data dir \(du: du: boom\)$/],
+      ['du silent', () => fake('du', ['sh', '-c', 'true']), /^backup impossible: could not measure the data dir \(du: rc=0 \(no size printed\)\)$/],
+    ]
+    for (const [name, arm, re] of cases) {
+      for (const noBackup of [false, true]) {
+        arm()
+        const before = { reports: w.reports.length, releases: w.releases.length }
+        const v = await deploy(sup, row, { message: `unknown: ${name}`, noBackup })
+        fs.chmodSync(dataDir, 0o770); w.osx.spawn = realSpawn
+        assert.equal(v.outcome, 'red', `${name}: ${JSON.stringify(v)}`); assert.equal(v.step, 'backup'); assert.match(v.error, re, name)
+        assert.deepEqual(v.steps.map((s) => s.name), ['commit', 'backup'], `${name}: refused before the rehearsal — nothing was copied, exported or installed`)
+        assert.equal(sup.resolve('acme', 'todo').pid, pid, 'prod never stopped'); assert.equal(sup.resolve('acme', 'todo').prod_state, 'live')
+        assert.equal(w.reports.length, before.reports, 'a refusal before the gate is the verdict line, not an app-error')
+        assert.equal(w.releases.length, before.releases + 1); assert.equal(w.releases.at(-1).verdict, 'red'); assert.equal(w.releases.at(-1).error, v.error)
+        assert.ok(!fs.existsSync(dot(w, 'rehearsal', inst, 'data')))
+        assert.equal(fs.readFileSync(path.join(dataDir, 'counter.txt'), 'utf8'), 'v1', 'the hook never ran on prod data')
+        assert.ok(w.lines.some((l) => l.endsWith(`RED at backup: ${v.error} — prod stays on rev 2`)), 'the agent.log red line')
+        assert.ok(!fs.existsSync(dot(w, 'backup', inst)), 'no backup dir')
+      }
+    }
+    // the answer known again → green: the migration runs behind its backup
+    const ok = await deploy(sup, row, { message: 'readable again' })
+    assert.equal(ok.outcome, 'green', JSON.stringify(ok)); assert.match(ok.backup, /^\d{8}T\d{6}Z-rev2-/)
+    assert.equal(fs.readFileSync(dot(w, 'backup', inst, ok.backup, 'counter.txt'), 'utf8'), 'v1'); assert.equal(fs.readFileSync(path.join(dataDir, 'counter.txt'), 'utf8'), 'MIGRATED')
+  } finally { try { fs.chmodSync(dataDir, 0o770) } catch {} await w.done(sup) }
+})
+
+test('B2: restore on a LIVE app is refused without --yes (409, the refusal names the command, nothing moves); with --yes today\'s data is SNAPSHOT first (a backup row holding the pre-restore bytes) and the backup lands through a staging tree + two renames; the snapshot impossible → RED at `snapshot`, nothing moved; a copy that dies → FAILED, prod\'s data intact on disk, the backups untouched, restore again (DOWN: no --yes)', async () => {
+  const w = world({ gitCommit: true })
+  const { dir, sup, row } = await setup(w, 'todo', { 'module.json': MJ(), 'backend.js': DATA_BACKEND(1) })
+  try {
+    const inst = row.instance
+    assert.equal((await deploy(sup, row, { message: 'first' })).outcome, 'green')
+    assert.equal((await api(sup, row, '/write?v=v1', prod)).status, 200)
+    fs.writeFileSync(path.join(dir, 'backend.js'), DATA_BACKEND(2))
+    await waitFor(() => sup.resolve('acme', 'todo').dev_rev === 3)
+    const v2 = await deploy(sup, row, { message: 'second' })
+    assert.equal(v2.outcome, 'green'); const b1 = v2.backup; assert.match(b1, /^\d{8}T\d{6}Z-rev2-/)
+    assert.equal((await api(sup, row, '/write?v=v2', prod)).status, 200)
+    // live, no --yes: refused before anything moves — no release row, the worker untouched, the data as it was
+    const pid = sup.resolve('acme', 'todo').pid, nReleases = w.releases.length
+    assert.equal(MESSAGES.refuse.restoreLive('todo', b1), `todo is live: restore replaces its prod data with backup ${b1} (everything written since is lost) — run atelier restore todo ${b1} --yes to confirm`)
+    await assert.rejects(Promise.resolve().then(() => sup.restore(inst, b1)), (e) => e.status === 409 && e.message === MESSAGES.refuse.restoreLive('todo', b1))
+    await assert.rejects(Promise.resolve().then(() => sup.restore(inst, b1, { yes: false })), (e) => e.status === 409)
+    assert.equal(sup.resolve('acme', 'todo').pid, pid); assert.equal(w.releases.length, nReleases); assert.equal(JSON.parse((await api(sup, row, '/data', prod)).body).v, 'v2')
+    // --yes: the snapshot (v2) lands as a backup row like the deploy's, then the backup (v1) is prod's data
+    await sleep(1100)   // the backup id has second granularity
+    const rs = []
+    const rv = await sup.restore(inst, b1, { by: 'agent:p-agent', yes: true, onStep: (l) => rs.push(l) })
+    assert.equal(rv.outcome, 'green', JSON.stringify(rv))
+    assert.deepEqual(rs.filter((l) => l.t === 'step').map((s) => s.name), ['drain', 'stop', 'snapshot', 'restore', 'start', 'probe', 'release'])
+    assert.match(rv.snapshot, /^\d{8}T\d{6}Z-rev4-[0-9a-f]{12}$/); assert.notEqual(rv.snapshot, b1)
+    assert.equal(rs.find((l) => l.t === 'step' && l.name === 'snapshot').note, MESSAGES.step.notes.backup(rv.snapshot, 0))
+    assert.equal(fs.readFileSync(dot(w, 'backup', inst, rv.snapshot, 'counter.txt'), 'utf8'), 'v2', 'the snapshot holds what the restore replaced')
+    assert.deepEqual(JSON.parse((await api(sup, row, '/data', prod)).body), { v: 'v1', rev: 2 })
+    assert.deepEqual(sup.backups(inst).map((b) => b.id), [rv.snapshot, b1], 'newest first: the snapshot is a backup row like any other')
+    assert.deepEqual(fs.readdirSync(dot(w, 'data')).sort(), [inst], 'no .restore / .old left beside data/<inst>')
+    assert.equal(w.releases.at(-1).kind, 'restore'); assert.equal(w.releases.at(-1).verdict, 'green'); assert.equal(w.releases.at(-1).backup, b1); assert.equal(w.releases.at(-1).by, 'agent:p-agent')
+    // the snapshot impossible (no free space) → RED at snapshot before the gate: nothing moved, prod never stopped, no backup taken
+    const realStatfs = w.osx.statfs
+    w.osx.statfs = () => ({ bytes: 1000, free: 1 })
+    const pid2 = sup.resolve('acme', 'todo').pid
+    const red = await sup.restore(inst, rv.snapshot, { yes: true })
+    w.osx.statfs = realStatfs
+    assert.equal(red.outcome, 'red', JSON.stringify(red)); assert.equal(red.step, 'snapshot'); assert.equal(red.error, 'backup impossible: free space 0 MB < 2× the data (0 MB)'); assert.equal(red.snapshot, undefined)
+    assert.equal(sup.resolve('acme', 'todo').pid, pid2, 'prod never stopped'); assert.equal(JSON.parse((await api(sup, row, '/data', prod)).body).v, 'v1')
+    assert.equal(sup.backups(inst).length, 2, 'no backup taken'); assert.equal(w.releases.at(-1).verdict, 'red'); assert.equal(w.releases.at(-1).kind, 'restore'); assert.equal(w.releases.at(-1).error, red.error)
+    assert.ok(w.lines.some((l) => l === `[todo] restore ${rv.snapshot} RED at snapshot: ${red.error} — nothing restored`))
+    // a copy that dies inside the gate: FAILED at restore, the app DOWN, prod's data dir intact on disk (the swap never happened), the backups untouched, ONE worker report
+    const realSpawn = w.osx.spawn
+    w.osx.spawn = (spec) => realSpawn(spec.argv[0] === 'cp' && String(spec.argv.at(-1)).endsWith('.restore') ? { ...spec, argv: ['sh', '-c', 'echo "cp: disk full" >&2; exit 1'] } : spec)
+    await sleep(1100)
+    const before = w.reports.length
+    const failed = await sup.restore(inst, rv.snapshot, { yes: true })
+    w.osx.spawn = realSpawn
+    assert.equal(failed.outcome, 'failed', JSON.stringify(failed)); assert.equal(failed.step, 'restore'); assert.equal(failed.error, 'cp: cp: disk full')
+    assert.equal(sup.resolve('acme', 'todo').prod_state, 'down')
+    assert.equal(fs.readFileSync(dot(w, 'data', inst, 'counter.txt'), 'utf8'), 'v1', 'prod data intact: the swap never happened')
+    assert.ok(fs.existsSync(dot(w, 'backup', inst, rv.snapshot)) && fs.existsSync(dot(w, 'backup', inst, b1)), 'the backups untouched')
+    const rep = w.reports.slice(before); assert.equal(rep.length, 1); assert.equal(rep[0].kind, 'worker'); assert.equal(rep[0].rev, 4)
+    assert.equal(rep[0].message, MESSAGES.restoreFailed.message('todo', rv.snapshot, 'restore', 'cp: cp: disk full')); assert.equal(rep[0].hint, MESSAGES.restoreFailed.hint('todo', rv.snapshot))
+    assert.ok(rep[0].message.length <= 200 && rep[0].hint.length <= 200)
+    const r503 = await api(sup, row, '/rev', prod); assert.equal(r503.status, 503); assert.deepEqual(JSON.parse(r503.body), { error: 'app down after a failed deploy', backup: rv.snapshot })
+    // DOWN: no --yes needed; the staging leftover goes; green; the oldest backup pruned past 3
+    await sleep(1100)
+    const again = await sup.restore(inst, rv.snapshot)
+    assert.equal(again.outcome, 'green', JSON.stringify(again))
+    assert.equal(JSON.parse((await api(sup, row, '/data', prod)).body).v, 'v2'); assert.equal(sup.resolve('acme', 'todo').prod_state, 'live')
+    assert.deepEqual(fs.readdirSync(dot(w, 'data')).sort(), [inst])
+    assert.equal(sup.backups(inst).length, 3); assert.ok(!sup.backups(inst).some((b) => b.id === b1), 'four snapshots → the oldest pruned (D11)')
+  } finally { await w.done(sup) }
+})
+
+test('B3: the new rev dir is pinned for the whole verb — the rev-dir prune the keepMs timers run, fired during the rehearsal and again inside the gate (after `row.rehearsal` is cleared), never deletes it and the deploy is green; prune() keeps `row.releasing` and nothing else unreferenced', async () => {
+  const w = world({ gitCommit: true })
+  const { dir, sup, row } = await setup(w, 'todo', { 'module.json': MJ({ deploy: 'sleep 0.2' }), 'backend.js': DATA_BACKEND(1) })
+  try {
+    const inst = row.instance
+    assert.equal((await deploy(sup, row, { message: 'first' })).outcome, 'green')
+    assert.equal((await api(sup, row, '/write?v=v1', prod)).status, 200)
+    fs.writeFileSync(path.join(dir, 'backend.js'), DATA_BACKEND(2))
+    await waitFor(() => sup.resolve('acme', 'todo').dev_rev === 3)
+    const rowRef = sup.rows.get(inst)
+    const fired = []   // [step, releasing, the rehearsal slot still set?, the rev dir still on disk?]
+    const v = await sup.deploy(inst, { message: 'second', onStep: (l) => {
+      if (l.t === 'step' && l.ok && ['hook', 'backup', 'migrate'].includes(l.name)) {
+        sup.prune(inst)   // the sweep a keepMs timer from an old save runs, mid-verb
+        fired.push([l.name, rowRef.releasing, rowRef.rehearsal != null, sup.store.list(inst).includes(rowRef.releasing)])
+      }
+    } })
+    assert.equal(v.outcome, 'green', JSON.stringify(v)); assert.equal(v.rev, 4)
+    assert.deepEqual(fired, [['hook', 4, true, true], ['backup', 4, false, true], ['migrate', 4, false, true]], 'inside the gate only the pin keeps rev 4')
+    assert.equal(rowRef.releasing, null, 'the pin is released with the verb')
+    assert.ok(sup.store.list(inst).includes(4)); assert.equal(JSON.parse((await api(sup, row, '/rev', prod)).body).rev, 2)
+    // prune() directly: an unreferenced rev dir survives exactly while it is the releasing one
+    sup.store.write(inst, 42, row.uid, {})
+    rowRef.releasing = 42; sup.prune(inst); assert.ok(sup.store.list(inst).includes(42))
+    rowRef.releasing = null; sup.prune(inst); assert.ok(!sup.store.list(inst).includes(42))
+  } finally { await w.done(sup) }
+})
+
+test('S1/S2/S10: DOWN is on disk — a host restart boots a failed app DOWN (the same 503 + backup, the boot line, nothing resumed), a config stamp never resurrects it, the restore clears the marker; the in-flight `releasing` marker of a host that died mid-migration boots DOWN too; a green deploy writes a fresh prod block; a torn commitProd (revision.json ahead of `current`) re-links to the recorded release, never an adopt', async () => {
+  const w = world({ gitCommit: true })
+  let { dir, sup, row } = await setup(w, 'todo', { 'module.json': MJ(), 'backend.js': DATA_BACKEND(1) }, { timing: { idleMs: 60_000 } })
+  const inst = row.instance
+  try {
+    const first = await deploy(sup, row, { message: 'first' })
+    assert.equal(first.outcome, 'green')
+    assert.equal((await api(sup, row, '/write?v=v1', prod)).status, 200)
+    fs.writeFileSync(path.join(dir, 'module.json'), MJ({ deploy: 'case "$DATA_DIR" in *rehearsal*) exit 0;; esac; printf MIGRATED > "$DATA_DIR/counter.txt"; exit 2' }))
+    await sleep(250)
+    const v = await deploy(sup, row, { message: 'bad migration' })
+    assert.equal(v.outcome, 'failed', JSON.stringify(v)); assert.equal(v.step, 'migrate')
+    const c12 = v.attempted.commit.slice(0, 12)
+    let pb = revJson(w, inst).prod
+    assert.equal(pb.rev, 2); assert.equal(pb.commit, first.commit, 'the prod block still names the release the app is on')
+    assert.deepEqual(Object.keys(pb.down).sort(), ['at', 'backup', 'commit', 'error', 'rev', 'step']); assert.equal(pb.down.step, 'migrate'); assert.equal(pb.down.backup, v.backup); assert.equal(pb.down.commit, v.attempted.commit); assert.equal(pb.down.rev, 4)
+    assert.equal(pb.releasing, undefined, 'the in-flight marker is replaced by the DOWN marker')
+    // a new host life: still DOWN, the same 503 body, the boot line; no worker started, the scan neither adopts nor resumes
+    await sup.teardown()
+    sup = w.make({ timing: { idleMs: 60_000 } }); await sup.boot()
+    let r = sup.resolve('acme', 'todo')
+    assert.equal(r.prod_state, 'down'); assert.equal(r.state, 'down'); assert.equal(r.prod_rev, 2); assert.equal(r.deployed_rev, first.commit); assert.equal(r.pid, undefined)
+    let x = await api(sup, row, '/rev', prod)
+    assert.equal(x.status, 503); assert.deepEqual(JSON.parse(x.body), { error: 'app down after a failed deploy', backup: v.backup }); assert.equal(x.headers['x-atelier-waking'], undefined)
+    assert.equal(sup.workers().length, 0, 'nothing resumed')
+    const bootLine = `[todo] boot: rev 2 stays DOWN (deploy of ${c12} failed at migrate; backup ${v.backup} kept) — atelier restore todo ${v.backup}, or fix forward and deploy`
+    assert.equal(bootLine, MESSAGES.log.bootDown('todo', 2, c12, 'migrate', v.backup)); assert.ok(w.lines.includes(bootLine))
+    await sup.scan()
+    assert.equal(sup.resolve('acme', 'todo').prod_state, 'down'); assert.equal(sup.workers().filter((k) => k.slot === 'prod').length, 0); assert.equal(sup.rows.get(inst).prod.adoptPending, undefined)
+    // S2: a config stamp on a DOWN app is noted, never released
+    const nReleases = w.releases.length
+    sup.onConfigStamp(inst, '2026-09-02T12:00:00.000Z')
+    await sleep(200)
+    assert.equal(sup.resolve('acme', 'todo').prod_state, 'down'); assert.equal(w.releases.length, nReleases); assert.equal(sup.rows.get(inst).deploying, null); assert.equal(sup.rows.get(inst).configStamp, '2026-09-02T12:00:00.000Z')
+    assert.ok(w.lines.includes('[todo] config stamp 2026-09-02T12:00:00.000Z noted — the app is DOWN after a failed release; no restart (restore or deploy first)'))
+    // the restore (DOWN: no --yes) clears the marker on disk and serves again
+    const rv = await sup.restore(inst, v.backup)
+    assert.equal(rv.outcome, 'green', JSON.stringify(rv))
+    assert.equal(revJson(w, inst).prod.down, undefined); assert.equal(sup.resolve('acme', 'todo').prod_state, 'live')
+    assert.equal(JSON.parse((await api(sup, row, '/data', prod)).body).v, 'v1')
+    // a host that died INSIDE the gate (after the backup, before the record): the `releasing` marker alone boots the app DOWN
+    await sup.teardown()
+    sup.store.prodPatch(inst, { releasing: { id: 'r-dead', commit: v.attempted.commit, rev: 9, backup: v.backup, at: '2026-09-02T12:00:00.000Z' } })
+    sup = w.make({ timing: { idleMs: 60_000 } }); await sup.boot()
+    assert.equal(sup.resolve('acme', 'todo').prod_state, 'down')
+    pb = revJson(w, inst).prod
+    assert.equal(pb.down.step, 'migrate'); assert.equal(pb.down.backup, v.backup); assert.equal(pb.down.commit, v.attempted.commit); assert.equal(pb.down.rev, 9); assert.match(pb.down.error, /^the host died during the release/); assert.equal(pb.releasing, undefined)
+    x = await api(sup, row, '/rev', prod); assert.equal(x.status, 503); assert.deepEqual(JSON.parse(x.body), { error: 'app down after a failed deploy', backup: v.backup })
+    assert.ok(w.lines.includes(MESSAGES.log.bootDown('todo', 2, c12, 'migrate', v.backup)))
+    // fix forward: a green deploy writes a fresh prod block (no down, no releasing) and serves
+    fs.writeFileSync(path.join(dir, 'module.json'), MJ())
+    await sup.scan(); await live(sup, 'todo')
+    const ok = await deploy(sup, row, { message: 'fixed' })
+    assert.equal(ok.outcome, 'green', JSON.stringify(ok))
+    pb = revJson(w, inst).prod
+    assert.deepEqual(Object.keys(pb).sort(), ['commit', 'deployedAt', 'message', 'rev']); assert.equal(pb.rev, ok.rev); assert.equal(pb.commit, ok.commit)
+    assert.equal((await api(sup, row, '/rev', prod)).status, 200); assert.equal(JSON.parse((await api(sup, row, '/data', prod)).body).v, 'v1')
+    // S10: revision.json names the release but `current` still points at the previous rev (the host died between the two
+    // writes): boot follows the recorded release — never the agent's working tree through an adopt
+    await sup.teardown()
+    sup.store.link(inst, 'current', 2)
+    const commits = gitLog(dir).length
+    sup = w.make({ timing: { idleMs: 60_000 } }); await sup.boot()
+    assert.equal(readlink(dot(w, inst, 'current')), `../last-good/${inst}/rev-${ok.rev}`)
+    r = sup.resolve('acme', 'todo')
+    assert.equal(r.prod_rev, ok.rev); assert.equal(r.deployed_rev, ok.commit); assert.equal(r.prod_state, 'stopped'); assert.equal(sup.rows.get(inst).prod.adoptPending, undefined); assert.equal(sup.rows.get(inst).prod.legacy, false)
+    assert.ok(w.lines.some((l) => l === `boot: todo current re-linked to rev ${ok.rev} (revision.json.prod named it; the previous host life died between the two writes)`))
+    await sup.scan()
+    assert.equal(gitLog(dir).length, commits, 'no adopt commit'); assert.equal(revJson(w, inst).prod.legacy, undefined)
+    assert.equal(JSON.parse((await api(sup, row, '/rev', prod)).body).ctxRev, ok.rev, 'prod serves the recorded release')
+  } finally { await w.done(sup) }
+})
+
+test('S5: the install step with a dependency — a package.json + one dependency from a local tarball (no network), the real installDeps (unprivileged: npm in the export, the freeze skipped by design), the export holds node_modules/<dep> + the lock, the prod worker createRequire\'s it from its cwd; the dev tree keeps its own install; the same commit again reuses the complete export', async () => {
+  const w = world({ gitCommit: true })
+  // the dependency: a tarball npm installs offline (`package/` root, as `npm pack` lays it out)
+  const dep = path.join(w.root, 'dep'); fs.mkdirSync(path.join(dep, 'package'), { recursive: true })
+  fs.writeFileSync(path.join(dep, 'package', 'package.json'), JSON.stringify({ name: 'tiny-dep', version: '1.0.0', main: 'index.js' }))
+  fs.writeFileSync(path.join(dep, 'package', 'index.js'), 'module.exports = { answer: 42 }\n')
+  const tgz = path.join(dep, 'tiny-dep-1.0.0.tgz')
+  execFileSync('tar', ['-czf', tgz, '-C', dep, 'package'], { env: { ...process.env, COPYFILE_DISABLE: '1' } })
+  const DEP_BACKEND = `import { createRequire } from 'node:module'\nexport default { mountRoutes(router) { router.get('/dep', (req, res) => { const need = createRequire(process.cwd() + '/package.json'); res.json({ answer: need('tiny-dep').answer, cwd: process.cwd() }) }) } }\n`
+  const manifest = (extra = {}) => JSON.stringify({ name: 'todo', version: '1.0.0', private: true, dependencies: { 'tiny-dep': `file:${tgz}` }, ...extra })
+  const { dir, sup, row } = await setup(w, 'todo', { 'module.json': MJ({ healthz: '/dep' }), 'backend.js': DEP_BACKEND, 'package.json': manifest() }, { install: (a) => installDeps({ ...a, hostEnv: process.env }) })
+  try {
+    const inst = row.instance
+    // the dev tree's own install (a manifest change → onInstall → npm in the app folder): the dev worker resolves the dep from the folder
+    fs.writeFileSync(path.join(dir, 'package.json'), manifest({ description: 'dev' }))
+    await waitFor(() => fs.existsSync(path.join(dir, 'node_modules', 'tiny-dep', 'index.js')), { ms: 20_000 })
+    await waitFor(() => sup.rows.get(inst).installing == null && sup.resolve('acme', 'todo').dev_state === 'live', { ms: 20_000 })
+    assert.deepEqual(JSON.parse((await api(sup, row, '/dep')).body), { answer: 42, cwd: dir })
+    const v = await deploy(sup, row, { message: 'with a dependency' })
+    assert.equal(v.outcome, 'green', JSON.stringify(v))
+    assert.match(v.steps.find((s) => s.name === 'install').note, /^\? files in \d+ ms$/, 'the real installer ran (unprivileged: no freeze, no file count)')
+    const exp = dot(w, 'prod', inst, v.commit.slice(0, 12))
+    assert.ok(fs.existsSync(path.join(exp, 'node_modules', 'tiny-dep', 'index.js')), 'the export holds the installed dependency')
+    assert.ok(fs.existsSync(path.join(exp, 'package-lock.json')), 'the lock lands in the export')
+    assert.ok(!fs.existsSync(dot(w, 'prod', inst, `${v.commit.slice(0, 12)}.tmp`)), 'the .tmp was renamed into place')
+    assert.deepEqual(JSON.parse((await api(sup, row, '/dep', prod)).body), { answer: 42, cwd: exp })
+    assert.ok(w.lines.includes('install todo: unprivileged — npm in the export as the current user, freeze skipped'))
+    assert.ok(fs.existsSync(path.join(dir, 'node_modules', 'tiny-dep', 'index.js')), 'the dev tree keeps its node_modules')
+    assert.deepEqual(JSON.parse((await api(sup, row, '/dep')).body), { answer: 42, cwd: dir })
+    // a rollback to the same commit: the complete export is reused, no second install
+    const rb = await deploy(sup, row, { commit: v.commit.slice(0, 12) })
+    assert.equal(rb.outcome, 'green', JSON.stringify(rb)); assert.equal(rb.steps.find((s) => s.name === 'export').note, 'kept from the previous attempt of this commit'); assert.equal(rb.steps.find((s) => s.name === 'install').note, 'kept')
+    assert.deepEqual(JSON.parse((await api(sup, row, '/dep', prod)).body), { answer: 42, cwd: exp })
   } finally { await w.done(sup) }
 })

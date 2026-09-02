@@ -26,7 +26,7 @@ test('PROD idle-stops only when the READY resources are empty or the worker said
     assert.equal(sup.workers().length, 3)
     // the dev workers stop after devIdleMs — the busy one too (D18: never resident)
     await waitFor(() => ['quiet', 'busy', 'susp'].every((x) => sup.resolve('acme', x).dev_state === 'stopped'))
-    assert.ok(w.lines.some((l) => l === '[busy] rev 1 STOPPED (dev)'))
+    assert.ok(w.lines.some((l) => /^\[busy\] rev \d+ STOPPED \(dev\)$/.test(l)), 'the dev STOPPED line (the rev is 1, or 2 when the watcher fired twice under load — N1)')
     assert.equal(sup.workers().length, 0)
     // released → the prod rules
     for (const slug of ['quiet', 'busy', 'susp']) { assert.equal((await deploy(sup, sup.resolve('acme', slug), { message: `release ${slug}` })).outcome, 'green'); assert.equal(sup.resolve('acme', slug).prod_state, 'live') }

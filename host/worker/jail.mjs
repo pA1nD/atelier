@@ -54,11 +54,15 @@ export function jailPlan(spec) {
 /**
  * The release rows (DESIGN §10.3 D1), every one a root-owned dir under the `.atelier` dirfd tree:
  *   backupPlan(dir)            backup/<inst> and backup/<inst>/<id>   `0:19999 0750`  — the agent reads through gid 19999, no worker traverses
+ *                              (the files inside land `0:19999 0640` — slots.mjs copySpecs `backup`: the app's uid never owns its backups)
+ *   dataPlan(dir, uid)         one more `<uid>:19999 2770` data dir (the restore stages the backup beside `data/<inst>`, then renames)
  *   rehearsalPlan(spec, root)  rehearsal/<inst> `0:<uid> 0750`, rehearsal/<inst>/data `<uid>:19999 2770` (the prod data copy the rehearsal worker writes)
  *   prodPlan(spec, dir)        prod/<inst> and prod/<inst>/<commit12> `0:<uid> 0750` — the export the worker reads, EACCES to uid 1000
  * `dir` / `root` are full paths (dirfd forms in the fleet); the caller passes each level it wants created.
  */
 export function backupPlan(dir) { return mkdirOwned(dir, 0o750, 0, AGENT_DATA_GID) }
+/** dataPlan(dir, uid) — one data dir of the §3 shape (`<uid>:19999 2770`): the restore's staging tree beside `data/<inst>`. */
+export function dataPlan(dir, uid) { return mkdirOwned(dir, 0o2770, uid, AGENT_DATA_GID) }
 export function rehearsalPlan(spec, root) {
   return [...mkdirOwned(root, 0o750, 0, spec.uid), ...mkdirOwned(path.posix.join(root, 'data'), 0o2770, spec.uid, AGENT_DATA_GID)]
 }

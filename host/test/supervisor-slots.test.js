@@ -21,7 +21,7 @@ test('backupId = <YYYYMMDDTHHMMSSZ>-rev<N>-<c12> (34 chars), parsed back to {at,
   assert.equal(s.state, 'stopped'); assert.equal(mkSlot('dev', { appDir: '/a', dataDir: '/d' }).state, 'loading'); assert.equal(s.gate, null); assert.equal(s.inflight, 0)
 })
 
-test('pruneBackups (D11): the newest 3 stay; past 1 GiB the oldest go first; the newest is always kept; backupFeasible refuses > 1 GiB or free < 2×', () => {
+test('pruneBackups (D11): the newest 3 stay; past 1 GiB the oldest go first; the newest is always kept; backupFeasible refuses > 1 GiB, free < 2×, or an unmeasured size', () => {
   const G = 1024 * 1024 * 1024
   const rows = [1, 2, 3, 4, 5].map((n) => ({ id: `b${n}`, at: n * 1000, bytes: 100 }))
   assert.deepEqual(pruneBackups(rows).sort(), ['b1', 'b2'])
@@ -34,10 +34,12 @@ test('pruneBackups (D11): the newest 3 stay; past 1 GiB the oldest go first; the
   assert.equal(backupFeasible({ dataBytes: 1.4 * G, freeBytes: 100 * G }), 'prod data is 1433.6 MB (> 1024 MB cap)')
   assert.equal(backupFeasible({ dataBytes: 100 * 1024 * 1024, freeBytes: 150 * 1024 * 1024 }), 'free space 150 MB < 2× the data (100 MB)')
   assert.equal(backupFeasible({ dataBytes: 100, freeBytes: null }), null, 'no statfs → no free-space verdict')
+  assert.equal(backupFeasible({ dataBytes: null, freeBytes: 100 * G }), 'prod data size unknown', 'an unmeasured size is never a safe one')
+  assert.equal(backupFeasible({ dataBytes: undefined, freeBytes: null }), 'prod data size unknown')
   assert.equal(mb(12582912), 12)
 })
 
-test('the root+19999 specs (cp -a / rm -rf / du -sk) and row T (tar -x as root, stdin = the archive); ownTree = chmod-then-chown 0:<uid> over what tar left (dirs 0750, files 0640, symlinks lchown only)', () => {
+test('the root+19999 specs (cp -dR by role: data <uid>:19999 2770/0660, backup 0:19999 0750/0640 / rm -rf / du -sk) and row T (tar -x as root, stdin = the archive); ownTree = chmod-then-chown 0:<uid> over what tar left (dirs 0750, files 0640, symlinks lchown only)', () => {
   for (const s of [...copySpecs('/a', '/b', { uid: 20001, hostEnv: { PATH: '/p' }, gnu: false }), ...copySpecs('/a', '/b', { uid: 20001, hostEnv: { PATH: '/p' }, gnu: true }), rmSpec('/a', { PATH: '/p' }), duSpec('/a', { PATH: '/p' }), lsSpec('/a', { PATH: '/p' })]) {
     assert.equal(s.uid, 0); assert.equal(s.gid, 0); assert.deepEqual(s.groups, [19999]); assert.deepEqual(s.env, { PATH: '/p' }); assert.equal(s.cwd, '/'); assert.deepEqual(s.stdio, ['ignore', 'pipe', 'pipe'])
   }
@@ -45,9 +47,14 @@ test('the root+19999 specs (cp -a / rm -rf / du -sk) and row T (tar -x as root, 
   // the fleet (GNU cp): never --preserve=ownership (cp creates each inode without its g/o bits and chmods them back AFTER the
   // chown — EPERM without CAP_FOWNER); umask 007 → 0660/0770 at creation, then ONE chown pass over the contents (CAP_CHOWN)
   const g = copySpecs('/a', '/b', { uid: 20001, hostEnv: { PATH: '/p' }, gnu: true })
-  assert.deepEqual(g.map((x) => x.argv), [['cp', '-dR', '--', '/a/.', '/b'], ['find', '/b', '-mindepth', '1', '-exec', 'chown', '-h', '20001:19999', '{}', '+']], 'no --preserve=timestamps either: cp would utimensat the destination dir itself (a <uid> inode) — EPERM without FOWNER')
-  assert.equal(g[0].umask, 0o007); assert.deepEqual(g[0].groups, [19999]); assert.deepEqual(g[1].groups, [19999])
-  assert.deepEqual(copySpecs('/a', '/b', { uid: 20001, gnu: true, privileged: false }).map((x) => x.argv[0]), ['cp'], 'unprivileged (the same user copies): no chown pass')
+  assert.deepEqual(g.map((x) => x.argv), [['cp', '-dR', '--', '/a/.', '/b'], ['find', '/b', '-mindepth', '1', '-type', 'd', '-exec', 'chmod', '2770', '{}', '+'], ['find', '/b', '-mindepth', '1', '-type', 'f', '-exec', 'chmod', '0660', '{}', '+'], ['find', '/b', '-mindepth', '1', '-exec', 'chown', '-h', '20001:19999', '{}', '+']], 'no --preserve=timestamps either: cp would utimensat the destination dir itself (a <uid> inode) — EPERM without FOWNER; the §3 shape is chmodded while root still owns the inodes, then ONE chown pass')
+  assert.equal(g[0].umask, 0o007); assert.ok(g.every((x) => x.groups.length === 1 && x.groups[0] === 19999))
+  // the backup role (S4): umask 027, root keeps the bytes, gid 19999 reads — the app's uid never owns its own backups
+  const b = copySpecs('/a', '/b', { uid: 20001, hostEnv: { PATH: '/p' }, gnu: true, role: 'backup' })
+  assert.deepEqual(b.map((x) => x.argv), [['cp', '-dR', '--', '/a/.', '/b'], ['find', '/b', '-mindepth', '1', '-exec', 'chown', '-h', '0:19999', '{}', '+']])
+  assert.equal(b[0].umask, 0o027)
+  assert.deepEqual(copySpecs('/a', '/b', { uid: 20001, gnu: true, privileged: false }).map((x) => x.argv[0]), ['cp'], 'unprivileged (the same user copies): no chmod/chown passes')
+  assert.deepEqual(copySpecs('/a', '/b', { uid: 20001, gnu: true, privileged: false, role: 'backup' }).map((x) => x.argv[0]), ['cp'])
   assert.equal(copySpecs('/a', '/b', { uid: 1 })[0].argv.includes('-a'), process.platform !== 'linux')
   assert.deepEqual(rmSpec('/a', { PATH: '/p' }).argv, ['rm', '-rf', '--', '/a'])
   assert.deepEqual(duSpec('/a', { PATH: '/p' }).argv, ['du', '-s', '-k', '--', '/a'])

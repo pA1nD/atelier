@@ -136,7 +136,7 @@ function ensureDevToken(cfg, log) {
  * Startup audit (DESIGN §6.5, PLAN §4.3 Hygiene): nothing a uid outside its owner set may read —
  * the tokens (0400 root), `/work/.claude` and `/control` (agent-private, no o bits), the agent's
  * credential files `/work/.claude.json` (API-key tails), `/work/.mcp.json`, `/work/.claude/settings.json`
- * (0600), `last-good/<inst>`, `data/<inst>`, `data-dev/<inst>`, `prod/<inst>`, `backup/<inst>` (no `o+r`). Returns `{bad, absent}`: the host refuses
+ * (0600), `last-good/<inst>`, `data/<inst>`, `data-dev/<inst>`, `prod/<inst>`, `rehearsal/<inst>`, `backup/<inst>` (no `o+r`). Returns `{bad, absent}`: the host refuses
  * to serve while `bad` is non-empty; `absent` names what was not there to check (logged, so a drill
  * tells "not there yet" from "checked").
  */
@@ -148,7 +148,7 @@ export function audit(os, cfg, dirfd, { fs: fsx = fs } = {}) {
   check(`${cfg.work}/.claude`, (m) => (m & 0o007) === 0)
   check(cfg.control, (m) => (m & 0o007) === 0)
   for (const f of ['.claude.json', '.mcp.json', '.claude/settings.json']) check(`${cfg.work}/${f}`, (m) => (m & 0o077) === 0)
-  for (const sub of ['last-good', 'data', 'data-dev', 'prod', 'backup']) {
+  for (const sub of ['last-good', 'data', 'data-dev', 'prod', 'rehearsal', 'backup']) {
     let names = []
     try { names = fsx.readdirSync(os.at(dirfd, sub)) } catch {}
     for (const n of names) check(os.at(dirfd, `${sub}/${n}`), (m) => (m & 0o007) === 0)
@@ -180,7 +180,7 @@ export async function main({ env = process.env, signals = process, exit = (c) =>
   const hostLog = (line) => { say(line) }
   // supervisor lines: every one to stderr; LIVE / STOPPED / RESUMED / the release lines to agent.log (FAILED /
   // KILLED reach agent.log through the collector sink — one line per failure, DESIGN §L1)
-  const supLog = (line) => { say(line); if (/ rev \d+ (LIVE |STOPPED|RESUMED|adopted|restored|config release)|^\[[^\]]+\] deploy |prod DOWN after/.test(line)) log.line(line) }
+  const supLog = (line) => { say(line); if (/ rev \d+ (LIVE |STOPPED|RESUMED)|^\[[^\]]+\] (deploy |adopt: |restore |config release: |boot: rev \d+ stays DOWN|backup \S+ pruned)/.test(line)) log.line(line) }
 
   // ---- metrics (PLAN §4.5): one recorder, fed by the supervisor, the watchdog and the events lane,
   // served by the protocol port at /_host/metrics

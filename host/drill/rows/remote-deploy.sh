@@ -10,13 +10,18 @@
 #       uid 1000 (group 19999), the pre-migration bytes inside
 #   9d  `locker` (node:sqlite, EXCLUSIVE lock, writing every 50 ms) deploys green 3/3 under a 50 ms loop on the PROD
 #       road (the signer's assertions from the peer, the protocol port): 0 non-200, max latency < the 10 s hold
+#   9e  `deps` (better-sqlite3 prebuild + the loot-pkg tgz + core-js): the dev install first, then `atelier deploy` runs
+#       the rehearsal's install in the export — `freeze.py take` (the dev tree keeps its node_modules) → npm from the
+#       warm cache → `freeze.py --dest`: the export's node_modules is 0:<uid> (readable as the worker), the prod worker
+#       createRequire's all three from its cwd; a second deploy under the 50 ms loop MEASURES the install hold (the
+#       freeze SIGKILLs the worker uid; requests wait ≤ 10 s, then the waking 503) — logged, only mixed revs fail it
 set -u
 NS=spike-step7-deploy; K="kubectl -n $NS"; CODE=/tmp/$NS-code; OUT=$CODE/out; mkdir -p $OUT; rm -f $OUT/*
 IMAGE=$(cat $CODE/image.txt)
 ts(){ date +%T.%3N; }; now(){ date +%s.%N | cut -c1-14; }
 log(){ echo "[$(ts)] $*"; }
 el(){ python3 -c "print(round($(now)-$1,2))"; }
-declare -A R; for r in 9t 9a 9b 9c 9d; do R[$r]=PASS; done
+declare -A R; for r in 9t 9a 9b 9c 9d 9e; do R[$r]=PASS; done
 FAILS=0
 rowfail(){ FAILS=$((FAILS+1)); R[$1]="FAIL($2)"; log "FAIL row $1: $2"; }
 cleanup(){ log "cleanup: deleting ns $NS"; kubectl delete ns $NS --wait=false >/dev/null 2>&1 || true; }
@@ -188,10 +193,64 @@ C2=$(P 'curl -s --max-time 3 http://127.0.0.1:7999/_drill/log' | grep -c '"/v1/h
 X "cat /work/.atelier/$INST/releases.jsonl | python3 -c 'import json,sys; rows=[json.loads(l) for l in sys.stdin if l.strip()]; print(len(rows), [(r[\"kind\"], r[\"verdict\"], r[\"rev\"]) for r in rows])'" | sed 's/^/    | releases.jsonl: /'
 hostlog | grep -E 'release row|not recorded at the spine' | tail -2 | sed 's/^/    | host: /'
 
+# ---- row 9e: an app WITH dependencies — the rehearsal's install in the export (take → npm → freeze --dest), the export's
+# node_modules 0:<uid>, the worker createRequire's them, the dev tree keeps its own; then the install hold measured under the loop
+log "row 9e: deps (better-sqlite3 + loot-pkg tgz + core-js): the dev install first (row 8's shape), then atelier deploy deps"
+X "$AS1000 sh -c 'cp -r /code/drill-apps/deps /work/apps/deps; ls -ln /work/apps/deps'" | sed 's/^/    | /'
+t0=$(now)
+for i in $(seq 1 900); do hostlog | grep -q 'install deps: \(freeze {\|FREEZE-ABORT\|npm rc=[^0]\)' && break; sleep 0.2; done
+for i in $(seq 1 100); do [ "$(appfield deps dev_state)" = live ] && break; sleep 0.2; done
+hostlog | grep 'install deps' > $OUT/deps-install-dev.log; sed 's/^/    | /' $OUT/deps-install-dev.log
+log "row 9e: dev install + LIVE in $(el $t0) s: dev_state=$(appfield deps dev_state)"
+grep -q 'freeze {' $OUT/deps-install-dev.log && [ "$(appfield deps dev_state)" = live ] || rowfail 9e "the dev install of deps did not freeze / go LIVE: $(tail -1 $OUT/deps-install-dev.log)"
+DINST=$(appfield deps instance); DUID=$(X "cat /work/.atelier/$DINST/uid" | tr -d '\r\n ')
+AS_DWORKER="setpriv --reuid=$DUID --regid=$DUID --clear-groups"
+LC0=$(hostlog | grep -c 'install deps')
+t0=$(now); CLI 'deploy deps -m "deps release"' > $OUT/deploy-deps-1.log; RCD=$?; sed 's/^/    | /' $OUT/deploy-deps-1.log
+log "row 9e: rc=$RCD in $(el $t0) s; deployed_rev $(appfield deps deployed_rev)"
+grep -q '^deploy green: deps ' $OUT/deploy-deps-1.log && [ "$RCD" = 0 ] || rowfail 9e "atelier deploy deps was not green (rc=$RCD)"
+hostlog | grep 'install deps' | tail -n +$((LC0+1)) > $OUT/deps-install-export.log; sed 's/^/    | /' $OUT/deps-install-export.log
+grep -q 'install deps: take rc=0' $OUT/deps-install-export.log && grep -q 'install deps: freeze {' $OUT/deps-install-export.log || rowfail 9e "the export install did not take + freeze --dest: $(tail -2 $OUT/deps-install-export.log | tr '\n' ' ')"
+DC12=$(appfield deps deployed_rev | cut -c1-12); DEXP=/work/.atelier/prod/$DINST/$DC12
+X "find $DEXP/node_modules -printf '%m %U:%G %y\n' | sort | uniq -c | sort -rn | head -4" | sed 's/^/    | export node_modules: /'
+NMF=$(X "find $DEXP/node_modules ! -user 0 | wc -l" | tr -d '\r\n '); NMG=$(X "find $DEXP/node_modules ! -group $DUID | wc -l" | tr -d '\r\n '); NMS=$(X "find $DEXP/node_modules -perm /6022 ! -type l ! -type d | wc -l" | tr -d '\r\n ')
+log "row 9e: export node_modules inodes not root-owned: $NMF; not group $DUID: $NMG; setuid/setgid/g+w/o+w files: $NMS (want 0 0 0)"
+[ "$NMF" = 0 ] && [ "$NMG" = 0 ] && [ "$NMS" = 0 ] || rowfail 9e "the export's node_modules is not 0:$DUID |040/|050"
+X "$AS_DWORKER test -r $DEXP/node_modules/better-sqlite3/package.json" || rowfail 9e "the worker uid cannot read the export's node_modules"
+X "$AS1000 test -d /work/apps/deps/node_modules/better-sqlite3" || rowfail 9e "the dev tree lost its node_modules (take must never thaw)"
+X "$AS1000 test -s $DEXP/package-lock.json" || rowfail 9e "no package-lock.json in the export"
+P "cd /code && node host/drill/step2/signer.mjs GET http://$IP:1845/api/acme/deps/deps --app $DINST" > $OUT/prod-deps.txt; sed 's/^/    | prod: /' $OUT/prod-deps.txt
+grep -q '^STATUS 200' $OUT/prod-deps.txt && grep -q '"sqlite":42' $OUT/prod-deps.txt && grep -q '"loot":"1.0.0"' $OUT/prod-deps.txt && grep -q '"corejs":"ok"' $OUT/prod-deps.txt && grep -q "\"cwd\":\"$DEXP\"" $OUT/prod-deps.txt || rowfail 9e "the prod worker did not resolve its deps from the export: $(tail -1 $OUT/prod-deps.txt | head -c 200)"
+# the install hold (DESIGN §10.3, S6 of the review): the second deploy's rehearsal install SIGKILLs the worker uid — prod is held under
+# its gate through the freeze and a cold resume; measured here, never asserted below the 10 s hold (the 503s past it are the waking answer)
+log "row 9e: the second deploy of deps under a 50 ms prod loop — the install hold, measured"
+P "cd /code && rm -f /tmp/loop-deps.txt; setsid -f bash -c 'node host/drill/rows/loop.mjs http://$IP:1845/api/acme/deps/deps $DINST 900 50 > /tmp/loop-deps.txt' < /dev/null > /dev/null 2>&1"
+sleep 1
+X "$AS1000 sh -c 'echo \"// release 2\" >> /work/apps/deps/backend.js'"
+for i in $(seq 1 50); do [ "$(appfield deps dev_rev)" -gt "$(appfield deps prod_rev)" ] 2>/dev/null && break; sleep 0.2; done
+sleep 1.2
+t0=$(now); CLI 'deploy deps -m "deps release 2"' > $OUT/deploy-deps-2.log; RCD2=$?; T_D2=$(el $t0); sed 's/^/    | /' $OUT/deploy-deps-2.log
+grep -q '^deploy green: deps ' $OUT/deploy-deps-2.log && [ "$RCD2" = 0 ] || rowfail 9e "the second deploy of deps was not green (rc=$RCD2)"
+sleep 3
+P 'cat /tmp/loop-deps.txt' > $OUT/prod-loop-deps.txt
+LOOPD=$(python3 - $OUT/prod-loop-deps.txt <<'PY'
+import sys
+rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
+non = [r for r in rows if r[0] != '200']
+ms = sorted(int(r[1]) for r in rows)
+revs = [int(r[2]) for r in rows if r[0] == '200' and r[2].isdigit()]
+mixed = sum(1 for a, b in zip(revs, revs[1:]) if b < a)
+print(f"n={len(rows)} non200={len(non)} waking503={sum(1 for r in non if r[0] == '503')} mixed={mixed} p50={ms[len(ms)//2] if ms else -1} max={ms[-1] if ms else -1}")
+PY
+)
+log "row 9e: deploy 2 in $T_D2 s; the prod loop across the rehearsal's freeze: $LOOPD (the install hold; a 503 here is the waking answer past the 10 s hold)"
+grep -v '^200 ' $OUT/prod-loop-deps.txt | head -3 | sed 's/^/    | non-200: /'
+echo "$LOOPD" | grep -q ' mixed=0 ' || rowfail 9e "a lower rev after a higher one in the deps loop"
+
 X 'cat /work/.atelier/agent.log' > $OUT/agent-log-final.txt; hostlog > $OUT/host-final.log
 X "find /work/.atelier -maxdepth 3 -printf '%m %u:%g %p\n' | sort" > $OUT/tree-final.txt 2>&1
 
 log "== VERDICT"
-SUM="9t:${R[9t]} 9a:${R[9a]} 9b:${R[9b]} 9c:${R[9c]} 9d:${R[9d]}"
-[ $FAILS = 0 ] && echo "VERDICT: PASS — $SUM; pod tests pass=$TP fail=$TF; export 0:$WUID 0750/0640 (EACCES as 1000, readable as $WUID); hook uid $HU with DRILL_CONFIG, no token; backup $BID 0:19999 0750 (worker EACCES, 1000 reads); locker $GREEN/3 green, prod loop $LOOP" \
+SUM="9t:${R[9t]} 9a:${R[9a]} 9b:${R[9b]} 9c:${R[9c]} 9d:${R[9d]} 9e:${R[9e]}"
+[ $FAILS = 0 ] && echo "VERDICT: PASS — $SUM; pod tests pass=$TP fail=$TF; export 0:$WUID 0750/0640 (EACCES as 1000, readable as $WUID); hook uid $HU with DRILL_CONFIG, no token; backup $BID 0:19999 0750 (worker EACCES, 1000 reads); locker $GREEN/3 green, prod loop $LOOP; deps export node_modules 0:$DUID, the install hold: $LOOPD" \
                 || echo "VERDICT: FAIL — $SUM"

@@ -6,7 +6,7 @@
 //   atelier rollback <slug> <commit>                                   the same verb for an older commit (code only)
 //   atelier releases <slug>                                            the host's release rows, newest first
 //   atelier backups <slug>                                             the kept backups, newest first
-//   atelier restore <slug> <backup-id>                                 prod data back from a backup
+//   atelier restore <slug> <backup-id> [--yes]                         prod data back from a backup (--yes: the app is live)
 //
 // Transport: the dev shell on 127.0.0.1:1844 (`ATELIER_DEV_PORT` when set; `ATELIER_DEV_URL` overrides the whole
 // base) with the dev token from /run/atelier/session/dev.token (`ATELIER_DEV_TOKEN_FILE`). A deploy/restore is an
@@ -46,7 +46,12 @@ export function parseArgs(argv) {
     return out
   }
   if (verb === 'rollback') { if (!rest[0] || !/^[0-9a-f]{7,40}$/i.test(rest[0]) || rest.length > 1) return { error: 'rollback needs one <commit> (7–40 hex)' }; out.commit = rest[0].toLowerCase(); return out }
-  if (verb === 'restore') { if (!rest[0] || rest.length > 1 || rest[0].includes('/')) return { error: 'restore needs one <backup-id>' }; out.backup = rest[0]; return out }
+  if (verb === 'restore') {
+    const flags = rest.filter((a) => a.startsWith('--')), args = rest.filter((a) => !a.startsWith('--'))
+    if (flags.some((f) => f !== '--yes')) return { error: `unknown argument '${flags.find((f) => f !== '--yes')}'` }
+    if (!args[0] || args.length > 1 || args[0].includes('/')) return { error: 'restore needs one <backup-id>' }
+    out.backup = args[0]; out.yes = flags.includes('--yes'); return out
+  }
   if (rest.length) return { error: `unexpected argument '${rest[0]}'` }
   return out
 }
@@ -54,7 +59,7 @@ export function parseArgs(argv) {
 /** verdictLine(v, verb) → the ONE line (MESSAGES.verdict), exitCode(v) → 0|2|3. */
 export function verdictLine(v, verb = v.kind === 'rollback' ? 'rollback' : 'deploy') {
   const c = (x) => (x ? commit12(x) : 'none')
-  if (v.kind === 'restore') return v.outcome === 'green' ? MESSAGES.verdict.restoreGreen(v.slug, v.rev, v.backup, v.url) : MESSAGES.verdict.restoreFailed(v.step, v.error, v.slug, v.backup)
+  if (v.kind === 'restore') return v.outcome === 'green' ? MESSAGES.verdict.restoreGreen(v.slug, v.rev, v.backup, v.url) : v.outcome === 'red' ? MESSAGES.verdict.restoreRed(v.step, v.error, v.slug, v.backup) : MESSAGES.verdict.restoreFailed(v.step, v.error, v.slug, v.backup)
   if (v.outcome === 'green') return MESSAGES.verdict.green(verb, v.slug, v.rev, c(v.commit), v.url)
   if (v.outcome === 'red') return MESSAGES.verdict.red(verb, v.step, v.error, v.slug, v.rev ?? 0, c(v.commit))
   return v.backup ? MESSAGES.verdict.failed(verb, v.step, v.error, v.slug, v.backup) : MESSAGES.verdict.failedNoBackup(verb, v.step, v.error, v.slug)
@@ -62,6 +67,7 @@ export function verdictLine(v, verb = v.kind === 'rollback' ? 'rollback' : 'depl
 export const exitCode = (v) => (v.outcome === 'green' ? EXIT.green : v.outcome === 'red' ? EXIT.red : EXIT.failed)
 export const stepLine = (s) => (s.ok ? MESSAGES.step.ok(s.name, s.ms, s.note) : MESSAGES.step.fail(s.name, s.ms, s.note ?? ''))
 export const abortLine = (slug, reason) => `deploy aborted: ${reason} — read atelier releases ${slug} before running it again`
+export const IDLE_TIMEOUT_MS = 300_000   // no byte for 5 min (the longest silent step is the rehearsal's 240 s) → the abort line, never a hung turn
 
 export function readToken(file = process.env.ATELIER_DEV_TOKEN_FILE ?? TOKEN_FILE) {
   try { return fs.readFileSync(file, 'utf8').trim() || null } catch { return null }
@@ -89,6 +95,7 @@ export function request(base, token, { method = 'GET', path: p = '/', body, onLi
       res.on('error', reject)
     })
     req.on('error', reject)
+    req.setTimeout(IDLE_TIMEOUT_MS, () => req.destroy(new Error(`no answer for ${IDLE_TIMEOUT_MS / 1000} s`)))
     req.end(payload ?? undefined)
   })
 }
@@ -110,7 +117,7 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
       return EXIT.green
     }
     let verdict = null
-    const body = args.verb === 'restore' ? { app: args.slug, backup: args.backup } : { app: args.slug, message: args.message, commit: args.commit ?? null, noBackup: args.noBackup }
+    const body = args.verb === 'restore' ? { app: args.slug, backup: args.backup, yes: args.yes === true } : { app: args.slug, message: args.message, commit: args.commit ?? null, noBackup: args.noBackup }
     const r = await request(url, token, {
       method: 'POST', path: args.verb === 'restore' ? '/_atelier/restore' : '/_atelier/deploy', body,
       onLine: (line) => {

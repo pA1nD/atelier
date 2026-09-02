@@ -20,8 +20,12 @@ test('parseArgs: the five verbs, -m required for deploy, --no-backup, rollback n
   assert.deepEqual(parseArgs(['rollback', 'todo', '0F3C9A1B2D4E']), { verb: 'rollback', slug: 'todo', noBackup: false, commit: '0f3c9a1b2d4e' })
   assert.match(parseArgs(['rollback', 'todo', 'abc']).error, /7–40 hex/)
   assert.match(parseArgs(['rollback', 'todo']).error, /7–40 hex/)
-  assert.deepEqual(parseArgs(['restore', 'todo', '20260902T104702Z-rev3-0f3c9a1b2d4e']), { verb: 'restore', slug: 'todo', noBackup: false, backup: '20260902T104702Z-rev3-0f3c9a1b2d4e' })
+  assert.deepEqual(parseArgs(['restore', 'todo', '20260902T104702Z-rev3-0f3c9a1b2d4e']), { verb: 'restore', slug: 'todo', noBackup: false, backup: '20260902T104702Z-rev3-0f3c9a1b2d4e', yes: false })
+  assert.deepEqual(parseArgs(['restore', 'todo', '20260902T104702Z-rev3-0f3c9a1b2d4e', '--yes']), { verb: 'restore', slug: 'todo', noBackup: false, backup: '20260902T104702Z-rev3-0f3c9a1b2d4e', yes: true })
+  assert.deepEqual(parseArgs(['restore', 'todo', '--yes', '20260902T104702Z-rev3-0f3c9a1b2d4e']).yes, true)
+  assert.match(parseArgs(['restore', 'todo', '20260902T104702Z-rev3-0f3c9a1b2d4e', '--force']).error, /unknown argument '--force'/)
   assert.match(parseArgs(['restore', 'todo', '../x']).error, /one <backup-id>/)
+  assert.match(parseArgs(['restore', 'todo', '--yes']).error, /one <backup-id>/)
   assert.deepEqual(parseArgs(['releases', 'todo']), { verb: 'releases', slug: 'todo', noBackup: false })
   assert.match(parseArgs(['backups', 'todo', 'extra']).error, /unexpected/)
   assert.match(parseArgs(['Deploy', 'todo']).error, /unknown verb/)
@@ -43,6 +47,8 @@ test('the verdict lines are MESSAGES.verdict byte for byte; exit 0 green / 2 red
   assert.equal(verdictLine({ ...failed, backup: undefined, noBackup: true }), 'deploy FAILED at migrate: exit 2: table users has no column email — e2e-104512 is DOWN, no backup (--no-backup)')
   assert.equal(verdictLine({ t: 'verdict', outcome: 'green', kind: 'restore', slug: 'e2e-104512', rev: 3, backup: '20260902T104702Z-rev3-0f3c9a1b2d4e', url }), 'restore green: e2e-104512 rev 3 data from backup 20260902T104702Z-rev3-0f3c9a1b2d4e live — https://demo.portal.pa1nd.de/demo/e2e-104512')
   assert.equal(verdictLine({ t: 'verdict', outcome: 'failed', kind: 'restore', slug: 'e2e-104512', step: 'start', error: 'no READY within 8000 ms', backup: 'b1' }), 'restore FAILED at start: no READY within 8000 ms — e2e-104512 is DOWN, backup b1 kept')
+  assert.equal(verdictLine({ t: 'verdict', outcome: 'red', kind: 'restore', slug: 'e2e-104512', step: 'snapshot', error: 'backup impossible: could not read the data dir (find: Permission denied)', backup: 'b1' }), 'restore RED at snapshot: backup impossible: could not read the data dir (find: Permission denied) — nothing restored, e2e-104512 unchanged, backup b1 untouched')
+  assert.equal(exitCode({ outcome: 'red', kind: 'restore' }), EXIT.red)
   assert.deepEqual([green, red, failed].map(exitCode), [EXIT.green, EXIT.red, EXIT.failed]); assert.deepEqual(EXIT, { green: 0, usage: 1, red: 2, failed: 3 })
   assert.equal(stepLine({ t: 'step', name: 'copy', ms: 12, ok: true, note: '3 MB of prod data copied' }), '  copy ok 12 ms — 3 MB of prod data copied')
   assert.equal(stepLine({ t: 'step', name: 'probe', ms: 40, ok: true }), '  probe ok 40 ms')
@@ -81,8 +87,13 @@ test('main() against a dev shell: the stream\'s step lines land on stderr as the
     assert.equal(out.text(), 'deploy FAILED at migrate: exit 2 — todo is DOWN, backup 20260902T104702Z-rev3-cccccccccccc kept\n')
     rows[0].script = null
     out = sink(); err = sink()
-    assert.equal(await main(['restore', 'todo', '20260902T104702Z-rev3-cccccccccccc'], { stdout: out.s, stderr: err.s, token: 'dev-secret', url }), 0)
+    assert.equal(await main(['restore', 'todo', '20260902T104702Z-rev3-cccccccccccc', '--yes'], { stdout: out.s, stderr: err.s, token: 'dev-secret', url }), 0)
     assert.equal(out.text(), 'restore green: todo rev 3 data from backup 20260902T104702Z-rev3-cccccccccccc live — http://127.0.0.1:1844/acme/todo\n')
+    assert.deepEqual(supervisor.verbs.at(-1), { verb: 'restore', instance: 'i-0123456789abcdef', backup: '20260902T104702Z-rev3-cccccccccccc', yes: true, by: 'agent:p-agent' })
+    // a LIVE app's restore without --yes: the fake refuses like the real supervisor (409 + the refusal) → the CLI prints it, exit 1
+    out = sink(); err = sink()
+    assert.equal(await main(['restore', 'todo', '20260902T104702Z-rev3-cccccccccccc'], { stdout: out.s, stderr: err.s, token: 'dev-secret', url }), 1)
+    assert.equal(err.text(), `atelier: 409 ${MESSAGES.refuse.restoreLive('todo', '20260902T104702Z-rev3-cccccccccccc')}\n`)
     // the lists
     rows[0].releases = [{ id: 'r-1', kind: 'deploy', verdict: 'red', rev: 3, commit: '7a1d0c9e5b6f00', message: 'add the email column', at: '2026-09-02T10:47:02Z', by: 'agent:p-agent', error: 'rehearsal red at hook: exit 1' }]
     out = sink(); err = sink()

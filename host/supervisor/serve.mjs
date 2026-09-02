@@ -84,7 +84,7 @@ export function createServe({ row: rowOf, store, proxy, resume, awaitBuild = asy
     if (!row || !row.linked) return json(res, 404, { error: 'not found' })
     const slot = row[name]
     if (!slot) return json(res, 404, MESSAGES.body.notDeployed)
-    if (slot.gate && !(await awaitGate(slot, holdMs))) { req.resume(); return waking(res) }
+    if (slot.gate) { slot.held = (slot.held ?? 0) + 1; if (!(await awaitGate(slot, holdMs))) { req.resume(); return waking(res) } }
     if (slot.state === 'down') return json(res, 503, MESSAGES.body.down(slot.down?.backup ?? null))
     let live = slot.live
     if (!live && name === 'dev' && row.installing) { await row.installing; live = slot.live }     // a two-phase install: the freeze SIGKILLs the worker uid — no resume into it

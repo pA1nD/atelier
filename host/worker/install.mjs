@@ -4,7 +4,9 @@
 // `freeze.py` moves the tree into the agent-owned app folder as `1000:<appgid>` (worker processes
 // SIGKILLed, dirfd-relative O_NOFOLLOW walk, setuid/setgid refused, rename as uid 1000). On a freeze
 // abort `freeze.py cleanup` hands the scratch back and nothing lands in the app folder.
-// Re-install = thaw (a no-op when nothing is frozen) → install (npm no-op ≈ 300 ms) → freeze.
+// Re-install = thaw (a no-op when nothing is frozen) → install (npm no-op ≈ 300 ms) → freeze. The prod-export install
+// (`dest`, DESIGN §10.3 D8) = take (build/ back to the worker, the agent's tree untouched — a thaw would move the dev
+// tree's node_modules out of /work/apps/<slug> and into the export) → install → `freeze --dest`.
 //
 // Under `unprivileged()` (a laptop): npm runs in the app folder as the current user, freeze is
 // skipped (logged) — the jail is lifecycle-only there (DESIGN §5).
@@ -42,7 +44,7 @@ export function copyManifestSpec(spec, { scratchDir, hostEnv }) {
   }
 }
 
-/** Row F: `python3 freeze.py <mode> <inst> <slug> <uid> <appgid> --dirfd 3 [--dest <rel>]` as root with groups cleared; fd 3 = the .atelier dirfd. */
+/** Row F: `python3 freeze.py <mode> <inst> <slug> <uid> <appgid> --dirfd 3 [--dest <rel>]` as root with groups cleared; fd 3 = the .atelier dirfd. `mode` ∈ freeze|thaw|take|cleanup. */
 export function freezeSpec(mode, spec, { dirfd, hostEnv, freeze = FREEZE_PATH, dest = null }) {
   return {
     argv: ['python3', freeze, mode, spec.instance, spec.slug, String(spec.uid), String(appgid(spec)), '--dirfd', '3', ...(dest ? ['--dest', dest] : [])],
@@ -133,11 +135,13 @@ export async function installDeps({ os, dirfd, spec, log = () => {}, hostEnv = p
   const scratchReal = realScratch(os, dirfd, spec.instance, scratchDir)
   if (!jail.ok) { const f = jail.results.at(-1); return { ok: false, class: 'install', message: `scratch ${f.step.op} ${f.step.path}: ${f.code}` } }
 
-  // thaw: a frozen tree comes back to build/ as the worker's so npm can re-run in place (no-op when nothing is frozen)
-  const thaw = await run(os, freezeSpec('thaw', spec, { dirfd, hostEnv, freeze }), { timeoutMs })
+  // thaw: a frozen tree comes back to build/ as the worker's so npm can re-run in place (no-op when nothing is frozen);
+  // take (dest): build/ becomes the worker's WITHOUT touching the agent's tree — the dev slot keeps its node_modules
+  const first = dest ? 'take' : 'thaw'
+  const thaw = await run(os, freezeSpec(first, spec, { dirfd, hostEnv, freeze }), { timeoutMs })
   const thawV = parseFreeze(thaw.stdout)
-  log(`install ${spec.slug}: thaw rc=${thaw.code} ${thawV.ok ? JSON.stringify(thawV.stats) : thawV.reason}`)
-  if (thaw.code !== 0 || !thawV.ok) return { ok: false, class: 'freeze-abort', message: `thaw: ${thawV.reason ?? tail(thaw.stderr)}` }
+  log(`install ${spec.slug}: ${first} rc=${thaw.code} ${thawV.ok ? JSON.stringify(thawV.stats) : thawV.reason}`)
+  if (thaw.code !== 0 || !thawV.ok) return { ok: false, class: 'freeze-abort', message: `${first}: ${thawV.reason ?? tail(thaw.stderr)}` }
 
   const cp = await run(os, copyManifestSpec(spec, { scratchDir: scratchReal, hostEnv }), { timeoutMs })
   if (cp.code !== 0) return { ok: false, class: 'install', message: `package.json copy failed (rc=${cp.code}): ${tail(cp.stderr)}` }

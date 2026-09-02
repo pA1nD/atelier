@@ -31,8 +31,9 @@
 //
 // The app lanes here serve the DEV slot (DESIGN §10.3 D3: Bayard's tree, hot reloaded, never the company's).
 // The release verbs (D6): `POST /_atelier/deploy {app, message, commit?, noBackup?}` and `POST /_atelier/restore
-// {app, backup}` answer an NDJSON stream of step lines ending in ONE verdict line (401 without the token, 404
-// unknown app, 409 `deploy in progress`, 400 a bad body); `GET /_atelier/releases?app=` and
+// {app, backup, yes?}` answer an NDJSON stream of step lines ending in ONE verdict line (401 without the token, 404
+// unknown app, 409 `deploy in progress` — or, for a restore of a LIVE app without `yes`, the refusal that names
+// `--yes`; 400 a bad body); `GET /_atelier/releases?app=` and
 // `GET /_atelier/backups?app=` list the host's rows. `host/devcli.mjs` (`atelier deploy|rollback|releases|
 // backups|restore`) is their client.
 import http from 'node:http'
@@ -263,7 +264,7 @@ export function createDevShell({ cfg = {}, os, supervisor, collector, registrar,
     try {
       p = kind === 'deploy'
         ? supervisor.deploy(row.instance, { message: body.message, commit: body.commit ?? null, noBackup: body.noBackup === true, by, onStep })
-        : supervisor.restore(row.instance, body.backup, { by, onStep })
+        : supervisor.restore(row.instance, body.backup, { by, yes: body.yes === true, onStep })
     } catch (e) { return json(res, e.status ?? 500, { error: e.message }) }
     res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' })
     res.flushHeaders?.()

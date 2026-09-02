@@ -28,7 +28,7 @@ import { bundleBackend, transformFrontend, classifyWorkerFailure, formatHint, so
 import { buildSheet } from './tailwind.mjs'
 import { createStore, gitInit } from './lastgood.mjs'
 import { createServe } from './serve.mjs'
-import { mkSlot, sockName, REL, deferred } from './slots.mjs'
+import { mkSlot, sockName, REL, deferred, COMMIT_RE, commit12 } from './slots.mjs'
 import { createDeployer, MESSAGES, DEPLOY_TIMING } from './deploy.mjs'
 import { createMetrics } from '../metrics.mjs'
 
@@ -83,7 +83,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       tmpDir: rel(`tmp/${instance}`), sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
       counter: 0, fingerprint: null, attempted: null,
       building: null, pending: false, broken: null, watcher: null, installing: null, installPending: false, git: Promise.resolve(),
-      savedAt: null, tailwindWarm: false, deploying: null, configStamp: null, rehearsal: null,
+      savedAt: null, tailwindWarm: false, deploying: null, configStamp: null, rehearsal: null, releasing: null,
       dev: mkSlot('dev', { appDir: dir, dataDir: rel(REL.devData(instance)) }),
       prod: null,
       armIdle: (slot) => armIdle(row, slot ?? row.prod ?? row.dev),
@@ -294,6 +294,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       for (const r of [slot.rev, ...slot.kept.map((k) => k.rev), slot.live?.rev]) if (r != null) keep.add(r)
     }
     if (row.rehearsal?.rev != null) keep.add(row.rehearsal.rev)
+    if (row.releasing != null) keep.add(row.releasing)   // the rev a deploy is carrying through its gate (pinned for the whole verb, B3)
     for (const r of store.list(row.instance)) if (!keep.has(r)) store.remove(row.instance, r)
   }
   const keptRev = (row, slot, rev) => rev === slot.rev || slot.kept.some((k) => k.rev === rev && k.until > os.now())
@@ -372,7 +373,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
   // --- the install hold (the freeze SIGKILLs every process of the worker uid — BOTH slots run as it) ---
   // dev: stopped (resumed on the next dev request); prod: held under its gate and stopped, the gate released
-  // when the install settles — requests wait, then resume the prod worker (≤ 100 ms held), none fails.
+  // when the install settles — requests wait for the freeze (kill + chown walk + rename) and a cold resume of the
+  // prod worker; past the 10 s hold they get the waking 503 (DESIGN §10.3 "The install hold"; drill row 9e measures it).
   async function holdProd(row, until) {
     const slot = row.prod
     if (!slot) return
@@ -479,7 +481,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     row.configStamp = updated
     const slot = row.prod
     if (!slot || row.deploying) return
-    if (!slot.live && slot.state !== 'down') return      // idle: the next resume fetches the config at spawn
+    if (slot.state === 'down') { emit(`[${row.slug}] config stamp ${updated} noted — the app is DOWN after a failed release; no restart (restore or deploy first)`); return }   // S2: a config PUT never resurrects a failed release
+    if (!slot.live) return      // idle: the next resume fetches the config at spawn
     if (slot.configAt === updated) return
     deployer.configRelease(row).catch((e) => emit(`[${row.slug}] config release crashed: ${e?.stack ?? e}`))
   }
@@ -503,8 +506,28 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         row.counter = revision?.rev ?? Math.max(cur?.rev ?? 0, curDev?.rev ?? 0); row.fingerprint = revision?.fingerprint ?? null
         row.meta = null
         if (cur) {
-          if (revision?.prod && revision.prod.rev === cur.rev) row.prod = prodSlot(row, { rev: cur.rev, commit: revision.prod.commit, legacy: !!revision.prod.legacy })
+          const p = revision?.prod
+          if (p && p.rev === cur.rev) row.prod = prodSlot(row, { rev: cur.rev, commit: p.commit, legacy: !!p.legacy })
+          else if (p && COMMIT_RE.test(p.commit ?? '') && fs.existsSync(store.revDir(inst, p.rev))) {
+            // S10: a torn commitProd — revision.json named the release, the host died before `current` moved; the recorded
+            // release wins (never the agent's working tree through an adopt)
+            store.link(inst, 'current', p.rev)
+            row.prod = prodSlot(row, { rev: p.rev, commit: p.commit, legacy: !!p.legacy })
+            emit(`boot: ${slug} current re-linked to rev ${p.rev} (revision.json.prod named it; the previous host life died between the two writes)`)
+          }
           else { row.prod = prodSlot(row, { rev: cur.rev, commit: null, legacy: true }); row.prod.adoptPending = true }   // D14: the pre-release layout, adopted on the first scan
+          // S1: a DOWN app stays down across a host restart — the marker on disk (a failed release), or the in-flight marker
+          // of a release the previous host life died inside (its migration may have run: the old rev must not serve that data)
+          const d = p?.down ?? (p?.releasing ? { step: 'migrate', error: 'the host died during the release (after the backup, before the record)', backup: p.releasing.backup ?? null, commit: p.releasing.commit ?? null, rev: p.releasing.rev ?? null, at: p.releasing.at ?? null } : null)
+          if (d) {
+            row.prod.state = 'down'; row.prod.down = d
+            if (!p.down) { try { store.prodPatch(inst, { down: d, releasing: undefined }) } catch (e) { emit(`boot: ${slug} down marker: ${e?.code ?? e?.message ?? e}`) } }
+            emit(MESSAGES.log.bootDown(slug, row.prod.rev, d.commit ? commit12(d.commit) : 'none', d.step, d.backup))
+          }
+          // a restore the previous host life died inside: the old tree comes back (its `.old`), the staged copy goes
+          const data = rel(REL.prodData(inst)), old = `${data}.old`, staging = `${data}.restore`
+          try { if (!fs.existsSync(data) && fs.existsSync(old)) { fs.renameSync(old, data); emit(`boot: ${slug} prod data restored from its .old (a restore died mid-swap)`) } } catch (e) { emit(`boot: ${slug} data .old: ${e?.code ?? e?.message ?? e}`) }
+          for (const leftover of [old, staging]) { try { if (fs.existsSync(leftover)) { fs.rmSync(leftover, { recursive: true, force: true }); emit(`boot: ${slug} swept ${path.basename(leftover)}`) } } catch {} }
         }
         const dv = curDev ?? cur
         if (dv) { row.dev.rev = dv.rev; row.dev.state = 'stopped' }
@@ -564,6 +587,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     },
     resolve: (co, slug) => { const r = [...rows.values()].find((x) => x.company === co && x.slug === slug && x.linked); return r ? appRow(r) : null },
     rebuild: (instance) => { const r = rows.get(instance); return r ? rebuild(r) : Promise.resolve(null) },
+    prune: (instance) => { const r = rows.get(instance); if (r) prune(r) },   // the rev-dir sweep the timers run (a test fires it mid-deploy)
     // stop(instance): the install's beforeFreeze — dev stopped, prod held under its gate (see holdForInstall)
     stop: async (instance) => { const r = rows.get(instance); if (r) await holdForInstall(r) },
     kill: (instance, reason, slotName) => {
@@ -575,7 +599,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       live.stopping = true
       try { live.handle.kill('SIGKILL') } catch {}
       slot.live = null; slot.state = 'failed'
-      report('worker', row.instance, slot.name === 'prod' ? live.rev : reportRev(row), { message: devMsg(slot, reason) })
+      // a rehearsal worker's kill is not its own report: the rehearsal step it was serving goes red and THAT is the chat's one message (N4)
+      if (slot.name !== 'rehearsal') report('worker', row.instance, slot.name === 'prod' ? live.rev : reportRev(row), { message: devMsg(slot, reason) })
       emit(`[${row.slug}] rev ${live.rev} KILLED ${reason}${slot.name !== 'prod' ? ` (${slot.name})` : ''}`)
       if (slot.name === 'prod') restartLater(row, slot)
     },
@@ -596,7 +621,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
 
     // --- releases (D6–D16): the dev shell's verbs
     deploy: (instance, opts) => { const r = rows.get(instance); if (!r?.linked) throw Object.assign(new Error('unknown app'), { status: 404 }); return deployer.deploy(r, opts) },
-    restore: (instance, backup, opts) => { const r = rows.get(instance); if (!r?.linked) throw Object.assign(new Error('unknown app'), { status: 404 }); return deployer.restore(r, backup, opts) },
+    restore: (instance, backup, opts) => { const r = rows.get(instance); if (!r?.linked) throw Object.assign(new Error('unknown app'), { status: 404 }); return deployer.restore(r, backup, opts) },   // opts.yes: the confirmation a LIVE app's restore needs
     releases: (instance) => { const r = rows.get(instance); return r ? deployer.releases(r) : [] },
     backups: (instance) => { const r = rows.get(instance); return r ? deployer.backups(r) : [] },
     onConfigStamp,
