@@ -89,3 +89,13 @@ test("a chrome folder without its own node_modules compiles: `@import 'tailwindc
     assert.match(s.css, /--color-brand/)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
+
+test('splitLongLines never cuts inside a token: every cut lands after a space or a quote, so a class that straddles the 200-char window still reaches the scanner (`fixed inset-x-0 bot|tom-0` in a minified chrome bundle lost `.bottom-0` from every sheet, 2026-09-02)', () => {
+  const line = 'x'.repeat(190) + ' fixed inset-x-0 bottom-0 z-40 ' + 'className:"rounded-xl shadow-lg" '.repeat(400)
+  const out = splitLongLines(line, 100, 200).split('\n')
+  assert.ok(out.every((l) => l.length <= 200), 'no chunk longer than the window')
+  assert.ok(out.some((l) => /(^| )bottom-0( |$)/.test(l)), `bottom-0 whole in one chunk\n${out.slice(0, 3).join('\n')}`)
+  assert.equal(out.join(''), line, 'nothing lost, nothing added')
+  // a window with no space or quote is cut hard (a 200-char token cannot be kept whole)
+  assert.equal(splitLongLines('a'.repeat(450), 100, 200).split('\n').map((l) => l.length).join(','), '200,200,50')
+})

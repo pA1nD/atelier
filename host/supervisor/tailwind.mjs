@@ -23,7 +23,10 @@ export const SCAN_EXTS = ['jsx', 'js', 'tsx', 'ts', 'html']
 export const LONG_LINE = 8 * 1024
 export const SPLIT_AT = 200
 
-// splitLongLines(text) — lines longer than LONG_LINE are cut into SPLIT_AT-char lines.
+// splitLongLines(text) — lines longer than LONG_LINE are cut into lines of at most SPLIT_AT chars, every cut placed
+// after the last space or quote in the window so no token is split: a class that straddled a cut never reached the
+// scanner (`fixed inset-x-0 bot|tom-0` in a minified chrome bundle — `.bottom-0` missing from every sheet, 2026-09-02).
+// A window without a space or quote is cut hard.
 export function splitLongLines(text, max = LONG_LINE, at = SPLIT_AT) {
   const lines = String(text).split('\n')
   let touched = false
@@ -31,7 +34,16 @@ export function splitLongLines(text, max = LONG_LINE, at = SPLIT_AT) {
   for (const l of lines) {
     if (l.length <= max) { out.push(l); continue }
     touched = true
-    for (let i = 0; i < l.length; i += at) out.push(l.slice(i, i + at))
+    let i = 0
+    while (i < l.length) {
+      let end = Math.min(i + at, l.length)
+      if (end < l.length) {
+        const win = l.slice(i, end)
+        const k = Math.max(win.lastIndexOf(' '), win.lastIndexOf('"'), win.lastIndexOf("'"), win.lastIndexOf('`'))
+        if (k > 0) end = i + k + 1
+      }
+      out.push(l.slice(i, end)); i = end
+    }
   }
   return touched ? out.join('\n') : String(text)
 }
