@@ -155,7 +155,7 @@ export function spawnWorker({ os, spec, onControl = () => {}, onExit = () => {},
       if (!ready && msg.t === 'ready') {
         ready = true
         handle.ready = msg
-        if (lockSocket) afterReady(os, spec, log)
+        if (lockSocket) afterReady(os, spec, log, { shared: lockSocket === 'shared' })   // 'shared' = the rehearsal socket: host + worker uid dial it
         settle(() => resolve(handle))
         return
       }

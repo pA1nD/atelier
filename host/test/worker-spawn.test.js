@@ -95,6 +95,12 @@ test('READY on fd 3 resolves the handle, locks the socket 0:0 0700, then control
   assert.equal(child.spec.env.OPENAI_KEY, undefined)
   assert.deepEqual(state.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700], ['chmod', spec.sockDir, 0o710]])
   assert.deepEqual(control, [{ t: 'broadcast', event: { type: 'x' } }])
+  // lockSocket 'shared' (the rehearsal worker): 0:<uid> 0770
+  const st2 = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o775, type: 'socket' } } }
+  const b2 = boot(st2, { lockSocket: 'shared' })
+  b2.child.stdio[3].emit('data', JSON.stringify(ready) + '\n')
+  await b2.p
+  assert.deepEqual(st2.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 20001], ['chmod', spec.sock, 0o770], ['chmod', spec.sockDir, 0o710]])
   child.stdio[3].emit('data', '{"t":"suspendable"}\n')
   assert.equal(control.length, 2)
   child.exit(0)

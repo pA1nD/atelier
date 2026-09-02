@@ -128,6 +128,12 @@ test('afterReady: the socket becomes 0:0 0700 (chown first, chmod while root own
   // jailPlan re-opens it for the next spawn
   applyJail(os, jailPlan(spec))
   assert.equal(state.fs[spec.sockDir].mode, 0o730)
+  // the rehearsal socket (shared): 0:<uid> 0770 — the host and the worker uid dial it (connect needs write; root has no DAC caps)
+  const s2 = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o775, type: 'socket' }, [spec.sockDir]: { uid: 0, gid: 20001, mode: 0o730, type: 'dir' } } }
+  const os2 = memory(s2)
+  assert.equal(afterReady(os2, spec, () => {}, { shared: true }).ok, true)
+  assert.deepEqual(s2.calls, [['chown', spec.sock, 0, 20001], ['chmod', spec.sock, 0o770], ['chmod', spec.sockDir, 0o710]])
+  assert.deepEqual(s2.fs[spec.sock], { uid: 0, gid: 20001, mode: 0o770, type: 'socket' })
 })
 
 test('claimRoundTrip §6.2(a) on an fd: setgroups([uid]) → openDir O_NOFOLLOW → fstat guard → fchown 0:<uid> → fchmod 2750 → fchown 1000:<uid> → close → groups restored', () => {

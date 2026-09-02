@@ -129,7 +129,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // startWorker(row, slot, rev, codeDir, opts) → {live, resources, suspendable, teardown} ; throws {error, msg, failed?}
   //   error: 'no-ready' | 'spawn-eagain' | 'load-failed' | 'jail' | 'host-fault' (the .atelier tree moved: no real path may leave the host)
   //   opts: {appDir, dataDir, sockFile, lockSocket, ephemeral} — the rehearsal worker (deploy.mjs) is ephemeral: its
-  //   exit is nobody's crash, its socket stays `<uid>`-dialable for the smoke step.
+  //   exit is nobody's crash; its socket is `0:<uid> 0770` (lockSocket 'shared') so the smoke step dials it as the worker.
   async function startWorker(row, slot, rev, codeDir, opts = {}) {
     if (!treeOk()) throw { error: 'host-fault', msg: '/work/.atelier renamed or removed' }
     const spec = await workerSpec(row, slot, rev, codeDir, opts)

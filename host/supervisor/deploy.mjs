@@ -426,7 +426,7 @@ export function createDeployer(i) {
             return { note: `${r.ms} ms` }
           }
           await R.step('hook', budget(D().hookMs + 500), () => runHook('deploy', {}, budget(D().hookMs)))
-          const booted = await R.step('boot', budget(D().bootMs + 500), () => i.startWorker(row, rehearsalSlot, rev, written.written.dir, { appDir: prodDir, dataDir: rehearsalSlot.dataDir, sockFile: sockName('rehearsal', rev), lockSocket: false, ephemeral: true }))
+          const booted = await R.step('boot', budget(D().bootMs + 500), () => i.startWorker(row, rehearsalSlot, rev, written.written.dir, { appDir: prodDir, dataDir: rehearsalSlot.dataDir, sockFile: sockName('rehearsal', rev), lockSocket: 'shared', ephemeral: true }))
           rehearsalSlot.live = booted.live
           try {
             await R.step('probe', budget(D().probeMs + 500), () => probe(booted.live.sock, mj.json.healthz, budget(D().probeMs)))

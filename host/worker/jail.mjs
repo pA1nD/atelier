@@ -122,11 +122,15 @@ export function applyJail(os, steps, log = () => {}) {
  * After READY: the socket the worker bound (`<uid>:<uid>`) becomes `0:0 0700` — only the host dials
  * it — and the socket dir drops the worker's write bit (`0730` → `0710`): the worker cannot fill the
  * `/run/atelier` tmpfs for life; `jailPlan` re-sets `0730` before the next spawn (prepareDirs).
+ * `shared` (the rehearsal worker, DESIGN §10.3 D8): `0:<uid> 0770` — the host (owner) AND the worker uid
+ * (the smoke hook's `curl --unix-socket`) dial it; connect(2) needs write on the socket inode and
+ * userns-root has no DAC caps, so a `0:0 0700` socket is the host's alone and a worker-owned 0775 one
+ * is EACCES to root. Chown first, chmod while root owns it.
  */
-export function afterReady(os, spec, log = () => {}) {
+export function afterReady(os, spec, log = () => {}, { shared = false } = {}) {
   return applyJail(os, [
-    { op: 'chown', path: spec.sock, uid: 0, gid: 0 },
-    { op: 'chmod', path: spec.sock, mode: 0o700 },
+    { op: 'chown', path: spec.sock, uid: 0, gid: shared ? spec.uid : 0 },
+    { op: 'chmod', path: spec.sock, mode: shared ? 0o770 : 0o700 },
     ...(spec.sockDir ? [{ op: 'chmod', path: spec.sockDir, mode: 0o710 }] : []),
   ], log)
 }
