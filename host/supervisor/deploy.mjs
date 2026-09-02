@@ -135,7 +135,7 @@ export const MESSAGES = {
   },
   // ── the list verbs (one row per line, newest first)
   list: {
-    release: (r) => `${r.at}  ${r.kind.padEnd(8)} ${r.verdict.padEnd(6)} rev ${String(r.rev ?? '-').padStart(3)}  ${(r.commit ?? '').slice(0, 12)}  ${r.message ? JSON.stringify(r.message) : ''}${r.backup ? `  backup ${r.backup}` : ''}${r.error ? `  ${r.error}` : ''}`,
+    release: (r) => `${iso(r.at)}  ${r.kind.padEnd(8)} ${r.verdict.padEnd(6)} rev ${String(r.rev ?? '-').padStart(3)}  ${(r.commit ?? '').slice(0, 12)}  ${r.message ? JSON.stringify(r.message) : ''}${r.backup ? `  backup ${r.backup}` : ''}${r.error ? `  ${r.error}` : ''}`,
     releasesNone: (slug) => `${slug}: no releases yet — atelier deploy ${slug} -m "first release"`,
     backup: (b) => `${b.id}  ${String(b.mb).padStart(6)} MB  rev ${b.rev}  ${b.at}`,
     backupsNone: (slug) => `${slug}: no backups (a backup is taken by every deploy that reaches the gate)`,
@@ -155,6 +155,10 @@ export const HOST_MESSAGES = Object.freeze({
 
 const tail = (s, n = 3) => String(s ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-n).join(' | ')
 const nowIso = (ms) => new Date(ms).toISOString()
+// A release row's `at` is a MS EPOCH (`os.now()`): the spine's release door validates it as one inside a window and
+// answered `400 at must be a ms epoch` to the ISO string the first live deploy posted (2026-09-02) — every row was
+// refused, `deployed_rev` never moved. The ISO form is for eyes only: the log lines and the CLI's list (`iso`).
+const iso = (at) => (typeof at === 'number' ? new Date(at).toISOString() : String(at))
 const c12 = (c) => (c ? commit12(c) : 'none')
 const gb = (bytes) => (bytes / 1024 / 1024 / 1024).toFixed(1)
 const childWhy = (r) => tail(r.stderr) || (r.signal ? `killed by ${r.signal}` : `rc=${r.code}`)
@@ -416,7 +420,7 @@ export function createDeployer(i) {
     const finish = async (outcome, extra = {}) => {
       await pruneExports(row, keptExports())
       const cur = current(row)
-      const rel = { id, instance: inst, kind, commit: commit ?? (wanted ? String(wanted) : null), message, at: nowIso(os.now()), by, verdict: outcome, rev: outcome === 'green' ? rev : (cur?.rev ?? null), rehearsal: { ms: extra.rehearsalMs ?? 0, partial, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: backup?.id ?? null, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
+      const rel = { id, instance: inst, kind, commit: commit ?? (wanted ? String(wanted) : null), message, at: os.now(), by, verdict: outcome, rev: outcome === 'green' ? rev : (cur?.rev ?? null), rehearsal: { ms: extra.rehearsalMs ?? 0, partial, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: backup?.id ?? null, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
       await recordRelease(row, rel)
       outcomeMetric(row, t0, outcome)
       const v = { t: 'verdict', outcome, kind, slug, url: url(row), api: api(row), release: id, ms: Math.round(os.now() - t0), rehearsal: { ms: rel.rehearsal.ms, ...(partial ? { partial: true } : {}) }, attempted: commit ? { commit } : null }
@@ -642,7 +646,7 @@ export function createDeployer(i) {
     const cur = store.current(inst)
     let snap = null
     const finish = async (outcome, extra = {}) => {
-      const rel = { id, instance: inst, kind: 'restore', commit: row.prod.commit, message: `restore ${backup}`, at: nowIso(os.now()), by, verdict: outcome, rev: row.prod.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
+      const rel = { id, instance: inst, kind: 'restore', commit: row.prod.commit, message: `restore ${backup}`, at: os.now(), by, verdict: outcome, rev: row.prod.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup, error: extra.reportMessage ?? extra.error ?? null, changelog: null }
       await recordRelease(row, rel)
       const v = { t: 'verdict', outcome, kind: 'restore', slug, commit: row.prod.commit, rev: row.prod.rev, url: url(row), api: api(row), backup, release: id, ms: Math.round(os.now() - t0) }
       if (snap) v.snapshot = snap.id
@@ -708,7 +712,7 @@ export function createDeployer(i) {
         if (!cur) return null
         const g = await underGate(row, R, { rev: cur.rev, commit: row.prod.commit, codeDir: cur.dir, appDir: row.prod.appDir, body: async () => {}, onFail: (f) => report(MESSAGES.configFailed.kind, inst, prodRev(row), { message: MESSAGES.configFailed.message(slug, f.step, f.error), hint: MESSAGES.configFailed.hint(slug) }) })
         const outcome = g.ok ? 'green' : 'failed'
-        const rel = { id, instance: inst, kind: 'config', commit: row.prod.commit, message: `config ${stamp ?? ''}`.trim(), at: nowIso(os.now()), by, verdict: outcome, rev: cur.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: null, error: g.ok ? null : MESSAGES.configFailed.message(slug, g.step, g.error), changelog: null }
+        const rel = { id, instance: inst, kind: 'config', commit: row.prod.commit, message: `config ${stamp ?? ''}`.trim(), at: os.now(), by, verdict: outcome, rev: cur.rev, rehearsal: { ms: 0, partial: false, steps: R.steps.map(({ name, ms, ok }) => ({ name, ms, ok })) }, backup: null, error: g.ok ? null : MESSAGES.configFailed.message(slug, g.step, g.error), changelog: null }
         await recordRelease(row, rel)
         if (g.ok) { try { i.onSwap(inst, cur.rev) } catch {} ; emit(MESSAGES.log.config(slug, cur.rev, stamp ?? '-')) }
         return { t: 'verdict', outcome, kind: 'config', slug, commit: row.prod.commit, rev: cur.rev, release: id, ...(g.ok ? {} : { step: g.step, error: g.error }) }
@@ -736,7 +740,7 @@ export function createDeployer(i) {
       store.commitProd(row.instance, rev, { commit: c.commit, message, deployedAt: nowIso(os.now()), legacy: true })
       if (!store.currentDev(row.instance)) store.link(row.instance, 'current-dev', row.dev.rev ?? rev)
       slot.commit = c.commit; slot.legacy = true; slot.appDir = row.dir; slot.adoptPending = false
-      const rel = { id: `adopt-${commit12(c.commit)}`, instance: row.instance, kind: 'adopt', commit: c.commit, message, at: nowIso(os.now()), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+      const rel = { id: `adopt-${commit12(c.commit)}`, instance: row.instance, kind: 'adopt', commit: c.commit, message, at: os.now(), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
       slot.announced = true
       await recordRelease(row, rel)
       emit(MESSAGES.log.adopt(row.slug, rev, commit12(c.commit)))
@@ -756,7 +760,7 @@ export function createDeployer(i) {
     if (slot.announcing) return slot.announcing
     const known = registrar?.apps?.()?.get(row.instance)?.deployed_rev ?? null
     if (known === slot.commit || !registrar?.release) { slot.announced = true; return Promise.resolve(null) }
-    const rel = { id: `adopt-${commit12(slot.commit)}`, instance: row.instance, kind: 'adopt', commit: slot.commit, message: MESSAGES.git.adoptMessage(slot.rev), at: nowIso(os.now()), by: 'host', verdict: 'green', rev: slot.rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+    const rel = { id: `adopt-${commit12(slot.commit)}`, instance: row.instance, kind: 'adopt', commit: slot.commit, message: MESSAGES.git.adoptMessage(slot.rev), at: os.now(), by: 'host', verdict: 'green', rev: slot.rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
     slot.announcing = (async () => {
       try {
         const r = await withBudget(Promise.resolve(registrar.release(rel)), D().recordMs).catch((e) => { emit(`[${row.slug}] announce: ${e?.error ?? e?.message ?? e}`); return null })
