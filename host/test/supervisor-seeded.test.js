@@ -240,3 +240,21 @@ test('the marker alone is not authority (B2): on a host NOT configured with ATEL
     assert.deepEqual(w.releases, [])
   } finally { await w.done(sup) }
 })
+
+test('two seeded folders build side by side inside ONE scan and the scan settles only when both are LIVE (what host-ready waits for on a seeded host, S1): after `await sup.scan()` both prod slots serve, two adopt rows, no dev line', async () => {
+  const w = world({ seededApps: true })
+  w.app('home', { 'module.json': APP_JSON('Home'), 'backend.js': BACKEND(1), [SEEDED_MARKER]: '' })
+  w.app('catalyst-chrome', { 'module.json': APP_JSON('Chrome'), 'backend.js': BACKEND(2), 'frontend.js': 'export {}', [SEEDED_MARKER]: '' })
+  const sup = w.make()
+  try {
+    await sup.scan()
+    for (const [slug, rev] of [['home', 1], ['catalyst-chrome', 2]]) {
+      const r = sup.resolve('acme', slug)
+      assert.equal(r.prod_state, 'live', `${slug}: ${w.lines.filter((l) => l.startsWith(`[${slug}]`)).join('\n')}`); assert.equal(r.prod_rev, 1); assert.match(r.deployed_rev, HEX40)
+      assert.equal(JSON.parse((await api(sup, r, '/rev', prod)).body).rev, rev)
+    }
+    assert.equal(w.releases.length, 2); assert.deepEqual(w.releases.map((x) => x.kind), ['adopt', 'adopt'])
+    assert.ok(!w.lines.some((l) => /\(dev\)/.test(l)))
+    assert.deepEqual(sup.workers().map((x) => [x.slug, x.slot]).sort(), [['catalyst-chrome', 'prod'], ['home', 'prod']])
+  } finally { await w.done(sup) }
+})

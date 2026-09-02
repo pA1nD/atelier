@@ -86,15 +86,21 @@ const dev = createDevShell({ cfg, os, supervisor, collector, registrar, principa
 await registrar.register()          // bootstrap → token+epoch (or local identity)
 await supervisor.boot()             // serve every last-good snapshot BEFORE scanning folders
 await server.listen(); await dev.listen()
+const firstScan = supervisor.scan(); watchdog.start(); registrar.heartbeat(10_000)
+await readyAfter(cfg, firstScan)    // a normal host: at once; a seeded host: the first scan, bounded 60 s
 writeSentinel(os, cfg.run + '/host-ready')                           // the kube readiness probe
-supervisor.scan(); watchdog.start(); registrar.heartbeat(10_000)
 process.on('SIGTERM', () => teardown(/* order §2.3 */))
 ```
 
 Boot order is load-bearing (OR8): snapshots are served and `host-ready` written before the first
 folder scan, first build or any spine round trip completes (registration failure = serve
 snapshots, retry registration with backoff, no `host-ready` until the registrar has an epoch
-in fleet mode; local mode has no registrar wait).
+in fleet mode; local mode has no registrar wait). The one exception is a SEEDED host
+(`cfg.seededApps`, §10.3 "seeded rows"): its /work has no last-good at birth and its whole job is
+the folders its image seeds, so `host-ready` follows the first scan — the seeded rows are built
+side by side inside it and the scan settles when every one is LIVE — bounded by
+`SEEDED_READY_MS` (60 s) so a broken seeded folder still lets the pod come up and report; the
+`host: ready` line says which of the two it was.
 
 ### 1.2 Configuration (`config(env)` in `index.mjs`; env only, set by the launcher)
 
@@ -281,7 +287,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/run/atelier/bootstrap.token` | `0:0 0400` | launcher | read once by the host, exchanged at registration |
 | `/run/atelier/dev.token` | `0:0 0400` | launcher | the host's copy |
 | `/run/atelier/session/` | `1000:1000 0700` | launcher (populated before chown) | `dev.token` `1000:1000 0400` — the agent's copy |
-| `/run/atelier/host-ready` | `0:0 0644` | host after the audit passed and both listeners are up (fleet: after registration) | the kube readiness probe (step 5); unlink + exclusive create (`wx`) — a pre-existing entry is never adopted; unlinked by the launcher on host exit, by the host at teardown and on a host fault |
+| `/run/atelier/host-ready` | `0:0 0644` | host after the audit passed and both listeners are up (fleet: after registration; a seeded host: after its first scan, bounded) | the kube readiness probe (step 5); unlink + exclusive create (`wx`) — a pre-existing entry is never adopted; unlinked by the launcher on host exit, by the host at teardown and on a host fault |
 | `/run/atelier/dev/` | `0:1000 0710` | launcher | |
 | `/run/atelier/dev/shell.sock` | `0:1000 0660` | host (dev shell) | agent connects; workers EACCES |
 | `/run/atelier/w/<inst>/` | `0:<uid> 0730` at spawn → `0710` once the LAST spawn of the instance in flight is READY | host at spawn (`jailPlan`, re-set before every spawn) / `lockSockDir` from the supervisor (`row.spawning` counts the spawns in flight — the dir is shared by the dev, prod and rehearsal workers, so one worker's READY never drops the bit under another's `listen`; drill row 9e found the prod resume doing exactly that to the rehearsal worker) | socket dir: the worker binds, cannot list; after READY it cannot write there either (no filling the `/run/atelier` tmpfs for life) |

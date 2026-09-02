@@ -641,18 +641,20 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
         try { await registrar.claim({ slug: r.slug, meta: {}, dir: r.dir }) } catch {}
         emit(`[${r.slug}] refused: ${r.error}`)
       }
+      const seededBuilds = []   // the seeded rows build side by side; the scan settles when every one has (host-ready waits for it on a seeded host)
       for (const app of d.apps) {
         let row = rowBySlug(app.slug)
         if (!row?.claimed) {
           row = await claimFolder(app, row)
           if (!row) continue
         }
-        if (row.seeded) { await deployer.seeded(row); continue }   // the folder is the release (DESIGN §10.3 "seeded rows"): prod built from it, never a dev slot, no watcher
+        if (row.seeded) { seededBuilds.push(deployer.seeded(row)); continue }   // the folder is the release (DESIGN §10.3 "seeded rows"): prod built from it, never a dev slot, no watcher
         watchRow(row)
         if (row.prod?.adoptPending) await deployer.adopt(row)
         else if (row.prod?.commit && !row.prod.announced) await deployer.announce(row)   // the boot announce (DESIGN §10.3): the spine learns the prod commit this host holds
         if (needsBuild(row)) rebuild(row)
       }
+      await Promise.all(seededBuilds)
       // boot reconcile (PLAN §4.3): the registrar tombstones rows with no folder on disk — the DISCOVERED
       // folders are its input (a boot row restored from last-good is not a folder); every row it
       // unlinked leaves the table (snapshot kept, served no more)
