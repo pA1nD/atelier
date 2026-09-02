@@ -767,3 +767,25 @@ test('the socket dir\'s write bit (0730 at spawn → 0710 after READY) is droppe
     assert.equal(JSON.parse((await api(sup, row, '/rev', prod)).body).rev, 2)
   } finally { w.osx.chmod = realChmod; await w.done(sup) }
 })
+
+test("the claim's `git init` and an immediate deploy on the same row share ONE init — the deploy's commit step awaits the claim's in-flight init instead of running a second `git init` on the dir (two overlapped under load: `could not lock config file`, 2026-09-02)", async () => {
+  const w = world({ gitCommit: true })
+  const inits = []
+  const spawn0 = w.osx.spawn
+  w.osx.spawn = (spec) => { if (spec?.argv?.[0] === 'git' && spec.argv.includes('init')) inits.push(spec.argv); return spawn0.call(w.osx, spec) }
+  const dir = w.app('todo', { 'module.json': MJ({ healthz: '/rev' }), 'backend.js': DATA_BACKEND(1), 'frontend.jsx': FRONTEND(1), 'card.jsx': CARD })
+  const sup = w.make()
+  try {
+    await sup.scan()   // the claim starts `git init` and does not wait for it
+    const row = sup.resolve('acme', 'todo')
+    assert.ok(row, 'the row is linked at claim')
+    const v = await deploy(sup, row, { message: 'first release' })   // fired while that init is still running
+    assert.equal(v.outcome, 'green', JSON.stringify(v))
+    assert.equal(inits.length, 1, `git init spawned ${inits.length}×: ${JSON.stringify(inits)}`)
+    assert.deepEqual(w.lines.filter((l) => /could not lock/.test(l)), [])
+    assert.deepEqual(gitLog(dir).map((l) => l.slice(41)), ['first release'])
+    const again = await deploy(sup, row, { message: 'second release' })   // the row is ready: no init at all
+    assert.equal(again.outcome, 'green', JSON.stringify(again))
+    assert.equal(inits.length, 1)
+  } finally { await w.done(sup) }
+})

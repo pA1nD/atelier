@@ -91,7 +91,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       linked: false, claimed: false,
       tmpDir: rel(`tmp/${instance}`), sockDir: path.join(cfg.run ?? '/run/atelier', 'w', instance),
       counter: 0, fingerprint: null, attempted: null,
-      building: null, pending: false, broken: null, watcher: null, installing: null, installPending: false, git: Promise.resolve(),
+      building: null, pending: false, broken: null, watcher: null, installing: null, installPending: false, git: Promise.resolve(), gitInit: null, gitReady: false,
       savedAt: null, tailwindWarm: false, deploying: null, configStamp: null, rehearsal: null, releasing: null, spawning: 0,
       dev: mkSlot('dev', { appDir: dir, dataDir: rel(REL.devData(instance)) }),
       prod: null,
@@ -450,9 +450,21 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     store.ensure(row.instance, row.uid)
     store.writeMarker(row.instance, 'slug', row.slug)
     if (jail?.claimRoundTrip) { try { jail.claimRoundTrip(os, row.dir, row.uid) } catch (e) { emit(`[${row.slug}] claim round trip: ${e.code ?? e.message}`) } }
-    // D7: the repo + .gitignore, once, as uid 1000 (a no-op on a repo; the agent's own .gitignore stays)
-    if (cfg.gitCommit !== false && !row.gitReady) row.git = row.git.then(() => gitInit({ os, appDir: row.dir, log: emit, home: cfg.gitHome })).then((r) => { if (r?.ok) row.gitReady = true }).catch(() => {})
+    // D7: the repo + .gitignore, once, as uid 1000 (a no-op on a repo; the agent's own .gitignore stays) — kicked off here,
+    // awaited by whoever needs the repo first (ensureGit: the deploy's commit step, the adopt)
+    if (cfg.gitCommit !== false) ensureGit(row).catch(() => {})
     return row
+  }
+  // ensureGit(row) → {ok, step?, error?}: ONE `git init` in flight per row — the claim starts it, the deploy's commit step and
+  // the adopt await the SAME promise (two inits on one dir overlapped under load: `could not lock config file`, 2026-09-02);
+  // `gitReady` is set from that promise alone; a failed init clears it so the next caller tries again (never throws).
+  function ensureGit(row) {
+    if (row.gitReady) return Promise.resolve({ ok: true })
+    if (!row.gitInit) {
+      row.gitInit = gitInit({ os, appDir: row.dir, log: emit, home: cfg.gitHome })
+        .then((r) => { if (r?.ok) row.gitReady = true; else row.gitInit = null; return r }, (e) => { row.gitInit = null; return { ok: false, step: 'init', error: e?.message ?? String(e) } })
+    }
+    return row.gitInit
   }
   function watchRow(row) {
     if (row.watcher) return
@@ -500,7 +512,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   const deployer = createDeployer({
     os, dirfd, fs, cfg, T, emit, report, registrar, store, metrics, hostEnv, jail, install, hook, treeOk, company, origin,
     rel, dot, realPath, workerSpec, startWorker, stopLive, buildArtefacts, prune, prodSlot, exportDir, withInstalling, later,
-    onSwap, armIdle: (row, slot) => armIdle(row, slot), withGroupSync, checkModuleJson: (dir) => checkModuleJson(dir, fs), chromeNameOf,
+    onSwap, armIdle: (row, slot) => armIdle(row, slot), withGroupSync, checkModuleJson: (dir) => checkModuleJson(dir, fs), chromeNameOf, ensureGit,
   })
   // --- the chrome swap (step 7 ship C, decision 8; review 2026-09-02, S2) ------------------------------------------
   // A prod slot is DEPLOYED when it has a rev, is adopted and is not down; its sheet is BUILT against the held chrome when
