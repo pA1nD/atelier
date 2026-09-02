@@ -45,7 +45,7 @@ test('the root+19999 specs (cp -a / rm -rf / du -sk) and row T (tar -x as root, 
   // the fleet (GNU cp): never --preserve=ownership (cp creates each inode without its g/o bits and chmods them back AFTER the
   // chown — EPERM without CAP_FOWNER); umask 007 → 0660/0770 at creation, then ONE chown pass over the contents (CAP_CHOWN)
   const g = copySpecs('/a', '/b', { uid: 20001, hostEnv: { PATH: '/p' }, gnu: true })
-  assert.deepEqual(g.map((x) => x.argv), [['cp', '-dR', '--preserve=timestamps,links', '--', '/a/.', '/b'], ['find', '/b', '-mindepth', '1', '-exec', 'chown', '-h', '20001:19999', '{}', '+']])
+  assert.deepEqual(g.map((x) => x.argv), [['cp', '-dR', '--', '/a/.', '/b'], ['find', '/b', '-mindepth', '1', '-exec', 'chown', '-h', '20001:19999', '{}', '+']], 'no --preserve=timestamps either: cp would utimensat the destination dir itself (a <uid> inode) — EPERM without FOWNER')
   assert.equal(g[0].umask, 0o007); assert.deepEqual(g[0].groups, [19999]); assert.deepEqual(g[1].groups, [19999])
   assert.deepEqual(copySpecs('/a', '/b', { uid: 20001, gnu: true, privileged: false }).map((x) => x.argv[0]), ['cp'], 'unprivileged (the same user copies): no chown pass')
   assert.equal(copySpecs('/a', '/b', { uid: 1 })[0].argv.includes('-a'), process.platform !== 'linux')

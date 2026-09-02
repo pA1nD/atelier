@@ -62,7 +62,7 @@ const ROOT_G = { uid: 0, gid: 0, groups: [AGENT_DATA_GID], umask: 0o022, cwd: '/
 const envOf = (hostEnv) => ({ PATH: hostEnv.PATH ?? '/usr/bin:/bin' })
 /**
  * The data copy — the contents of src into an existing dst (the rehearsal copy, the backup, the restore) — as a LIST
- * of specs run in order. In the fleet (GNU cp, root + group 19999): `cp -dR --preserve=timestamps,links` under umask
+ * of specs run in order. In the fleet (GNU cp, root + group 19999): `cp -dR` (links kept, no times, no modes) under umask
  * 007 (files 0660, dirs 0770, the setgid bit inherited from the 2770 parent — DESIGN §3's data shape) and then ONE
  * chown pass over the copied contents to `<uid>:19999` (CAP_CHOWN). Never `--preserve=ownership`: GNU cp implements it
  * by creating each inode WITHOUT its group/other bits and chmodding them back AFTER the chown — a chmod on a `<uid>`
@@ -72,7 +72,9 @@ const envOf = (hostEnv) => ({ PATH: hostEnv.PATH ?? '/usr/bin:/bin' })
 export function copySpecs(src, dst, { uid, hostEnv = process.env, gnu = process.platform === 'linux', privileged = true } = {}) {
   const from = `${String(src).replace(/\/+$/, '')}/.`
   if (!gnu) return [{ ...ROOT_G, argv: ['cp', '-a', '--', from, dst], env: envOf(hostEnv) }]
-  const specs = [{ ...ROOT_G, umask: 0o007, argv: ['cp', '-dR', '--preserve=timestamps,links', '--', from, dst], env: envOf(hostEnv) }]
+  // `-d` = --no-dereference --preserve=links; no timestamps either: cp would utimensat the DESTINATION dir itself (`dst/.`,
+  // a `<uid>:19999` inode) — EPERM without FOWNER; nobody reads a backup's mtimes
+  const specs = [{ ...ROOT_G, umask: 0o007, argv: ['cp', '-dR', '--', from, dst], env: envOf(hostEnv) }]
   if (privileged) specs.push({ ...ROOT_G, argv: ['find', dst, '-mindepth', '1', '-exec', 'chown', '-h', `${uid}:${AGENT_DATA_GID}`, '{}', '+'], env: envOf(hostEnv) })
   return specs
 }
