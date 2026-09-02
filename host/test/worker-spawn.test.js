@@ -81,7 +81,7 @@ const boot = (state, opts = {}) => {
   return { os, p, child, control, exits }
 }
 
-test('READY on fd 3 resolves the handle, locks the socket 0:0 0700, then control messages flow to onControl', async () => {
+test('READY on fd 3 resolves the handle, locks the socket 0:0 0700 (the socket INODE only — the dir\'s write bit is the supervisor\'s, dropped by the last spawn in flight: lockSockDir), then control messages flow to onControl', async () => {
   const state = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o755, type: 'socket' } } }
   const { p, child, control, exits } = boot(state)
   const ready = { t: 'ready', mountMs: 12, importMs: 30, resources: {}, teardown: true }
@@ -93,14 +93,15 @@ test('READY on fd 3 resolves the handle, locks the socket 0:0 0700, then control
   // the config lane: one JSON document on stdin, then EOF — before READY, never through the env
   assert.deepEqual(child.stdin.written, ['{"env":{"OPENAI_KEY":"sk-x"}}']); assert.equal(child.stdin.ended, true)
   assert.equal(child.spec.env.OPENAI_KEY, undefined)
-  assert.deepEqual(state.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700], ['chmod', spec.sockDir, 0o710]])
+  assert.deepEqual(state.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 0], ['chmod', spec.sock, 0o700]], 'no chmod of the socket dir here: two workers of one instance share it, one READY must not lock it under the other\'s bind (drill row 9e)')
+  assert.ok(!state.calls.some((c) => c[0] === 'chmod' && c[1] === spec.sockDir))
   assert.deepEqual(control, [{ t: 'broadcast', event: { type: 'x' } }])
   // lockSocket 'shared' (the rehearsal worker): 0:<uid> 0770
   const st2 = { fs: { [spec.sock]: { uid: 20001, gid: 20001, mode: 0o775, type: 'socket' } } }
   const b2 = boot(st2, { lockSocket: 'shared' })
   b2.child.stdio[3].emit('data', JSON.stringify(ready) + '\n')
   await b2.p
-  assert.deepEqual(st2.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 20001], ['chmod', spec.sock, 0o770], ['chmod', spec.sockDir, 0o710]])
+  assert.deepEqual(st2.calls.filter((c) => c[0] !== 'spawn'), [['chown', spec.sock, 0, 20001], ['chmod', spec.sock, 0o770]])
   child.stdio[3].emit('data', '{"t":"suspendable"}\n')
   assert.equal(control.length, 2)
   child.exit(0)
