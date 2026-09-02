@@ -99,12 +99,8 @@ curl -s -X POST "127.0.0.1:1844/api/<company>/<slug>/items?token=$T" -H 'content
 curl -s "127.0.0.1:1844/_atelier/events?app=<instance>&token=$T"                          # the app's recent errors, newest last
 ```
 
-`dev_state: "live"` with a `dev_rev` that moved = the save built. A save that does not build reaches you as an app-error whose
-message starts with `dev:` — nobody else saw it; fix and save again:
-
-    app-error <slug> rev <N> build at <at>
-    <file>:<line>:<col> dev: <message>
-    fix: <file>:<line>:<col> <message> — <fix>
+`dev_state: "live"` with a `dev_rev` that moved = the save built. A save that does not build reaches you as an app-error, second line
+`<file>:<line>:<col> dev: <message>` (then `fix: <file>:<line>:<col> <message> — <fix>`) — nobody else saw it; fix and save again.
 
 Screenshot the DEV document with horse-browser at `http://127.0.0.1:1844/<company>/<slug>?token=$T` — your screenshot is the
 preview. Act as a second person with `-H 'x-atelier-user: u2' -H 'x-atelier-name: Bea'`. Delete test data after. No servers.
@@ -125,28 +121,32 @@ and releases (a minute or two, up to ~6 min; the steps stream as they run). It e
 - `deploy green: <slug> rev <N> commit <c12> live — <url>` — the chat has this version now (exit 0); the host says nothing — you do.
 - `deploy RED at <step>: <error> — nothing deployed, <slug> stays on rev <N> (<c12>)` — the rehearsal failed at that step; prod
   and its data are untouched. Fix and deploy again (exit 2). The chat's record gets an app-error `rehearsal red at <step>: …`.
-- `deploy FAILED at <step>: <error> — <slug> is DOWN, backup <id> kept` — rare: the rehearsal passed but prod did not come up.
-  The app answers 503 `{"error":"app down after a failed deploy","backup":"<id>"}` until you act; nothing is restored for
-  you. Fix forward and deploy again, or `atelier restore <slug> <id>` (below). Tell the chat at once (exit 3).
-- `deploy RED at backup: backup impossible: <why>` — refused before the gate (prod data > 1 GiB or free space < 2× it).
-  `--no-backup` skips the snapshot; a failure after the gate then ends `… is DOWN, no backup (--no-backup)` — ask the operator first.
+- `deploy FAILED at <step>: <error> — <slug> is DOWN, backup <id> kept` — rare: the rehearsal passed, prod did not come up (exit 3): tell
+  the chat at once. The app answers 503 `{"error":"app down after a failed deploy","backup":"<id>"}` until you act; nothing is restored —
+  a host restart keeps it DOWN (`boot: rev <N> stays DOWN (…) — atelier restore <slug> <id>, or fix forward and deploy`).
+- `deploy RED at backup: backup impossible: <why>` — refused before the gate. Prod data > 1 GiB or free space < 2× it: `--no-backup`
+  skips the snapshot (a failure after the gate ends `… is DOWN, no backup (--no-backup)` — ask the operator first). `could not read the
+  data dir (<why>)` / `could not measure the data dir (<why>)`: a host fault; `--no-backup` does not lift it — fix the data dir.
 - `deploy aborted: <reason> — read atelier releases <slug> before running it again` — no verdict came (exit 1): read the list first.
-
-`atelier deploy` while one runs is refused (`atelier: 409 deploy in progress`, exit 1) — wait for its verdict, never run two.
-
+- `atelier: 409 deploy in progress` (exit 1) — one is running: wait for its verdict, never run two.
 - `atelier releases <slug>` — one line per release, newest first: `<at>  <kind> <verdict> rev <N>  <c12>  "<message>"`;
   `atelier backups <slug>` — the pre-migration snapshots the deploys kept (last 3, ≤ 1 GiB): `<id>  <MB> MB  rev <N>  <at>`.
 - `atelier rollback <slug> <commit>` — deploy an earlier commit (7–40 hex from the releases list): the same rehearsal and gate,
   no hook, data untouched. Ends `rollback green: <slug> rev <N> commit <c12> live — <url>`, `rollback RED …` or `… FAILED …`.
-- `atelier restore <slug> <backup-id>` — prod's data becomes that snapshot, under the gate; code stays; everything written since
-  the backup is gone — say so first. Ends `restore green: <slug> rev <N> data from backup <id> live — <url>` or `… FAILED …`.
+- `atelier restore <slug> <backup-id> [--yes]` — prod's data becomes that snapshot (under the gate; code stays); everything written since
+  it is gone — say so first. A LIVE app refuses without `--yes`: `atelier: 409 <slug> is live: restore replaces its prod data with backup
+  <id> (everything written since is lost) — run atelier restore <slug> <id> --yes to confirm` (exit 1); a DOWN app needs no flag. Today's
+  data is snapshot first (`snapshot ok … — <id> (<MB> MB)`, one more backup row). Ends `restore green: <slug> rev <N> data from backup
+  <id> live — <url>`, `restore RED at <step>: <error> — nothing restored, <slug> unchanged, backup <id> untouched` (refused before the
+  gate) or `restore FAILED at <step>: … — <slug> is DOWN, backup <id> kept`.
 
 ## Migrations — the `deploy` hook (forward-only, expand/contract)
 
-The hook runs twice per deploy: on the rehearsal COPY, then on prod's data — worker uid, cwd = the exported commit, `DATA_DIR`
-= the data folder, config on stdin, ≤ 60 s. It must be **idempotent and additive**: create what is missing (tables, columns,
-files, backfills), never drop, rename or rewrite in place. Reads switch to the new shape in the deploy AFTER the one that added
-it; drops come two deploys later. A rollback runs NO hook and touches no data — the old code must still find data it understands.
+The hook runs twice per deploy: on the rehearsal COPY, then on prod's data — worker uid, cwd = the export (read-only for it — write only
+under `$DATA_DIR`; a temp file beside the code fails EACCES), `DATA_DIR` = the data folder, config on stdin, ≤ 60 s. **Idempotent and
+additive**: add what is missing (tables, columns, files, backfills), never drop, rename or rewrite in place. Reads switch to the new
+shape in the deploy AFTER the one that added it; drops come two deploys later. A rollback runs NO hook and touches no data — the old code
+must still find data it understands. No long uploads or SSE while deploying: the gate drains 2 s, then stops the worker.
 
     import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync(process.env.DATA_DIR + '/app.db')   // migrate.js
     db.exec('CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, text TEXT, by TEXT)')
