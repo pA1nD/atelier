@@ -21,6 +21,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { archiveSpec, commitAll, resolveCommit } from './lastgood.mjs'
 import { formatHint, classifyWorkerFailure } from './bundle.mjs'
+import { treeId } from './watcher.mjs'
 import { REL, commit12, backupId, parseBackupId, newReleaseId, copySpecs, rmSpec, duSpec, lsSpec, extractSpec, parseKb, ownTree, pruneBackups, backupFeasible, mb, deferred, RELEASES_KEEP, COMMIT_RE, DATA_CAP_BYTES, sockName } from './slots.mjs'
 import { run } from '../worker/install.mjs'
 import { backupPlan, rehearsalPlan, prodPlan, dataPlan, applyJail, jailPlan } from '../worker/jail.mjs'
@@ -121,6 +122,8 @@ export const MESSAGES = {
     red:     (slug, c12, step, error, N) => `[${slug}] deploy ${c12} RED at ${step}: ${error} — prod stays on rev ${N}`,
     failed:  (slug, c12, step, error, id) => `[${slug}] deploy ${c12} FAILED at ${step}: ${error} — DOWN, backup ${id ?? 'none'}`,
     adopt:   (slug, N, c12) => `[${slug}] adopt: rev ${N} (${c12}) committed — prod = the legacy tree until its first deploy`,
+    seeded:  (slug, N, c12) => `[${slug}] seeded: rev ${N} (${c12}) is the release — prod from the folder, no dev slot`,
+    seededFail: (slug, N, hint) => `[${slug}] rev ${N} FAILED (seeded) ${hint}`,
     config:  (slug, N, at) => `[${slug}] config release: rev ${N} restarted under the gate (config updated ${at})`,
     restore: (slug, id, ms) => `[${slug}] restore ${id} done in ${ms} ms`,
     restoreRed: (slug, id, step, error) => `[${slug}] restore ${id} RED at ${step}: ${error} — nothing restored`,
@@ -131,6 +134,7 @@ export const MESSAGES = {
   // ── git
   git: {
     adoptMessage: (N) => `adopt: the tree serving rev ${N}`,
+    seededMessage: (N) => `seeded: the image's tree serving rev ${N}`,
     gitignore: ['data/', '.env', '.env.*', 'node_modules/', 'CLAIM-REFUSED.txt', '.atelier'].join('\n') + '\n',
   },
   // ── the list verbs (one row per line, newest first)
@@ -172,6 +176,7 @@ const childWhy = (r) => tail(r.stderr) || (r.signal ? `killed by ${r.signal}` : 
  *   .restore(row, backupId, {by, yes, onStep}) → the verdict (refused unless the app is DOWN or `yes`)
  *   .configRelease(row) → the verdict (D16)
  *   .adopt(row) → the release row (D14)
+ *   .seeded(row) → the release row (DESIGN §10.3 "seeded rows": the folder is the release; every scan calls it)
  *   .releases(row) → [rows, newest first]   .backups(row) → [{id, at, rev, commit, bytes}, newest first]
  * Every app-error report here carries rev = row.prod?.rev ?? 0 — the PROD rev (the spine's coalescer keeps ONE running
  * rev per instance and drops lower ones as stale; a dev/rehearsal counter would silence every later prod error).
@@ -772,5 +777,72 @@ export function createDeployer(i) {
     return slot.announcing
   }
 
-  return { deploy, restore, configRelease, adopt, announce, releases, backups, pruneOldBackups }
+  // ---------------------------------------------------------------------------------------------
+  // A SEEDED row — the folder carries discovery's SEEDED_MARKER (`.atelier-seeded`; the portal's system host seeds `home`
+  // and `catalyst-chrome` from its image at every boot — DESIGN §10.3 "seeded rows"): the folder IS the release. Nobody
+  // edits it, the pod has no git and a fresh /work every life, so the prod slot is built straight from the folder in the
+  // legacy shape (the bundle from the rev dir, static files and createRequire from the folder), its commit is the folder's
+  // CONTENT id (watcher.mjs treeId: the same bytes give the same id on every boot, so the spine replays `adopt-<c12>`), the
+  // worker starts at once and ONE `adopt` row goes to the spine. No dev slot, no watcher: nothing D18 can idle-stop out from
+  // under the company (2026-09-02: both seeded apps came up `(dev)` and stopped ten minutes later; the portal was dark).
+  // Every scan calls it: the same id → the boot announce (which converges a row the spine never recorded); a new id (a
+  // re-seed over a kept /work) → a new rev the same way, the old worker retired after the swap. A build that failed is
+  // this folder's answer until its bytes change (the sweep rule of §6.1: never a rev every 30 s for one broken tree).
+  function seeded(row) {
+    const inst = row.instance, slug = row.slug
+    const id = i.withGroupSync(row.uid, () => treeId(row.dir, fs))
+    if (!id) { emit(`[${slug}] seeded: folder unreadable — retried on the next scan`); return Promise.resolve(null) }
+    if (row.prod?.commit === id && !row.prod.adoptPending) return announce(row)
+    if (row.deploying) return row.deploying
+    if (row.seededAttempted === id) return Promise.resolve(null)
+    row.seededAttempted = id
+    const t0 = os.now()
+    row.deploying = (async () => {
+      let rev
+      try { rev = store.nextRev(inst) } catch (e) { emit(`[${slug}] seeded: ${e?.code ?? e?.message ?? e}`); return null }
+      row.counter = rev
+      const fail = (kind, message, hint, where = {}) => {
+        report(kind, inst, prodRev(row), { message, ...(hint ? { hint } : {}), ...where })
+        emit(MESSAGES.log.seededFail(slug, rev, hint ?? message))
+        try { store.remove(inst, rev) } catch {}
+        return null
+      }
+      const mj = i.checkModuleJson(row.dir)
+      if (!mj.ok) return fail('build', mj.error.message, formatHint(mj.error), { file: mj.error.file, line: mj.error.line, col: mj.error.col })
+      let built
+      try { built = await i.buildArtefacts(row, { appDir: row.dir, rev }) } catch (e) {
+        if (e?.problems) { const p = e.problems[0]; return fail('build', p.message, formatHint(p), { file: p.file, line: p.line, col: p.col }) }
+        return fail('build', `snapshot write failed: ${e?.code ?? e?.message ?? e}`, null)
+      }
+      // load-beside: a re-seed's old worker keeps serving until the new one is READY (a request meanwhile resumes the old rev)
+      const slot = row.prod ?? i.prodSlot(row, { rev: null, commit: null, legacy: true })
+      let next
+      try { next = await i.startWorker(row, slot, rev, built.written.dir) } catch (e) {
+        const p = e.failed ? classifyWorkerFailure(e.failed, { appDir: row.dir, fs, map: built.map }) : null
+        return fail('worker', p?.message ?? `${e.error}: ${e.msg}`, p ? formatHint(p) : null, p ? { file: p.file, line: p.line, col: p.col } : {})
+      }
+      const chrome = i.chromeNameOf?.() ?? null   // the sheet was compiled against it (rebuildAll reads it back)
+      try { store.commitProd(inst, rev, { commit: id, message: MESSAGES.git.seededMessage(rev), deployedAt: nowIso(os.now()), legacy: true, ...(chrome ? { chrome } : {}) }) } catch (e) {
+        try { await i.stopLive(row, slot, next.live, 'seeded-record-failed') } catch {}
+        return fail('build', `revision.json: ${e?.code ?? e?.message ?? e}`, null)
+      }
+      const old = slot.live
+      slot.live = next.live; slot.rev = rev; slot.state = 'live'; slot.commit = id; slot.legacy = true; slot.appDir = row.dir
+      slot.resources = next.resources; slot.suspendable = next.suspendable; slot.restarts = 0; slot.down = null; slot.adoptPending = false
+      row.prod = slot
+      if (old) { slot.kept.push({ rev: old.rev, until: os.now() + T.keepMs }); slot.retiring.add(old); i.later(T.swapStopMs, () => i.stopLive(row, slot, old, 'reseed')); i.later(T.keepMs + 50, () => i.prune(row)) }   // retiring: teardown stops it too
+      try { i.onSwap(inst, rev) } catch (e) { emit(`[${slug}] onSwap: ${e?.message ?? e}`) }
+      i.armIdle(row, slot)   // R14: prod idle-stops only on empty resources, resumed on the next request with requests held
+      emit(MESSAGES.log.live(slug, rev, commit12(id), Math.round(os.now() - t0)))
+      emit(MESSAGES.log.seeded(slug, rev, commit12(id)))
+      // the release row; `announced` is NOT set here — a spine that refused or was unreachable is asked again by the next
+      // scan's announce (idempotent by id), and a spine that recorded it already holds the commit (registrar.release notes it)
+      const rel = { id: `adopt-${commit12(id)}`, instance: inst, kind: 'adopt', commit: id, message: MESSAGES.git.seededMessage(rev), at: os.now(), by: 'host', verdict: 'green', rev, rehearsal: { ms: 0, partial: false, steps: [] }, backup: null, error: null, changelog: null }
+      await recordRelease(row, rel)
+      return rel
+    })().catch((e) => { emit(`[${slug}] seeded crashed: ${e?.stack ?? e}`); return null }).finally(() => { row.deploying = null })
+    return row.deploying
+  }
+
+  return { deploy, restore, configRelease, adopt, announce, seeded, releases, backups, pruneOldBackups }
 }

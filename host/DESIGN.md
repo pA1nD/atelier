@@ -255,6 +255,7 @@ with mode); the ONLY chmod-after-chown sites are the two round trips of §6.2.
 | `/work/apps/<slug>` | `1000:<uid> 2750` | agent (mkdir); host round trip §6.2(a) at claim | the worker reads its sources through appgid; peers EACCES |
 | `/work/apps/<slug>/node_modules` | `1000:<uid>` dirs 0750 files 0640 (`|050`/`|040` normalised) | freeze.py | never written by root; installed in scratch, renamed in as uid 1000 |
 | `/work/apps/<slug>/CLAIM-REFUSED.txt` | `1000:1000 0644` | registrar via row G-style uid-1000 write | the only host write into an app folder, as uid 1000, `O_NOFOLLOW`, `wx` |
+| `/work/apps/<slug>/.atelier-seeded` | `1000:1000 0644` | the image's entrypoint (the portal's system host, as uid 1000, beside its own `.image-stamp`) | the folder is a RELEASE (§10.3 "seeded rows"): prod is built from it, its content id is the commit, no dev slot, no watcher, no git; a dotfile — ignored by the fingerprint and the content id |
 | `/work/apps/<slug>/.git` | `1000:1000` | git as 1000 (row G) | one commit per RELEASE (`atelier deploy`), one `adopt:` commit for a pre-release row; `.gitignore` (`data/ .env .env.* node_modules/ CLAIM-REFUSED.txt .atelier`) written once, never over the agent's |
 | `/work/.atelier` | `0:0 0711` | launcher | the dirfd root; markers below are `at(dirfd, …)` writes; a worker cannot enumerate its peers' instance ids |
 | `/work/.atelier/agent.log` | `0:1000 0640` | host (`errors/agentlog.mjs`) | agent reads; workers cannot (groups cleared) |
@@ -492,7 +493,9 @@ the app folder as the current user and skips freeze (logged).
 - Discovery: a folder under `/work/apps` is an app iff `module.json` parses; names not matching
   `SLUG_RE` (protocol/registry) → `CLAIM-REFUSED.txt` `bad slug`; `_*`, `.*`, `-*`, space-prefixed
   ignored; a folder with `CLAIM-REFUSED.txt` is skipped until the file is deleted. Meta read =
-  `allowMeta(json)`; unknown keys (incl. `visibility`) dropped silently.
+  `allowMeta(json)`; unknown keys (incl. `visibility`) dropped silently. A folder carrying
+  `.atelier-seeded` (`SEEDED_MARKER`) is a seeded row (§10.3): no watcher, no dev build, no git — the
+  scan hands it to `deployer.seeded` every time.
 - Watcher: ONE recursive watch per app folder, exclusion list `node_modules/`, `data/`, `.atelier`,
   dotfiles, `_*`, `package.json`, `package-lock.json`, `CLAIM-REFUSED.txt`; quiescence = two
   fingerprints (path+size+mtime of the non-excluded set) 100 ms apart identical; overflow or
@@ -1240,6 +1243,25 @@ before (the bundle from the rev dir, static files and `createRequire` from the f
 onto an export; the `prod` block is the idempotence marker across restarts. At every boot the host re-announces the
 prod commit it holds to the spine (`adopt-<c12>`, skipped when the register reply already carries that
 `deployed_rev`) so a migrated registry (`deployed_rev = "legacy"`) converges.
+
+**Seeded rows** (`supervisor/deploy.mjs seeded`; the 2026-09-02 incident). The portal's SYSTEM host seeds `home` and
+`catalyst-chrome` into `/work/apps` from its image at every boot and marks each folder `.atelier-seeded` (discovery's
+`SEEDED_MARKER`). Such a folder IS the release: nobody edits it, the pod has no git (`ATELIER_GIT_COMMIT=0`, git purged from
+the image) and `/work` is an emptyDir — so it never takes the new-folder road (dev-only until a first deploy that never
+comes; D18 then idle-stopped the dev worker ten minutes after boot and the shell's `/modules/portal/catalyst-chrome/*`
+answered 404 for every signed-in user). Instead the first scan builds the three artefacts from the folder into a new rev,
+starts the PROD worker at once (load-beside on a re-seed), records `prod = {rev, commit, legacy: true, chrome}` +
+`current`, fires `onSwap` (the registry's `rev`, the invalidate) and posts ONE `{kind:'adopt', id: adopt-<c12>}` row. The
+commit is the folder's CONTENT id — `watcher.mjs treeId`, sha256 over the non-excluded files as `<rel>\0<bytes>\0` in path
+order cut to 40 hex: the same image bytes give the same id on every boot (mtimes, which every `cp` rewrites, do not move
+it), so the spine replays the id and `deployed_rev` converges from `legacy`. No dev slot, no watcher, no `.git`: the
+folder is served in the legacy shape (bundle from the rev dir, static files and `createRequire` from the folder); prod
+keeps the R14 idle rule (resume on the next request, requests held) — nothing D18 can stop. Every scan recomputes the
+id: equal → the boot announce only (a spine that refused or was unreachable is asked again; `announced` is not set by the
+seeded build itself); different (a re-seed over a kept `/work`) → a new rev the same way, the old worker retired
+`swapStopMs` after the swap. A build or a worker that failed is that folder's answer until its bytes change (one rev,
+one report — the §6.1 sweep rule); the row then has no prod slot (404 `not deployed`) rather than a slot nothing can resume.
+A normal agent folder is untouched by all of this. Test: `supervisor-seeded.test.js`.
 
 **The socket dir under two spawns.** `w/<inst>` is one dir for the dev, prod and rehearsal sockets; its write bit is
 opened before every bind and dropped after READY — by the supervisor when `row.spawning` (spawns of the instance in
