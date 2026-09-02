@@ -131,11 +131,15 @@ test('the chrome by digest (step 7 ship C, decision 5): `base` puts every chrome
   assert.equal(rowShape.sheet, '/modules/portal/catalyst-chrome/styles.css')
 })
 
-// self-skips without the `step5` ref: a shallow or ref-less checkout (CI on a clone without that branch) loses this proof
+// STEP5_BASE: the step-5 document this proof compares against — the commit the fleet rendered with before the chrome
+// store (the moving `step5` branch now CONTAINS the chrome lane, and its document.mjs imports ../protocol, which the temp
+// copy cannot resolve). A shallow or ref-less checkout self-skips.
+const STEP5_BASE = '17782ce0631d8dc071e020aa337c716411df2dfa'
+// self-skips without the base commit: a shallow or ref-less checkout (CI on a clone without that branch) loses this proof
 // silently — run it from a full checkout when the null-digest path is touched (review 2026-09-02, Opus lens 2)
 test('a null digest is step 5\'s document byte for byte: the same inputs through the step5 document.mjs (git show step5:shell/document.mjs) and this one compose identical html', async (t) => {
   let src
-  try { src = execFileSync('git', ['-C', REPO, 'show', 'step5:shell/document.mjs'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) } catch { t.skip('no git / no step5 ref here'); return }
+  try { src = execFileSync('git', ['-C', REPO, 'show', `${STEP5_BASE}:shell/document.mjs`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) } catch { t.skip('no git / no step-5 base commit here'); return }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'step5-doc-'))
   fs.writeFileSync(path.join(dir, 'document.mjs'), src)
   const step5 = await import(pathToFileURL(path.join(dir, 'document.mjs')).href)
