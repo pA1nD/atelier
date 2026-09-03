@@ -198,7 +198,7 @@ export async function laneDocument(ctx) {
     ctx.log(`document: ${company}${app ? '/' + app.slug : ''} waking (${state.reason})`)
     return r('document', 503, { body: wakingHtml({ company, slug: app ? app.slug : null, nonce, giveUpMs: ctx.cfg.mode === 'fleet' ? WAKE_GIVE_UP_FLEET_MS : WAKE_GIVE_UP_MS }), headers: wakingHeaders({ nonce }) })
   }
-  const doc = await composeFor(ctx, { company, slug: ctx.route.slug, person: id.person, epoch: id.epoch, nonce })
+  const doc = await composeFor(ctx, { company, slug: ctx.route.slug, person: id.person, epoch: id.epoch, nonce, logout: id.logout ?? null })
   ctx.metrics?.bootstrap(company, doc.bootstrapBytes)
   ctx.ensureWatch?.(company)
   return r('document', 200, { body: doc.html, headers: doc.headers })
@@ -223,7 +223,7 @@ export const chromeShape = (registry, company, app = null) => {
 
 // composeFor(): the PERSON's rows (presence — a member outside an app's chat sees no trace of it, PLAN §4.1) + chrome
 // + the entry's relative imports (fetched once per (instance, rev)) → the document
-export async function composeFor(ctx, { company, slug, person, epoch, nonce }) {
+export async function composeFor(ctx, { company, slug, person, epoch, nonce, logout = null }) {
   const registry = ctx.providers.registry
   const rows = await visibleRows(registry, person.id, (await registry.apps(company)).filter((x) => !x.isChrome))
   const app = slug ? rows.find((x) => x.slug === slug && x.instance) : null
@@ -231,7 +231,7 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce }) {
   let entryImports = []
   if (app && app.hasFrontend !== false) entryImports = await entryImportsFor(ctx, { company, app, person })
   const companies = registry.companies?.() ?? []
-  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce })
+  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce })
 }
 async function entryImportsFor(ctx, { company, app, person }) {
   const key = `${app.instance}:${app.rev}`

@@ -276,6 +276,8 @@ test('fleet: unauth document → 302 to /go with the path only + the loop breake
   assert.equal((await r.go('/_atelier/whoami', { cookie: false })).status, 401)
   // signed in, whoami names the sign-out door the identity provider was given (the chrome's Sign out)
   const who = (await r.go('/_atelier/whoami')).json(); assert.equal(who.anonymous, false); assert.equal(who.logout, '/logout')
+  // the document's bootstrap carries it on the user too (the chrome reads the user from the page, not from whoami)
+  assert.match((await r.go('/acme/todo')).text, /"logout":"\/logout"/)
   // a session for another company is no session here
   const other = await r.stores.sessions.create({ person: { id: 'p1', name: 'B' }, company: 'beta' })
   assert.equal((await r.go('/api/acme/todo/x', { cookie: false, headers: { cookie: `__Host-session=${other}` } })).status, 401)
