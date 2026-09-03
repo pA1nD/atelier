@@ -44,7 +44,7 @@ async function rig(t, { mode = 'local', present, presentOnChat, wakeAnswer, host
   const { cfg } = createConfig({ mode, config: {}, env: { PORT: '0' } })
   const providers = mode === 'local'
     ? { identity: createIdentityLocal(), gate: createGateLocal(), registry, bus, hostLink: createHostLinkLocal({ minter, dialMs: 400 }) }
-    : { identity: createIdentityFleet({ sessions: stores.sessions, epochOf: stores.epochOf, company: (req) => registry.company(req.headers.host) }), gate: createGateFleet({ companies: (c) => !!companies[c], tickets: stores.tickets, sessions: stores.sessions }), registry, bus, hostLink: createHostLinkFleet({ minter, dialMs: 400 }) }
+    : { identity: createIdentityFleet({ sessions: stores.sessions, epochOf: stores.epochOf, company: (req) => registry.company(req.headers.host), logout: '/logout' }), gate: createGateFleet({ companies: (c) => !!companies[c], tickets: stores.tickets, sessions: stores.sessions }), registry, bus, hostLink: createHostLinkFleet({ minter, dialMs: 400 }) }
   const shell = createShell({ cfg, providers, log: (l) => logs.push(l), trace: (r) => traces.push(r), now })
   shell.start()
   const { port } = await shell.listen({ port: 0, host: '127.0.0.1' })
@@ -274,6 +274,8 @@ test('fleet: unauth document → 302 to /go with the path only + the loop breake
   const f = await r.go('/api/acme/todo/x', { cookie: false }); assert.equal(f.status, 401); assert.equal(f.headers.get('location'), null); assert.equal(f.text, '{}')
   assert.equal((await r.go('/modules/acme/todo/frontend.js', { cookie: false })).status, 401)
   assert.equal((await r.go('/_atelier/whoami', { cookie: false })).status, 401)
+  // signed in, whoami names the sign-out door the identity provider was given (the chrome's Sign out)
+  const who = (await r.go('/_atelier/whoami')).json(); assert.equal(who.anonymous, false); assert.equal(who.logout, '/logout')
   // a session for another company is no session here
   const other = await r.stores.sessions.create({ person: { id: 'p1', name: 'B' }, company: 'beta' })
   assert.equal((await r.go('/api/acme/todo/x', { cookie: false, headers: { cookie: `__Host-session=${other}` } })).status, 401)

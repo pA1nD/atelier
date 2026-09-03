@@ -349,7 +349,9 @@ export async function laneProxy(ctx) {
     const body = ctx.metrics.render({ events: ctx.events, bus, registry, waker: ctx.waker })
     return r('proxy', 200, { body, headers: { 'content-type': METRICS_CONTENT_TYPE, 'cache-control': 'no-store' } })
   }
-  if (name === 'whoami' && ctx.method === 'GET') return jsonR('proxy', 200, { id: ctx.person.id, name: ctx.person.name, anonymous: false })
+  // whoami carries the identity provider's sign-out door when it has one (fleet: the portal's /logout) — the chrome's
+  // account menu shows Sign out only then
+  if (name === 'whoami' && ctx.method === 'GET') return jsonR('proxy', 200, { id: ctx.person.id, name: ctx.person.name, anonymous: false, ...(ctx.identity?.logout ? { logout: ctx.identity.logout } : {}) })
   if (name === 'topics' && ctx.method === 'GET') {
     const topic = ctx.route.rest
     if (!topic) return jsonR('proxy', 404, {})
