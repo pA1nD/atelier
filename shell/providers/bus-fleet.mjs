@@ -26,7 +26,9 @@ export function createBusFleet({ registry, stream, log = () => {} }) {
   // the rail row carries `chromeDigest` — the digest ITS computer reports (step 7 ship C) — beside the frame's company DEFAULT
   // (`chrome.digest`/`chromeRev`): the client compares an app document against its row, an app-less one against the default,
   // never an app document against the default (a computer lagging the default would reload forever)
-  const moduleRow = (r) => ({ id: r.slug, instance: r.instance, rev: r.rev ?? null, hasFrontend: r.hasFrontend !== false, meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) }, chromeDigest: asDigest(r.chromeDigest) })   // 64 hex or null: what the shell composes by
+  // `rev` to the client is the row's CONTENT id when the registry knows one (deployed_rev — the URL names the bytes,
+  // shell/document.mjs assetRev), the counter else — the same rule the bootstrap rows follow
+  const moduleRow = (r) => ({ id: r.slug, instance: r.instance, rev: r.deployed_rev ?? r.rev ?? null, hasFrontend: r.hasFrontend !== false, meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) }, chromeDigest: asDigest(r.chromeDigest) })   // 64 hex or null: what the shell composes by
 
   function accept(ev) {
     if (!validEvent(ev)) { stats.rejected++; return { ok: false, reason: 'envelope' } }
@@ -67,7 +69,7 @@ export function createBusFleet({ registry, stream, log = () => {} }) {
         return { ...base, modules: rows.map(moduleRow), chrome: { qid: chrome.qid, digest: chrome.digest, ...(chrome.version ? { version: chrome.version } : {}) }, chromeRev: chrome.digest }
       }
       const row = await registry.byInstance(topic)
-      return row ? { ...base, rev: row.rev ?? null, error: null } : null
+      return row ? { ...base, rev: row.deployed_rev ?? row.rev ?? null, error: null } : null
     },
     accept,
   }
