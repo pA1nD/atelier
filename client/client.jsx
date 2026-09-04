@@ -423,7 +423,7 @@ function App() {
     importAt(qid, snap.rev);
     if (activeQidRef.current === qid) {
       const m = rowByQid(qid);
-      if (m) swapSheet(document, sheetHref({ company: m.workspace, slug: m.id, rev: snap.rev }, null));
+      if (m) swapSheet(document, sheetHref({ company: m.workspace, slug: m.id, rev: snap.rev }, { qid: chromeQid, rev: chromeRev, base: chromeBase }));   // the sheet names the chrome too
     }
   };
   const subsRef = useRef(new Map());                     // qid → unsubscribe
