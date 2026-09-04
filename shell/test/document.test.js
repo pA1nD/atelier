@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { renderDocument, escapeBootstrap, relativeImports, composeDocument, FALLBACK_TEMPLATE, SLOTS } from '../document.mjs'
+import { renderDocument, escapeBootstrap, relativeImports, composeDocument, FALLBACK_TEMPLATE, SLOTS, preloadsFor, sheetFor } from '../document.mjs'
 import { createConfig } from '../config.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -153,4 +153,15 @@ test('a null digest is step 5\'s document byte for byte: the same inputs through
     assert.deepEqual(now.headers, then.headers)
   }
   fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('the URL names the bytes: a row with a content id (deployed_rev) rides under it, a bare row under its counter', () => {
+  const modules = [{ slug: 'weather', instance: 'i-1', rev: 7, deployed_rev: 'a9b6d0e377f8' }, { slug: 'bare', instance: 'i-2', rev: 3 }]
+  const chrome = { qid: 'global/portal-chrome', rev: 'c0ffee00c0de', hasKit: true, hasStyles: true }
+  const pre = preloadsFor({ company: 'global', slug: 'weather', modules, chrome, entryImports: ['./x.js'] })
+  assert.ok(pre.includes('/modules/global/weather/frontend.js?rev=a9b6d0e377f8'), pre.join(' '))
+  assert.ok(pre.includes('/modules/global/weather/x.js?rev=a9b6d0e377f8'))
+  assert.ok(pre.includes('/modules/global/portal-chrome/frontend.js?rev=c0ffee00c0de'))
+  assert.equal(sheetFor({ company: 'global', slug: 'weather', modules, chrome }), '/modules/global/weather/styles.css?rev=a9b6d0e377f8')
+  assert.equal(sheetFor({ company: 'global', slug: 'bare', modules, chrome }), '/modules/global/bare/styles.css?rev=3')
 })

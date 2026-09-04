@@ -218,7 +218,9 @@ export const chromeShape = (registry, company, app = null) => {
   if (digest) return { qid: c.qid, rev: digest, hasKit: true, hasStyles: true, base: `/_chrome/${digest}` }
   const has = (n) => (c.dir ? ['js', 'jsx'].some((x) => { try { return fs.statSync(path.join(c.dir, `${n}.${x}`)).isFile() } catch { return false } }) : true)
   const hasStyles = c.dir ? (() => { try { return fs.statSync(path.join(c.dir, 'styles.css')).isFile() } catch { return false } })() : true
-  return { qid: c.qid, rev: c.digest, hasKit: has('kit'), hasStyles }
+  // the row path: the chrome row's content id (`rev`, the spine's `deployed_rev` of that row) names the bytes — see
+  // document.mjs assetRev; without one the assets ride bare and a cache in front may hold them
+  return { qid: c.qid, rev: c.digest ?? c.rev ?? null, hasKit: has('kit'), hasStyles }
 }
 
 // composeFor(): the PERSON's rows (presence — a member outside an app's chat sees no trace of it, PLAN §4.1) + chrome

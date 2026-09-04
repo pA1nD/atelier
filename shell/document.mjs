@@ -71,7 +71,7 @@ export function relativeImports(code) {
 // same rule the document is composed by (routes.mjs chromeShape), so the client never compares against a digest the
 // shell did not render: a document with no release in play is byte for byte the step-5 document
 const moduleRow = (r) => ({
-  id: r.slug, instance: r.instance, rev: r.rev ?? null, hasFrontend: r.hasFrontend !== false,
+  id: r.slug, instance: r.instance, rev: assetRev(r), hasFrontend: r.hasFrontend !== false,
   meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) },
   ...(asDigest(r.chromeDigest) ? { chromeDigest: r.chromeDigest } : {}),
 })
@@ -100,6 +100,12 @@ export function bootstrapFor({ cfg = {}, company, slug = null, person, modules =
   }
 }
 
+// THE URL NAMES THE BYTES (2026-09-05): a row's asset rides under its CONTENT id — `deployed_rev`, the hash of what the
+// host built — never the row's counter alone: counters restart with the row (a re-seeded host starts at 1 again) and a
+// cache in front (the browser's, Cloudflare's, max-age from the host) then hands out yesterday's sheet for today's
+// `?rev=1`. Same bytes, same URL; new bytes, new URL — on every plane, no purge. The counter stays the fallback for a row
+// the registry knows no content id for (a bare dev row).
+export const assetRev = (r) => (r?.deployed_rev != null && r.deployed_rev !== '' ? String(r.deployed_rev) : (r?.rev ?? null))
 const q = (rev) => (rev === null || rev === undefined ? '' : `?rev=${encodeURIComponent(String(rev))}`)
 export const appAsset = (company, slug, file, rev) => `/modules/${encodeURIComponent(company)}/${encodeURIComponent(slug)}/${file}${q(rev)}`
 // chromeAsset(): by digest the immutable `/_chrome/<digest>/<file>` (no `?rev=`: the URL names the bytes), else the
@@ -110,7 +116,7 @@ export const chromeAsset = (chrome, file) => (chrome.base ? `${chrome.base}/${fi
 // bundle's compiled chrome-only sheet `chrome.css`; the row's `styles.css` otherwise)
 export function sheetFor({ company, slug, modules, chrome }) {
   const app = slug ? modules.find((r) => r.slug === slug && r.instance) : null
-  if (app) return appAsset(company, slug, 'styles.css', app.rev)
+  if (app) return appAsset(company, slug, 'styles.css', assetRev(app))
   if (chrome?.qid && chrome.base) return chromeAsset(chrome, 'chrome.css')
   if (chrome?.qid && chrome.hasStyles !== false) return chromeAsset(chrome, 'styles.css')
   return null
@@ -122,8 +128,8 @@ export function preloadsFor({ company, slug, modules, chrome, entryImports = [] 
   if (chrome?.qid) { out.push(chromeAsset(chrome, 'frontend.js')); if (chrome.hasKit) out.push(chromeAsset(chrome, 'kit.js')) }
   const app = slug ? modules.find((r) => r.slug === slug && r.instance) : null
   if (app) {
-    out.push(appAsset(company, slug, 'frontend.js', app.rev))
-    for (const rel of entryImports) if (rel.startsWith('./')) out.push(appAsset(company, slug, rel.slice(2), app.rev))
+    out.push(appAsset(company, slug, 'frontend.js', assetRev(app)))
+    for (const rel of entryImports) if (rel.startsWith('./')) out.push(appAsset(company, slug, rel.slice(2), assetRev(app)))
   }
   return out
 }
