@@ -182,7 +182,7 @@ export async function laneDocument(ctx) {
     const u = ctx.gate.unauthDocument(ctx.req, { company, path: ctx.path })
     if (!u) return jsonR('document', 401, {})
     if (u.status === 302) return r('document', 302, { headers: { location: u.location, 'cache-control': 'no-store', ...(u.cookie ? { 'set-cookie': u.cookie } : {}) } })
-    return r('document', u.status, { body: 'Sign-in did not stick on this origin (cookies blocked?). Open the link again from the portal.', headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } })
+    return r('document', u.status, { body: 'This page could not sign you in. Open it from the portal, or sign in there first.', headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } })
   }
   if (!isRead) return jsonR('document', 405, {})
   // the host that must be up is the APP's (its row's computer); an app-less document, or a slug the registry does
