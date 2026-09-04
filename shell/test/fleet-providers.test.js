@@ -57,7 +57,7 @@ test('registry-fleet: Host parse, TTL cache + company-frame invalidation, presen
   assert.equal((await chatless.host('acme')).chat, null, 'no chat on the row → none on the host: the dependency is the row')
   assert.equal(await reg.host('beta'), null)
   assert.equal(reg.stale({ heartbeatAt: clock - 31_000, drainingAt: null }), true); assert.equal(reg.stale({ heartbeatAt: clock - 1000, drainingAt: null }), false); assert.equal(reg.stale({ heartbeatAt: clock, drainingAt: clock }), true)
-  assert.deepEqual(reg.chrome('acme'), { qid: 'global/catalyst-chrome', dir: null, digest: null, version: null, base: '/modules/global/catalyst-chrome' }, 'a digest that is not 64 hex is no digest: the row\'s path (review 2026-09-02, N10)')
+  assert.deepEqual(reg.chrome('acme'), { qid: 'global/catalyst-chrome', dir: null, digest: null, version: null, rev: null, base: '/modules/global/catalyst-chrome' }, 'a digest that is not 64 hex is no digest: the row\'s path (review 2026-09-02, N10)')
   reg.stop()
 })
 
@@ -94,11 +94,11 @@ test('registry-fleet + bus-fleet, the chrome by digest (step 7 ship C): chrome(c
   const spine = fakeSpine()
   spine.rows.acme[0].chrome_digest = PREV; spine.rows.acme[1].chrome_digest = null
   spine.rows.acme[0].host = { host_id: 'c-1', chat: 'chat-a', epoch: 'e1', token: 'tok', pod_ip: '10.0.0.5', port: 1845, tls: null, heartbeat_at: 1000, draining_at: null, chrome_digest: PREV }
-  spine.chrome = () => ({ qid: 'portal/catalyst-chrome', digest: D, version: '0.2.2', base: `/_chrome/${D}`, company: 'portal' })
+  spine.chrome = () => ({ qid: 'portal/catalyst-chrome', digest: D, version: '0.2.2', rev: null, base: `/_chrome/${D}`, company: 'portal' })
   spine.host = async () => ({ host_id: 'c-1', chat: 'chat-a', epoch: 'e1', token: 'tok', pod_ip: '10.0.0.5', port: 1845, tls: null, heartbeat_at: 1000, draining_at: null, chrome_digest: PREV })
   const model = new MembershipModel({ persons: { p1: {} }, companies: { acme: { chats: { 'chat-a': ['p1'], 'chat-b': ['p1'] } } } })
   const reg = createRegistryFleet({ spine, membership: { present: async (p, row) => model.present(p, row) }, now: () => 5000 })
-  assert.deepEqual(reg.chrome('acme'), { qid: 'portal/catalyst-chrome', dir: null, digest: D, version: '0.2.2', base: `/_chrome/${D}` })
+  assert.deepEqual(reg.chrome('acme'), { qid: 'portal/catalyst-chrome', dir: null, digest: D, version: '0.2.2', rev: null, base: `/_chrome/${D}` })
   const rows = await reg.apps('acme')
   assert.equal(rows[0].chromeDigest, PREV); assert.equal(rows[1].chromeDigest, null)
   assert.equal(rows[0].host.chromeDigest, PREV); assert.equal((await reg.host('acme')).chromeDigest, PREV)
@@ -116,7 +116,7 @@ test('registry-fleet + bus-fleet, the chrome by digest (step 7 ship C): chrome(c
   assert.deepEqual(rail.modules.map((m) => [m.id, m.chromeDigest]), [['todo', PREV], ['wiki', null]])
   // no release: the v35 shape — digest null, base = the row's path, no version on the frame
   spine.chrome = () => ({ qid: 'portal/catalyst-chrome', digest: null })
-  assert.deepEqual(reg.chrome('acme'), { qid: 'portal/catalyst-chrome', dir: null, digest: null, version: null, base: '/modules/portal/catalyst-chrome' })
+  assert.deepEqual(reg.chrome('acme'), { qid: 'portal/catalyst-chrome', dir: null, digest: null, version: null, rev: null, base: '/modules/portal/catalyst-chrome' })
   const bare = await bus.snapshot('company:acme')
   assert.equal(bare.chromeRev, null); assert.deepEqual(bare.chrome, { qid: 'portal/catalyst-chrome', digest: null })
 })

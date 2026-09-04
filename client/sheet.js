@@ -16,7 +16,9 @@ export const SHEET_ID = 'atelier-chrome-styles'
 // `<base>/chrome.css`, immutable, no cache-buster.
 export function sheetHref(app, chrome) {
   if (app && app.company && app.slug) {
-    const q = app.rev != null ? `?rev=${encodeURIComponent(app.rev)}` : ''
+    // the content id first (deployed_rev — the URL names the bytes; shell/document.mjs assetRev), the counter as the fallback
+    const rev = app.deployed_rev ?? app.rev
+    const q = rev != null ? `?rev=${encodeURIComponent(rev)}` : ''
     return `/modules/${encodeURIComponent(app.company)}/${encodeURIComponent(app.slug)}/styles.css${q}`
   }
   if (!chrome || !chrome.qid) return null
