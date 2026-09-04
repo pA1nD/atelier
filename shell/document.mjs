@@ -123,8 +123,8 @@ export function sheetFor({ company, slug, modules, chrome }) {
 }
 
 // preloadsFor(): client, chrome-resolve, the chrome bundle, kit, the app entry and its relative imports
-export function preloadsFor({ company, slug, modules, chrome, entryImports = [] }) {
-  const out = [CLIENT_JS, CHROME_RESOLVE_JS]
+export function preloadsFor({ company, slug, modules, chrome, entryImports = [], assetVersion = null }) {
+  const out = [versioned(CLIENT_JS, assetVersion), versioned(CHROME_RESOLVE_JS, assetVersion)]
   if (chrome?.qid) { out.push(chromeAsset(chrome, 'frontend.js')); if (chrome.hasKit) out.push(chromeAsset(chrome, 'kit.js')) }
   const app = slug ? modules.find((r) => r.slug === slug && r.instance) : null
   if (app) {
@@ -142,7 +142,9 @@ const attr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').rep
  *   bootstrapJson: the escaped bootstrap, when the caller already has it (renderDocument measures
  *                  its bytes for the metrics row and does not pay a second escape)
  */
-export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap, bootstrapJson = escapeBootstrap(bootstrap), sheet, importMap, preloads = [] }) {
+// versioned(u, assetVersion): the shell's own asset under its content hash (`?v=`), bare when the shell knows none
+export const versioned = (u, assetVersion) => { const v = assetVersion?.(u); return v ? u + '?v=' + encodeURIComponent(v) : u }
+export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap, bootstrapJson = escapeBootstrap(bootstrap), sheet, importMap, preloads = [], assetVersion = null }) {
   if (!hasSlots(template)) throw new Error('document: the template lacks a slot (' + Object.values(SLOTS).join(' ') + ')')
   const pre = preloads.map((u) => `<link rel="modulepreload" href="${attr(u)}">`).join('\n  ')
   return template
@@ -150,18 +152,19 @@ export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap
     .replace(SLOTS.bootstrap, `<script nonce="${attr(nonce)}">window.__ATELIER__ = ${bootstrapJson};</script>`)
     .replace(SLOTS.importmap, importMap ? `<script type="importmap" nonce="${attr(nonce)}">${escapeBootstrap(importMap)}</script>` : '')
     .replace(SLOTS.preloads, pre)
-    .replace(SLOTS.client, `<script type="module" src="${CLIENT_JS}"></script>`)
+    .replace(SLOTS.client, `<script type="module" src="${attr(versioned(CLIENT_JS, assetVersion))}"></script>`)
+    .replace(/src="(\/assets\/react(?:-dom)?\.js)"/g, (_, u) => `src="${attr(versioned(u, assetVersion))}"`)
 }
 
 // renderDocument(): the whole thing for one route — what routes.mjs calls. `bootstrapBytes` is
 // PLAN §4.5's bootstrap-bytes row (shell/metrics.mjs): what the shell composed into the page.
-export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce() }) {
+export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce(), assetVersion = null }) {
   const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal })
   const bootstrapJson = escapeBootstrap(bootstrap)
   const sheet = sheetFor({ company, slug, modules, chrome })
   const importMap = chrome?.qid && chrome.hasKit ? { imports: { '@atelier/kit': chromeAsset(chrome, 'kit.js') } } : null
-  const preloads = preloadsFor({ company, slug, modules, chrome, entryImports })
-  const html = composeDocument({ template, nonce, bootstrap, bootstrapJson, sheet, importMap, preloads })
+  const preloads = preloadsFor({ company, slug, modules, chrome, entryImports, assetVersion })
+  const html = composeDocument({ template, nonce, bootstrap, bootstrapJson, sheet, importMap, preloads, assetVersion })
   return { html, nonce, bootstrap, bootstrapBytes: Buffer.byteLength(bootstrapJson), sheet, preloads, headers: documentHeaders({ cfg, nonce, portal }) }
 }
 

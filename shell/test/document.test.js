@@ -165,3 +165,13 @@ test('the URL names the bytes: a row with a content id (deployed_rev) rides unde
   assert.equal(sheetFor({ company: 'global', slug: 'weather', modules, chrome }), '/modules/global/weather/styles.css?rev=a9b6d0e377f8')
   assert.equal(sheetFor({ company: 'global', slug: 'bare', modules, chrome }), '/modules/global/bare/styles.css?rev=3')
 })
+
+test('the shell\'s own assets ride under their content hash when the shell knows one (?v=), bare otherwise', () => {
+  const v = (u) => ({ '/assets/client.js': 'abc123', '/assets/react.js': 'r1', '/assets/react-dom.js': 'rd1', '/assets/chrome-resolve.js': 'cr1' })[u] ?? null
+  const pre = preloadsFor({ company: 'global', slug: null, modules: [], chrome: null, assetVersion: v })
+  assert.deepEqual(pre.slice(0, 2), ['/assets/client.js?v=abc123', '/assets/chrome-resolve.js?v=cr1'])
+  const html = composeDocument({ nonce: 'n', bootstrap: {}, sheet: null, importMap: null, preloads: pre, assetVersion: v })
+  assert.match(html, /<script type="module" src="\/assets\/client\.js\?v=abc123"><\/script>/)
+  assert.match(html, /src="\/assets\/react\.js\?v=r1"/); assert.match(html, /src="\/assets\/react-dom\.js\?v=rd1"/)
+  assert.match(composeDocument({ nonce: 'n', bootstrap: {}, sheet: null, importMap: null }), /src="\/assets\/client\.js"><\/script>/)
+})

@@ -233,7 +233,8 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce, log
   let entryImports = []
   if (app && app.hasFrontend !== false) entryImports = await entryImportsFor(ctx, { company, app, person })
   const companies = registry.companies?.() ?? []
-  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce })
+  const versions = (await ctx.assets.versions?.()) ?? {}   // the shell's own assets under their content hashes
+  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce , assetVersion: (u) => versions[u] ?? null })
 }
 async function entryImportsFor(ctx, { company, app, person }) {
   const key = `${app.instance}:${app.rev}`

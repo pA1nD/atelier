@@ -17,6 +17,7 @@ import zlib from 'node:zlib'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { build as esbuildBuild } from 'esbuild'
+import { createHash } from 'node:crypto'
 import { FALLBACK_TEMPLATE, hasSlots } from './document.mjs'
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -56,7 +57,7 @@ export function createAssets({ repoRoot = REPO_ROOT, clientDir = path.join(REPO_
     const mtime = mtimeOf(p)
     const hit = cache.get(p)
     if (hit && hit.mtime === mtime) return hit
-    const e = { mtime, body: fs.readFileSync(p), type: JS }
+    const e = withHash({ mtime, body: fs.readFileSync(p), type: JS })
     cache.set(p, e)
     return e
   }
@@ -79,7 +80,7 @@ export function createAssets({ repoRoot = REPO_ROOT, clientDir = path.join(REPO_
       minify: prod, sourcemap: prod ? false : 'inline', logLevel: 'silent',
       define: { 'process.env.NODE_ENV': JSON.stringify(prod ? 'production' : 'development') },
     })
-    const e = { mtime, body: Buffer.from(r.outputFiles[0].text), type: JS }
+    const e = withHash({ mtime, body: Buffer.from(r.outputFiles[0].text), type: JS })
     cache.set(key, e)
     return e
   }
@@ -90,7 +91,7 @@ export function createAssets({ repoRoot = REPO_ROOT, clientDir = path.join(REPO_
     const mtime = mtimeOf(p)
     const hit = cache.get(p)
     if (hit && hit.mtime === mtime) return hit
-    const e = { mtime, body: fs.readFileSync(p), type: JS }
+    const e = withHash({ mtime, body: fs.readFileSync(p), type: JS })
     cache.set(p, e)
     return e
   }
@@ -106,8 +107,20 @@ export function createAssets({ repoRoot = REPO_ROOT, clientDir = path.join(REPO_
     return body
   }
 
+  // THE URL NAMES THE BYTES (2026-09-05): every entry carries a content hash; document.mjs appends it as `?v=` to the
+  // shell's own asset URLs (client.js, chrome-resolve.js, react*), so a cache in front — the browser's, Cloudflare's
+  // four-hour browser TTL that overrides `no-cache` — never serves yesterday's client for today's document.
+  function withHash(e) { return { ...e, hash: createHash('sha256').update(e.body).digest('hex').slice(0, 16) } }
   return {
     prod, template, clientJs,
+    /** versions() → { '/assets/<name>': <16-hex content hash> } for the shell's own assets (an asset that fails to build is absent) */
+    async versions() {
+      const out = {}
+      for (const n of ['react', 'react-dom']) { try { const e = vendor(n); if (e?.hash) out['/assets/' + n + '.js'] = e.hash } catch {} }
+      try { const e = await clientJs(); if (e?.hash) out['/assets/client.js'] = e.hash } catch {}
+      try { const e = plain('chrome-resolve.js'); if (e?.hash) out['/assets/chrome-resolve.js'] = e.hash } catch {}
+      return out
+    },
     async handle(req, res, pathname) {
       if (!pathname.startsWith('/assets/')) return false
       const name = pathname.slice('/assets/'.length)
