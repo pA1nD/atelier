@@ -48,7 +48,7 @@ export function createRegistryFleet({ spine, membership, domain = 'portal.pa1nd.
     const hit = cache.get(company)
     if (hit && now() - hit.at < ttlMs) return hit.rows
     const raw = (await spine.apps(company)) ?? []
-    const rows = raw.map((r) => ({ instance: r.instance, slug: r.slug, company, meta: r.meta ?? {}, requestedPrimary: r.requested_primary ?? null, primary: r.primary === true, rev: r.rev ?? null, state: r.state ?? 'unknown', computer: r.computer ?? null, chat: r.chat ?? null, hasFrontend: r.hasFrontend !== false, chromeDigest: asDigest(r.chrome_digest), host: hostShape(r.host ?? null, r.chat ?? null) }))
+    const rows = raw.map((r) => ({ instance: r.instance, slug: r.slug, company, meta: r.meta ?? {}, requestedPrimary: r.requested_primary ?? null, primary: r.primary === true, rev: r.rev ?? null, deployed_rev: r.deployed_rev ?? null, state: r.state ?? 'unknown', computer: r.computer ?? null, chat: r.chat ?? null, hasFrontend: r.hasFrontend !== false, chromeDigest: asDigest(r.chrome_digest), host: hostShape(r.host ?? null, r.chat ?? null) }))
     cache.set(company, { at: now(), rows })
     for (const r of rows) byInst.set(r.instance, company)
     return rows
@@ -89,7 +89,7 @@ export function createRegistryFleet({ spine, membership, domain = 'portal.pa1nd.
     // chrome(company) → {qid, dir: null, digest, version, base}: the company DEFAULT (the app document picks its row's
     // `chromeDigest` first, routes.mjs chromeShape); `base` is where the chrome assets are (`/_chrome/<digest>` |
     // `/modules/<qid>`), derived here from the VALIDATED digest (64 hex, else null = the row's path) — never the spine's word
-    chrome(company) { const c = spine.chrome?.(company) ?? null; const digest = asDigest(c?.digest); return { qid: c?.qid ?? null, dir: null, digest, version: c?.version ?? null, base: c?.qid ? (digest ? `/_chrome/${digest}` : `/modules/${c.qid}`) : null } },
+    chrome(company) { const c = spine.chrome?.(company) ?? null; const digest = asDigest(c?.digest); return { qid: c?.qid ?? null, dir: null, digest, version: c?.version ?? null, rev: c?.rev ?? null, base: c?.qid ? (digest ? `/_chrome/${digest}` : `/modules/${c.qid}`) : null } },
     watch(company, fn) { let s = watchers.get(company); if (!s) { s = new Set(); watchers.set(company, s) } s.add(fn); return () => s.delete(fn) },
     // cacheAgeMs(): the age of the OLDEST live per-company apps entry — how stale a read can still
     // be when a revocation lands (PLAN §4.5 "cache staleness at revocation"; shell/metrics.mjs
