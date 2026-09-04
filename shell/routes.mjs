@@ -103,6 +103,15 @@ export function parseRoute(p) {
 }
 
 const r = (lane, status, extra = {}) => ({ lane, status, ...extra })
+// notice(ctx, status, heading, text): a PERSON's answer for a document that has nowhere to go — the shell's owner renders
+// the page (`cfg.pageFor({status, heading, text, home}) → {body, headers?}`, the portal's own notice layout); without
+// an owner page the JSON `{}` of before. 2026-09-05: "https://staging.pa1nd.de/xxx should be handled as well".
+const notice = (ctx, status, heading, text, fallback = null) => {
+  let p = null
+  try { p = ctx.cfg?.pageFor?.({ status, heading, text, home: true }) ?? null } catch (e) { ctx.log?.(`pageFor: ${e?.message ?? e}`) }
+  if (p?.body) return r('document', status, { body: p.body, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', ...(p.headers ?? {}) } })
+  return fallback ?? jsonR('document', status, {})
+}
 const jsonR = (lane, status, body, headers = {}) => r(lane, status, { body: JSON.stringify(body), headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers } })
 
 // ---- the lanes
@@ -172,9 +181,9 @@ export async function laneDocument(ctx) {
   if (ctx.route.kind !== 'document') return null
   if (ctx.upgrade) return jsonR('document', 426, {})
   const company = documentCompany(ctx)
-  if (!company) return jsonR('document', 404, {})
+  if (!company) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')
   const known = ctx.providers.registry.companies?.() ?? []          // local: the workspaces; fleet: [] (the Host gate decided)
-  if (known.length && !known.some((c) => c.id === company)) return jsonR('document', 404, {})
+  if (known.length && !known.some((c) => c.id === company)) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')
   const isRead = ctx.method === 'GET' || ctx.method === 'HEAD'
   const id = await resolvePerson(ctx)
   if (!id.ok) {
@@ -182,7 +191,7 @@ export async function laneDocument(ctx) {
     const u = ctx.gate.unauthDocument(ctx.req, { company, path: ctx.path })
     if (!u) return jsonR('document', 401, {})
     if (u.status === 302) return r('document', 302, { headers: { location: u.location, 'cache-control': 'no-store', ...(u.cookie ? { 'set-cookie': u.cookie } : {}) } })
-    return r('document', u.status, { body: 'This page could not sign you in. Open it from the portal, or sign in there first.', headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } })
+    return notice(ctx, u.status, 'This page could not sign you in', 'Open it from the portal, or sign in there first.', r('document', u.status, { body: 'This page could not sign you in. Open it from the portal, or sign in there first.', headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } }))
   }
   if (!isRead) return jsonR('document', 405, {})
   // the host that must be up is the APP's (its row's computer); an app-less document, or a slug the registry does

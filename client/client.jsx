@@ -387,7 +387,7 @@ function App() {
   // document already carries it — an equal href is a no-op).
   useEffect(() => {
     const href = activeMod
-      ? sheetHref({ company: activeMod.workspace, slug: activeMod.id, rev: revRef.current.get(activeMod.qid) ?? activeMod.rev }, null)
+      ? sheetHref({ company: activeMod.workspace, slug: activeMod.id, rev: revRef.current.get(activeMod.qid) ?? activeMod.rev }, { qid: chromeQid, rev: chromeRev, base: chromeBase })
       : sheetHref(null, { qid: chromeQid, rev: chromeRev, base: chromeBase });
     if (href) swapSheet(document, href);
   }, [activeQid]);

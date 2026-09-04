@@ -17,7 +17,10 @@ export const SHEET_ID = 'atelier-chrome-styles'
 export function sheetHref(app, chrome) {
   if (app && app.company && app.slug) {
     // the content id first (deployed_rev — the URL names the bytes; shell/document.mjs assetRev), the counter as the fallback
-    const rev = app.deployed_rev ?? app.rev
+    // the sheet names the app AND the chrome it was compiled against (shell/document.mjs sheetRev)
+    const a = app.deployed_rev ?? app.rev
+    const c = chrome && chrome.base && chrome.rev != null ? String(chrome.rev).slice(0, 12) : null   // a release names the sheet too
+    const rev = a == null ? c : c ? `${a}.${c}` : a
     const q = rev != null ? `?rev=${encodeURIComponent(rev)}` : ''
     return `/modules/${encodeURIComponent(app.company)}/${encodeURIComponent(app.slug)}/styles.css${q}`
   }

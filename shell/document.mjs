@@ -106,6 +106,11 @@ export function bootstrapFor({ cfg = {}, company, slug = null, person, modules =
 // `?rev=1`. Same bytes, same URL; new bytes, new URL — on every plane, no purge. The counter stays the fallback for a row
 // the registry knows no content id for (a bare dev row).
 export const assetRev = (r) => (r?.deployed_rev != null && r.deployed_rev !== '' ? String(r.deployed_rev) : (r?.rev ?? null))
+// THE SHEET IS TWO INPUTS (2026-09-05): an app's sheet is compiled from the app AND the chrome its host holds, so its URL
+// names both — a chrome release must not leave a cache holding the sheet compiled against the last one
+// — when the chrome is a RELEASE (`base`, by digest): that digest is what every host compiled against. The row path
+// (no release) leaves the sheet's URL as it was (step 5's document, byte for byte).
+export const sheetRev = (app, chrome) => { const a = assetRev(app); const c = chrome?.base && chrome.rev != null ? String(chrome.rev).slice(0, 12) : null; return a == null ? c : c ? `${a}.${c}` : a }
 const q = (rev) => (rev === null || rev === undefined ? '' : `?rev=${encodeURIComponent(String(rev))}`)
 export const appAsset = (company, slug, file, rev) => `/modules/${encodeURIComponent(company)}/${encodeURIComponent(slug)}/${file}${q(rev)}`
 // chromeAsset(): by digest the immutable `/_chrome/<digest>/<file>` (no `?rev=`: the URL names the bytes), else the
@@ -116,7 +121,7 @@ export const chromeAsset = (chrome, file) => (chrome.base ? `${chrome.base}/${fi
 // bundle's compiled chrome-only sheet `chrome.css`; the row's `styles.css` otherwise)
 export function sheetFor({ company, slug, modules, chrome }) {
   const app = slug ? modules.find((r) => r.slug === slug && r.instance) : null
-  if (app) return appAsset(company, slug, 'styles.css', assetRev(app))
+  if (app) return appAsset(company, slug, 'styles.css', sheetRev(app, chrome))
   if (chrome?.qid && chrome.base) return chromeAsset(chrome, 'chrome.css')
   if (chrome?.qid && chrome.hasStyles !== false) return chromeAsset(chrome, 'styles.css')
   return null

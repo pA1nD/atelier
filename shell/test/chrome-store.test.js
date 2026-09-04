@@ -226,7 +226,7 @@ test('the document by digest (decision 5): the registry names D and the row repo
   const bare = await r.go('/acme/')
   assert.ok(bare.text.includes(`<link id="atelier-chrome-styles" rel="stylesheet" href="/_chrome/${D}/chrome.css">`), 'the app-less sheet is the bundle\'s chrome.css')
   const app = await r.go('/acme/todo')
-  assert.ok(app.text.includes('<link id="atelier-chrome-styles" rel="stylesheet" href="/modules/acme/todo/styles.css?rev=3">'), 'the app sheet is the app\'s')
+  assert.match(app.text, /<link id="atelier-chrome-styles" rel="stylesheet" href="\/modules\/acme\/todo\/styles\.css\?rev=3\.[0-9a-f]{12}">/, 'the app sheet is the app\'s — named by the app and the chrome digest it was compiled against')
   assert.ok(app.text.includes(`"chromeDigest":"${D}"`), 'the bootstrap row carries its digest')
   const oddDoc = await r.go('/acme/odd')
   assert.ok(!/"id":"odd"[^}]*"chromeDigest"/.test(oddDoc.text) && !oddDoc.text.includes('sha256:nope'), 'a row digest that is not 64 hex rides on no bootstrap row: the client compares that document against the default it was composed with (S1)')

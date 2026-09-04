@@ -123,7 +123,7 @@ test('the chrome by digest (step 7 ship C, decision 5): `base` puts every chrome
   assert.equal(bare.bootstrap.chromeRev, D); assert.equal(bare.bootstrap.chromeBase, `/_chrome/${D}`)
   assert.deepEqual(bare.bootstrap.user.workspaces[0].modules.map((m) => m.chromeDigest), [D, undefined])
   const app = renderDocument({ company: 'acme', slug: 'weather', person, modules: rows, chrome: byDigest, entryImports: ['./x.js'] })
-  assert.equal(app.sheet, '/modules/acme/weather/styles.css?rev=7')
+  assert.equal(app.sheet, '/modules/acme/weather/styles.css?rev=7.dddddddddddd')
   assert.deepEqual(app.preloads, ['/assets/client.js', '/assets/chrome-resolve.js', `/_chrome/${D}/frontend.js`, `/_chrome/${D}/kit.js`, '/modules/acme/weather/frontend.js?rev=7', '/modules/acme/weather/x.js?rev=7'])
   assert.ok(!app.html.includes('?rev=' + D) && !app.html.includes(`/_chrome/${D}/frontend.js?`), 'immutable URLs carry no cache-buster')
   const rowShape = renderDocument({ company: 'acme', person, modules: rows.map((r) => ({ ...r, chromeDigest: null })), chrome: { qid: 'portal/catalyst-chrome', rev: null, hasKit: true, hasStyles: true } })
@@ -157,13 +157,14 @@ test('a null digest is step 5\'s document byte for byte: the same inputs through
 
 test('the URL names the bytes: a row with a content id (deployed_rev) rides under it, a bare row under its counter', () => {
   const modules = [{ slug: 'weather', instance: 'i-1', rev: 7, deployed_rev: 'a9b6d0e377f8' }, { slug: 'bare', instance: 'i-2', rev: 3 }]
-  const chrome = { qid: 'global/portal-chrome', rev: 'c0ffee00c0de', hasKit: true, hasStyles: true }
+  const chrome = { qid: 'global/portal-chrome', rev: 'c0ffee00c0de', hasKit: true, hasStyles: true, base: '/_chrome/c0ffee00c0de' }
   const pre = preloadsFor({ company: 'global', slug: 'weather', modules, chrome, entryImports: ['./x.js'] })
   assert.ok(pre.includes('/modules/global/weather/frontend.js?rev=a9b6d0e377f8'), pre.join(' '))
   assert.ok(pre.includes('/modules/global/weather/x.js?rev=a9b6d0e377f8'))
-  assert.ok(pre.includes('/modules/global/portal-chrome/frontend.js?rev=c0ffee00c0de'))
-  assert.equal(sheetFor({ company: 'global', slug: 'weather', modules, chrome }), '/modules/global/weather/styles.css?rev=a9b6d0e377f8')
-  assert.equal(sheetFor({ company: 'global', slug: 'bare', modules, chrome }), '/modules/global/bare/styles.css?rev=3')
+  assert.ok(pre.includes('/_chrome/c0ffee00c0de/frontend.js'))
+  assert.equal(sheetFor({ company: 'global', slug: 'weather', modules, chrome }), '/modules/global/weather/styles.css?rev=a9b6d0e377f8.c0ffee00c0de')   // the sheet names the chrome too
+  assert.equal(sheetFor({ company: 'global', slug: 'bare', modules, chrome }), '/modules/global/bare/styles.css?rev=3.c0ffee00c0de')
+  assert.equal(sheetFor({ company: 'global', slug: 'bare', modules, chrome: null }), '/modules/global/bare/styles.css?rev=3')
 })
 
 test('the shell\'s own assets ride under their content hash when the shell knows one (?v=), bare otherwise', () => {
