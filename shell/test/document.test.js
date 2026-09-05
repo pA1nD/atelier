@@ -189,3 +189,11 @@ test('places: the bootstrap lists every place of the person with its rows and or
   const single = bootstrapFor({ company: 'acme', person: { id: 'p', name: 'P' }, modules, chrome: null })
   assert.deepEqual(single.workspaces, [{ id: 'acme', name: 'acme' }])
 })
+
+test('another place\'s link rows ride into the rail without an instance (Astra 2026-09-05: the filter had dropped them)', () => {
+  const places = [{ id: 'global', name: 'global', rows: [{ slug: 'weather', instance: 'i-1', rev: 7 }] }, { id: 'acme', name: 'Acme', origin: 'https://acme.example', rows: [{ slug: 'board', link: true, meta: { name: 'Board', icon: 'squares-2x2' } }, { slug: 'pending', meta: { name: 'Pending' } }] }]
+  const boot = bootstrapFor({ company: 'global', person: { id: 'p1', name: 'P' }, modules: places[0].rows, chrome: null, places })
+  const acme = boot.user.workspaces.find((w) => w.id === 'acme')
+  assert.equal(acme.origin, 'https://acme.example')
+  assert.deepEqual(acme.modules.map((m) => [m.id, m.instance]), [['board', undefined]], 'the link row rides, the pending row does not')
+})

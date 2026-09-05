@@ -253,7 +253,7 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce, log
       // ANOTHER PLACE'S ROWS ARE LINKS (review 2026-09-05, rule 1): a company origin's document carries, for the person's
       // other places, the slug and the words a rail item needs — never `instance`, `rev` or the digest that name that
       // place's work — so app code on this origin learns no more than the names on the person's own rail
-      const linkRow = (r) => ({ slug: r.slug, hasFrontend: r.hasFrontend !== false, meta: { name: r.meta?.name, icon: r.meta?.icon, ...(r.meta?.group ? { group: r.meta.group } : {}), ...(r.primary ? { primary: true } : {}) } })
+      const linkRow = (r) => ({ slug: r.slug, link: true, hasFrontend: r.hasFrontend !== false, meta: { name: r.meta?.name, icon: r.meta?.icon, ...(r.meta?.group ? { group: r.meta.group } : {}), ...(r.primary ? { primary: true } : {}) } })
       const read = await Promise.all(named.map(async (p) => {
         if (p.id === company) return { ...p, rows }
         try { return { ...p, rows: (await visibleRows(registry, person.id, (await registry.apps(p.id)).filter((x) => !x.isChrome))).map(linkRow) } }

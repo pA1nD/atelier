@@ -88,7 +88,8 @@ export function bootstrapFor({ cfg = {}, company, slug = null, person, modules =
   const rows = modules.filter((r) => r.instance).map(moduleRow)
   const list = Array.isArray(places) && places.length ? places : [{ id: company, name: company, rows: modules }]
   const wsOf = (p) => ({ id: p.id, name: p.name ?? p.id, ...(p.origin ? { origin: p.origin } : {}) })
-  const userWorkspaces = list.map((p) => ({ ...wsOf(p), modules: p.id === company ? rows : (p.rows ?? []).filter((r) => r.instance).map(moduleRow) }))
+  // another place's rows are LINKS (routes.mjs linkRow: no instance by design) — they ride; a pending row of this company (no instance yet) does not
+  const userWorkspaces = list.map((p) => ({ ...wsOf(p), modules: p.id === company ? rows : (p.rows ?? []).filter((r) => r.instance || r.link === true).map(moduleRow) }))
   const active = slug && rows.some((r) => r.id === slug) ? `${company}/${slug}` : null
   const chromeQid = chrome?.qid ?? null
   return {
