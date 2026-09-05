@@ -131,7 +131,8 @@ export async function laneHttps(ctx) {
 export async function laneHost(ctx) {
   const h = ctx.gate.hostAllowed(ctx.req)
   if (!h) return null
-  if (h.status) return jsonR('host', h.status, {})
+  // an unknown origin is a page for a person's navigation (the owner's notice), JSON for a program (review 2026-09-05)
+  if (h.status) return h.status === 404 && ctx.method === 'GET' && isNavigation(ctx) ? notice(ctx, 404, 'Not here', 'No place lives at this address.') : jsonR('host', h.status, {})
   if (h.portal) return jsonR('host', 404, {})       // the portal is another origin's server, never this shell
   ctx.hostCompany = h.company
   return null
