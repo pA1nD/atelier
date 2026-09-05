@@ -242,8 +242,22 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce, log
   let entryImports = []
   if (app && app.hasFrontend !== false) entryImports = await entryImportsFor(ctx, { company, app, person })
   const companies = registry.companies?.() ?? []
+  // the PERSON's places (registry.placesFor — the portal names them; absent = single-place): each with its visible rows
+  let places = null
+  if (typeof registry.placesFor === 'function') {
+    try {
+      const named = (await registry.placesFor(person.id)) ?? []
+      places = []
+      for (const p of named) {
+        if (!p?.id) continue
+        try { places.push({ ...p, rows: p.id === company ? rows : await visibleRows(registry, person.id, (await registry.apps(p.id)).filter((x) => !x.isChrome)) }) }
+        catch (e) { ctx.log?.(`places: ${p.id} unread (${e?.message ?? e}) — left out`) }
+      }
+      if (!places.some((p) => p.id === company)) places.unshift({ id: company, name: company, rows })
+    } catch (e) { ctx.log?.(`places: ${e?.message ?? e}`); places = null }
+  }
   const versions = (await ctx.assets.versions?.()) ?? {}   // the shell's own assets under their content hashes
-  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce , assetVersion: (u) => versions[u] ?? null })
+  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce, places, assetVersion: (u) => versions[u] ?? null })
 }
 async function entryImportsFor(ctx, { company, app, person }) {
   const key = `${app.instance}:${app.rev}`

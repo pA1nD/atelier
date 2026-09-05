@@ -81,16 +81,22 @@ const moduleRow = (r) => ({
  *   modules: registry AppRow[] of the company; chrome: {qid, rev, base?} — `base` (`/_chrome/<digest>`, step 7 ship C)
  *   rides into the bootstrap as `chromeBase` only when the document is composed by digest; `chromeRev` is then the digest
  */
-export function bootstrapFor({ cfg = {}, company, slug = null, person, modules = [], chrome, companies = [], portal = null }) {
+// places (2026-09-05, "one rail everywhere"): the PERSON's places — the portal, their personal space, the companies they
+// are in — each with its rows ({id, name, origin, rows}); the current company's rows are `modules`. Without places the
+// document is single-place, as before.
+export function bootstrapFor({ cfg = {}, company, slug = null, person, modules = [], chrome, companies = [], portal = null, places = null }) {
   const rows = modules.filter((r) => r.instance).map(moduleRow)
+  const list = Array.isArray(places) && places.length ? places : [{ id: company, name: company, rows: modules }]
+  const wsOf = (p) => ({ id: p.id, name: p.name ?? p.id, ...(p.origin ? { origin: p.origin } : {}) })
+  const userWorkspaces = list.map((p) => ({ ...wsOf(p), modules: p.id === company ? rows : (p.rows ?? []).filter((r) => r.instance).map(moduleRow) }))
   const active = slug && rows.some((r) => r.id === slug) ? `${company}/${slug}` : null
   const chromeQid = chrome?.qid ?? null
   return {
     mode: 'host', label: cfg.label ?? null, observe: false,
     chromeApi: CHROME_API,
     // `logout`: the identity provider's sign-out door (fleet: the portal's /logout) — the chrome's account menu offers Sign out
-    user: { id: person.id, name: person.name, epoch: person.epoch ?? null, ...(person.logout ? { logout: person.logout } : {}), workspaces: [{ id: company, name: company, modules: rows }] },
-    workspace: company, workspaces: [{ id: company, name: company }],
+    user: { id: person.id, name: person.name, epoch: person.epoch ?? null, ...(person.logout ? { logout: person.logout } : {}), workspaces: userWorkspaces },
+    workspace: company, workspaces: list.map(wsOf),
     companies, portal,
     activeQid: active,
     chromeQid, defaultChromeQid: chromeQid, chromes: chromeQid ? [chromeQid] : [],
@@ -163,8 +169,8 @@ export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap
 
 // renderDocument(): the whole thing for one route — what routes.mjs calls. `bootstrapBytes` is
 // PLAN §4.5's bootstrap-bytes row (shell/metrics.mjs): what the shell composed into the page.
-export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce(), assetVersion = null }) {
-  const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal })
+export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce(), assetVersion = null, places = null }) {
+  const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal, places })
   const bootstrapJson = escapeBootstrap(bootstrap)
   const sheet = sheetFor({ company, slug, modules, chrome })
   const importMap = chrome?.qid && chrome.hasKit ? { imports: { '@atelier/kit': chromeAsset(chrome, 'kit.js') } } : null

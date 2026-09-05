@@ -63,7 +63,11 @@ function rowsOf(list, company) {
   return out;
 }
 // The live rows, readable outside React (self().subscribe maps qid → instance through them).
-let currentModules = rowsOf(boot.user?.workspaces?.find((w) => w.id === COMPANY)?.modules, COMPANY);
+// every place's rows (one rail everywhere): this company's are client-routed; another place's carry its `origin` and are
+// a page load there (navigateByQid). The bus refreshes this company's rows only; the others stand as the document said.
+const rowsOfAll = (workspaces) => (workspaces || []).flatMap((w) => rowsOf(w.modules, w.id).map((m) => (w.origin ? { ...m, origin: w.origin } : m)));
+let currentModules = rowsOfAll(boot.user?.workspaces);
+const originOf = (ws) => (boot.user?.workspaces || []).find((w) => w.id === ws)?.origin || null;
 const rowByQid = (qid) => currentModules.find((m) => m.qid === qid) || null;
 const instanceFor = (company, app) => (company === COMPANY ? rowByQid(`${company}/${app}`)?.instance || null : null);
 
@@ -309,8 +313,9 @@ function App() {
   const availableChromes = boot.chromes || (chromeQid ? [chromeQid] : []);
 
   const [modules, setModulesState] = useState(() => currentModules);
-  const setModules = (rows) => { currentModules = rows; setModulesState(rows); };
-  const wsList = (user.workspaces || []).map((w) => (w.id === COMPANY ? { ...w, modules } : w));
+  // rows from the bus are THIS company's: the other places' rows stay
+  const setModules = (rows) => { const own = rows.filter((m) => m.workspace === COMPANY); const foreign = currentModules.filter((m) => m.workspace !== COMPANY); currentModules = [...foreign, ...own]; setModulesState(currentModules); };
+  const wsList = (user.workspaces || []).map((w) => (w.id === COMPANY ? { ...w, modules: modules.filter((m) => m.workspace === COMPANY) } : w));
   const [urlState, setUrlState] = useState(parseHere);
   const [loaded, setLoaded] = useState({});             // qid → load entry
   const [chromeEntry, setChromeEntry] = useState(null);
@@ -494,6 +499,8 @@ function App() {
     if (!ws) return;
     const target = id ? buildUrl(ws, id) : buildUrl(ws, null);
     if (ws !== COMPANY) {                                   // another company is another document
+      const origin = originOf(ws);
+      if (origin) { window.location.assign(origin + target); return; }   // its own origin; the gate hands the session over
       const t = pickTarget(boot, ws);
       performPick(document, t && t.kind === 'assign' ? { kind: 'assign', href: target } : t);
       return;
@@ -507,6 +514,7 @@ function App() {
   // The picker: a full page load in both modes (client/picker.js). Our own company's home is an app-less document: it
   // renders the rail's DEFAULT digest, so from an app document on another digest it is a page load too (client/chrome.js).
   function pickWorkspace(ws) {
+    if (ws !== COMPANY && originOf(ws)) { window.location.assign(originOf(ws) + buildUrl(ws, null)); return; }
     if (ws === COMPANY) {
       const target = buildUrl(ws, null);
       const want = targetDigest({ row: null, railDefault: railDefaultRef.current, bootRev: chromeRev });

@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { renderDocument, escapeBootstrap, relativeImports, composeDocument, FALLBACK_TEMPLATE, SLOTS, preloadsFor, sheetFor } from '../document.mjs'
+import { renderDocument, escapeBootstrap, relativeImports, composeDocument, FALLBACK_TEMPLATE, SLOTS, preloadsFor, sheetFor, bootstrapFor } from '../document.mjs'
 import { createConfig } from '../config.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -175,4 +175,15 @@ test('the shell\'s own assets ride under their content hash when the shell knows
   assert.match(html, /<script type="module" src="\/assets\/client\.js\?v=abc123"><\/script>/)
   assert.match(html, /src="\/assets\/react\.js\?v=r1"/); assert.match(html, /src="\/assets\/react-dom\.js\?v=rd1"/)
   assert.match(composeDocument({ nonce: 'n', bootstrap: {}, sheet: null, importMap: null }), /src="\/assets\/client\.js"><\/script>/)
+})
+
+test('places: the bootstrap lists every place of the person with its rows and origin; the current company keeps its rows; single-place without them', () => {
+  const modules = [{ slug: 'todo', instance: 'i-1', rev: 1 }]
+  const places = [{ id: 'portal', name: 'Portal', origin: 'https://portal.test', rows: [{ slug: 'home', instance: 'i-h', rev: 2 }] }, { id: 'acme', name: 'Acme', origin: 'https://acme.portal.test', rows: [] }]
+  const b = bootstrapFor({ company: 'acme', slug: 'todo', person: { id: 'p', name: 'P' }, modules, chrome: null, places })
+  assert.deepEqual(b.workspaces, [{ id: 'portal', name: 'Portal', origin: 'https://portal.test' }, { id: 'acme', name: 'Acme', origin: 'https://acme.portal.test' }])
+  assert.deepEqual(b.user.workspaces.map((w) => [w.id, w.modules.map((m) => m.id)]), [['portal', ['home']], ['acme', ['todo']]])
+  assert.equal(b.activeQid, 'acme/todo')
+  const single = bootstrapFor({ company: 'acme', person: { id: 'p', name: 'P' }, modules, chrome: null })
+  assert.deepEqual(single.workspaces, [{ id: 'acme', name: 'acme' }])
 })
