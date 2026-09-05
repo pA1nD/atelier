@@ -106,9 +106,11 @@ const r = (lane, status, extra = {}) => ({ lane, status, ...extra })
 // notice(ctx, status, heading, text): a PERSON's answer for a document that has nowhere to go — the shell's owner renders
 // the page (`cfg.pageFor({status, heading, text, home}) → {body, headers?}`, the portal's own notice layout); without
 // an owner page the JSON `{}` of before. 2026-09-05: "https://staging.pa1nd.de/xxx should be handled as well".
+// a PERSON's request: a navigation (Sec-Fetch says so, or the browser accepts html) — a fetch keeps the JSON it expects
+const isNavigation = (ctx) => { const h = ctx.req?.headers ?? {}; return h['sec-fetch-mode'] === 'navigate' || h['sec-fetch-dest'] === 'document' || /text\/html/.test(String(h.accept ?? '')) }
 const notice = (ctx, status, heading, text, fallback = null) => {
   let p = null
-  try { p = ctx.cfg?.pageFor?.({ status, heading, text, home: true }) ?? null } catch (e) { ctx.log?.(`pageFor: ${e?.message ?? e}`) }
+  if (isNavigation(ctx)) { try { p = ctx.cfg?.pageFor?.({ status, heading, text, home: true }) ?? null } catch (e) { ctx.log?.(`pageFor: ${e?.message ?? e}`) } }
   if (p?.body) return r('document', status, { body: p.body, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', ...(p.headers ?? {}) } })
   return fallback ?? jsonR('document', status, {})
 }
@@ -473,6 +475,6 @@ export async function dispatch(ctx) {
     const out = await lane(ctx)
     if (out) return out
   }
-  if (!ctx.upgrade && ctx.method === 'GET' && /text\/html/.test(ctx.headers?.accept ?? '')) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')   // a person's navigation (review 2026-09-05)
+  if (!ctx.upgrade && ctx.method === 'GET' && isNavigation(ctx)) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')   // a person's navigation (review 2026-09-05)
   return ctx.upgrade ? jsonR('none', 426, {}) : jsonR('none', 404, {})
 }
