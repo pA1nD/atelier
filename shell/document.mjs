@@ -111,12 +111,14 @@ export function bootstrapFor({ cfg = {}, company, slug = null, person, modules =
 // cache in front (the browser's, Cloudflare's, max-age from the host) then hands out yesterday's sheet for today's
 // `?rev=1`. Same bytes, same URL; new bytes, new URL — on every plane, no purge. The counter stays the fallback for a row
 // the registry knows no content id for (a bare dev row).
-export const assetRev = (r) => (r?.deployed_rev != null && r.deployed_rev !== '' ? String(r.deployed_rev) : (r?.rev ?? null))
+// THE ID IS BOTH (review 2026-09-05): `<deployed_rev>.<rev>` — the host's swap bumps the counter and invalidates the topic
+// BEFORE the release moves `deployed_rev`, so an id of the content id alone did not move at the swap (an open tab kept the
+// old bundle and sheet); an id of the counter alone restarts with the row. Together: moves at every swap, unique forever.
+export const assetRev = (r) => { const d = r?.deployed_rev != null && r.deployed_rev !== '' ? String(r.deployed_rev) : null; const c = r?.rev ?? null; return d == null ? c : c == null ? d : `${d}.${c}` }
 // THE SHEET IS TWO INPUTS (2026-09-05): an app's sheet is compiled from the app AND the chrome its host holds, so its URL
 // names both — a chrome release must not leave a cache holding the sheet compiled against the last one
-// — when the chrome is a RELEASE (`base`, by digest): that digest is what every host compiled against. The row path
-// (no release) leaves the sheet's URL as it was (step 5's document, byte for byte).
-export const sheetRev = (app, chrome) => { const a = assetRev(app); const c = chrome?.base && chrome.rev != null ? String(chrome.rev).slice(0, 12) : null; return a == null ? c : c ? `${a}.${c}` : a }
+// — the chrome's id whenever the shell knows one: a release's digest, or the row's content id (spine v66 `rev`).
+export const sheetRev = (app, chrome) => { const a = assetRev(app); const c = chrome?.rev != null ? String(chrome.rev).slice(0, 12) : null; return a == null ? c : c ? `${a}.${c}` : a }   // the chrome's id whenever the shell knows one (review 2026-09-05: the row path too)
 const q = (rev) => (rev === null || rev === undefined ? '' : `?rev=${encodeURIComponent(String(rev))}`)
 export const appAsset = (company, slug, file, rev) => `/modules/${encodeURIComponent(company)}/${encodeURIComponent(slug)}/${file}${q(rev)}`
 // chromeAsset(): by digest the immutable `/_chrome/<digest>/<file>` (no `?rev=`: the URL names the bytes), else the
@@ -140,7 +142,7 @@ export function preloadsFor({ company, slug, modules, chrome, entryImports = [],
   const app = slug ? modules.find((r) => r.slug === slug && r.instance) : null
   if (app) {
     out.push(appAsset(company, slug, 'frontend.js', assetRev(app)))
-    for (const rel of entryImports) if (rel.startsWith('./')) out.push(appAsset(company, slug, rel.slice(2), assetRev(app)))
+    for (const rel of entryImports) if (rel.startsWith('./')) out.push(appAsset(company, slug, rel.slice(2), app.rev ?? null))   // the bundle's own `?rev=<counter>` (host bundle.mjs versionRelativeImports)
   }
   return out
 }

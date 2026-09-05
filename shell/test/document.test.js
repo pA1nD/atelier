@@ -43,7 +43,7 @@ test('the preload list: client, chrome-resolve, chrome bundle, kit, the entry an
 
 test('one <link>: the app sheet on /c/s, the chrome sheet on /c/ and on an unknown slug', () => {
   const app = renderDocument({ company: 'global', slug: 'toybox', person, modules, chrome })
-  assert.equal(app.sheet, '/modules/global/toybox/styles.css?rev=3')
+  assert.equal(app.sheet, '/modules/global/toybox/styles.css?rev=3.1700')
   assert.equal((app.html.match(/<link id="atelier-chrome-styles"/g) ?? []).length, 1)
   const bare = renderDocument({ company: 'global', person, modules, chrome })
   assert.equal(bare.sheet, '/modules/global/catalyst-chrome/styles.css?rev=1700')
@@ -149,7 +149,8 @@ test('a null digest is step 5\'s document byte for byte: the same inputs through
   for (const c of chromes) for (const slug of [null, 'weather', 'nope']) {
     const args = { cfg, template: FALLBACK_TEMPLATE, company: 'global', slug, person, modules, chrome: c, companies: [{ id: 'global', name: 'global', href: '/global/' }], portal: 'https://portal.pa1nd.de', entryImports: ['./x.js'], nonce }
     const now = renderDocument(args), then = step5.renderDocument(args)
-    assert.equal(now.html, then.html, `chrome ${c?.rev} slug ${slug}`)
+    // the one deliberate difference since step 5: the app sheet's URL names the chrome's id too (`<rev>.<chrome rev>`, review 2026-09-05) — everything else byte for byte
+    assert.equal(now.html.replace(/(styles\.css\?rev=[^".]+)\.[0-9a-f]+"/g, '$1"'), then.html, `chrome ${c?.rev} slug ${slug}`)
     assert.deepEqual(now.headers, then.headers)
   }
   fs.rmSync(dir, { recursive: true, force: true })
@@ -159,10 +160,11 @@ test('the URL names the bytes: a row with a content id (deployed_rev) rides unde
   const modules = [{ slug: 'weather', instance: 'i-1', rev: 7, deployed_rev: 'a9b6d0e377f8' }, { slug: 'bare', instance: 'i-2', rev: 3 }]
   const chrome = { qid: 'global/portal-chrome', rev: 'c0ffee00c0de', hasKit: true, hasStyles: true, base: '/_chrome/c0ffee00c0de' }
   const pre = preloadsFor({ company: 'global', slug: 'weather', modules, chrome, entryImports: ['./x.js'] })
-  assert.ok(pre.includes('/modules/global/weather/frontend.js?rev=a9b6d0e377f8'), pre.join(' '))
-  assert.ok(pre.includes('/modules/global/weather/x.js?rev=a9b6d0e377f8'))
+  // THE ID IS BOTH (review 2026-09-05): `<deployed_rev>.<rev>` — moves at the host's swap (the counter) and stays unique across a re-seeded counter (the content id)
+  assert.ok(pre.includes('/modules/global/weather/frontend.js?rev=a9b6d0e377f8.7'), pre.join(' '))
+  assert.ok(pre.includes('/modules/global/weather/x.js?rev=7'), 'a relative import preloads under the counter the served bundle names (host bundle.mjs versionRelativeImports)')
   assert.ok(pre.includes('/_chrome/c0ffee00c0de/frontend.js'))
-  assert.equal(sheetFor({ company: 'global', slug: 'weather', modules, chrome }), '/modules/global/weather/styles.css?rev=a9b6d0e377f8.c0ffee00c0de')   // the sheet names the chrome too
+  assert.equal(sheetFor({ company: 'global', slug: 'weather', modules, chrome }), '/modules/global/weather/styles.css?rev=a9b6d0e377f8.7.c0ffee00c0de')   // the sheet names the chrome too
   assert.equal(sheetFor({ company: 'global', slug: 'bare', modules, chrome }), '/modules/global/bare/styles.css?rev=3.c0ffee00c0de')
   assert.equal(sheetFor({ company: 'global', slug: 'bare', modules, chrome: null }), '/modules/global/bare/styles.css?rev=3')
 })

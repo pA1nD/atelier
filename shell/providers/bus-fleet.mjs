@@ -7,6 +7,7 @@
 // `snapshot(instance)`: `rev` from the registry row; `error: null` always — errors go to the agent
 // (OR16), never to a member's tab.
 import { EventRing, validEvent, companyTopic, asDigest } from '../../protocol/index.js'
+import { assetRev } from '../document.mjs'
 import { randomBytes } from 'node:crypto'
 import { visibleRows } from '../presence.mjs'
 
@@ -28,7 +29,7 @@ export function createBusFleet({ registry, stream, log = () => {} }) {
   // never an app document against the default (a computer lagging the default would reload forever)
   // `rev` to the client is the row's CONTENT id when the registry knows one (deployed_rev — the URL names the bytes,
   // shell/document.mjs assetRev), the counter else — the same rule the bootstrap rows follow
-  const moduleRow = (r) => ({ id: r.slug, instance: r.instance, rev: r.deployed_rev ?? r.rev ?? null, hasFrontend: r.hasFrontend !== false, meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) }, chromeDigest: asDigest(r.chromeDigest) })   // 64 hex or null: what the shell composes by
+  const moduleRow = (r) => ({ id: r.slug, instance: r.instance, rev: assetRev(r), hasFrontend: r.hasFrontend !== false, meta: { ...(r.meta ?? {}), ...(r.primary ? { primary: true } : {}) }, chromeDigest: asDigest(r.chromeDigest) })   // 64 hex or null: what the shell composes by
 
   function accept(ev) {
     if (!validEvent(ev)) { stats.rejected++; return { ok: false, reason: 'envelope' } }
@@ -69,7 +70,7 @@ export function createBusFleet({ registry, stream, log = () => {} }) {
         return { ...base, modules: rows.map(moduleRow), chrome: { qid: chrome.qid, digest: chrome.digest, ...(chrome.version ? { version: chrome.version } : {}) }, chromeRev: chrome.digest }
       }
       const row = await registry.byInstance(topic)
-      return row ? { ...base, rev: row.deployed_rev ?? row.rev ?? null, error: null } : null
+      return row ? { ...base, rev: assetRev(row), error: null } : null   // `base.seq` (the stream's cursor) orders, `rev` addresses (review 2026-09-05)
     },
     accept,
   }

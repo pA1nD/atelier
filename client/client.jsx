@@ -55,7 +55,7 @@ function rowsOf(list, company) {
     if (!m || !m.id) continue;
     out.push({
       id: m.id, qid: `${company}/${m.id}`, workspace: company,
-      instance: m.instance || null, rev: m.rev ?? null,
+      instance: m.instance || null, rev: m.rev ?? null,   // `rev` names the bytes (a content id or the counter) — it does not order
       hasFrontend: m.hasFrontend !== false, meta: m.meta || {},
       chromeDigest: m.chromeDigest ?? null,               // the digest ITS computer reports (step 7 ship C); null = the default
     });
@@ -351,6 +351,7 @@ function App() {
   // window belongs to the old rev); `tokenRef` guards out-of-order re-imports.
   const loadingRef = useRef(new Set());
   const revRef = useRef(new Map());
+  const seqRef = useRef(new Map());   // the stream cursor (`snap.seq`) of the newest snapshot applied per qid — a content id does not order (review 2026-09-05)
   const runningRef = useRef(new Map());
   const tokenRef = useRef(new Map());
   const importAt = (qid, rev) => {
@@ -421,8 +422,13 @@ function App() {
       return next;
     });
     if (snap.rev == null) return;
+    // a late, older snapshot is dropped by the STREAM'S cursor (`seq`, monotonic per topic); the same bytes are not re-imported
+    const seq = Number(snap.seq);
+    const knownSeq = seqRef.current.get(qid);
+    if (knownSeq != null && Number.isFinite(seq) && seq <= knownSeq) return;
+    if (Number.isFinite(seq)) seqRef.current.set(qid, seq);
     const known = revRef.current.get(qid);
-    if (known != null && Number(snap.rev) <= Number(known)) return;
+    if (known != null && String(snap.rev) === String(known)) return;   // the same bytes: nothing to import
     setModules(currentModules.map((m) => (m.qid === qid ? { ...m, rev: snap.rev } : m)));
     if (!loadingRef.current.has(qid)) return;          // never imported here: its first visit imports the current rev
     importAt(qid, snap.rev);
@@ -458,7 +464,7 @@ function App() {
     if (chromeMoved(chromeRev, rail, active)) { window.location.reload(); return; }
     if (Array.isArray(rail.modules)) {
       const rows = rowsOf(rail.modules, COMPANY);
-      for (const r of rows) { const known = revRef.current.get(r.qid); if (known != null && r.rev != null && Number(r.rev) < Number(known)) r.rev = known; }
+      for (const r of rows) { const known = revRef.current.get(r.qid); if (known != null) r.rev = known; }   // a rail row never moves a LOADED qid (a content id does not order; its topic snapshot does, above)
       setModules(rows);
     }
   };

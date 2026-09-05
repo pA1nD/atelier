@@ -128,7 +128,10 @@ export function createAssets({ repoRoot = REPO_ROOT, clientDir = path.join(REPO_
       if (name === 'react.js' || name === 'react-dom.js') e = vendor(name.replace(/\.js$/, ''))
       else if (name === 'client.js') e = await clientJs()
       else if (/^[a-z][a-z0-9-]*\.js$/.test(name)) e = plain(name)
-      if (!e) { const b = Buffer.from('{}'); res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'content-length': b.length, 'cache-control': 'no-store' }); res.end(b); return true }
+      const v = (() => { try { return new URL(req.url ?? '', 'http://x').searchParams.get('v') } catch { return null } })()
+      const stale = e && v != null && e.hash && v !== e.hash   // a version that is not these bytes: never the wrong bytes under the right name (review 2026-09-05)
+      if (!e || stale) { const b = Buffer.from('{}'); res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'content-length': b.length, 'cache-control': 'no-store' }); res.end(b); return true }
+      if (v != null && e.hash) { send(req, res, 200, e.body, e.type, { etag: `"${e.hash}"`, 'cache-control': 'public, max-age=31536000, immutable' }); return true }   // the URL names the bytes: immutable
       send(req, res, 200, e.body, e.type, { etag: `"${e.mtime}"` })
       return true
     },

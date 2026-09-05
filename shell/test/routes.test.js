@@ -98,7 +98,7 @@ test('local: the document — /, /<c>/, /<c>/<s>; no https redirect, no HSTS; /_
   assert.match(doc.text, /"companies":\[\{"id":"global","name":"global","href":"\/global\/"\},\{"id":"lab","name":"lab","href":"\/lab\/"\}\]/)
   assert.match(doc.text, /"portal":null/)
   assert.equal((doc.text.match(/rel="stylesheet"/g) ?? []).length, 1)
-  assert.match(doc.text, /href="\/modules\/global\/todo\/styles\.css\?rev=3"/)
+  assert.match(doc.text, /href="\/modules\/global\/todo\/styles\.css\?rev=3(\.[0-9a-f]+)?"/)
   assert.match(doc.text, /modulepreload" href="\/modules\/global\/todo\/x\.js\?rev=3"/)      // the entry's relative import, fetched from the host
   assert.ok(!doc.text.includes('catalyst-chrome","instance":"' + CHROME_APP), 'the chrome row is not a module')
   assert.ok(doc.text.indexOf('type="importmap"') < doc.text.indexOf('rel="modulepreload"'))

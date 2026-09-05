@@ -246,13 +246,17 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce, log
   let places = null
   if (typeof registry.placesFor === 'function') {
     try {
-      const named = (await registry.placesFor(person.id)) ?? []
-      places = []
-      for (const p of named) {
-        if (!p?.id) continue
-        try { places.push({ ...p, rows: p.id === company ? rows : await visibleRows(registry, person.id, (await registry.apps(p.id)).filter((x) => !x.isChrome)) }) }
-        catch (e) { ctx.log?.(`places: ${p.id} unread (${e?.message ?? e}) — left out`) }
-      }
+      const named = ((await registry.placesFor(person.id)) ?? []).filter((p) => p?.id)
+      // ANOTHER PLACE'S ROWS ARE LINKS (review 2026-09-05, rule 1): a company origin's document carries, for the person's
+      // other places, the slug and the words a rail item needs — never `instance`, `rev` or the digest that name that
+      // place's work — so app code on this origin learns no more than the names on the person's own rail
+      const linkRow = (r) => ({ slug: r.slug, hasFrontend: r.hasFrontend !== false, meta: { name: r.meta?.name, icon: r.meta?.icon, ...(r.meta?.group ? { group: r.meta.group } : {}), ...(r.primary ? { primary: true } : {}) } })
+      const read = await Promise.all(named.map(async (p) => {
+        if (p.id === company) return { ...p, rows }
+        try { return { ...p, rows: (await visibleRows(registry, person.id, (await registry.apps(p.id)).filter((x) => !x.isChrome))).map(linkRow) } }
+        catch (e) { ctx.log?.(`places: ${p.id} unread (${e?.message ?? e}) — left out`); return null }
+      }))
+      places = read.filter(Boolean)
       if (!places.some((p) => p.id === company)) places.unshift({ id: company, name: company, rows })
     } catch (e) { ctx.log?.(`places: ${e?.message ?? e}`); places = null }
   }
@@ -469,5 +473,6 @@ export async function dispatch(ctx) {
     const out = await lane(ctx)
     if (out) return out
   }
+  if (!ctx.upgrade && ctx.method === 'GET' && /text\/html/.test(ctx.headers?.accept ?? '')) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')   // a person's navigation (review 2026-09-05)
   return ctx.upgrade ? jsonR('none', 426, {}) : jsonR('none', 404, {})
 }
