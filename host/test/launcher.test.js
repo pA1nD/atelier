@@ -38,6 +38,7 @@ const POD_ENV = {
   ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', CLAUDE_MODEL: 'claude-y', DISABLE_AUTOUPDATER: '1', OPENAI_VOICE_TOKEN: 'voice-secret',
   HORSE_BROWSER_BIN: '/usr/local/bin/chrome-egress', HORSE_BROWSER_UNATTENDED: '1', FLEET_EGRESS: 'http://exit', FLEET_EGRESS_TZ: 'Europe/Berlin',
   PIP_USER: '1', NPM_CONFIG_PREFIX: '/work/.npm-global',
+  PORTAL_HOST: 'staging.pa1nd.de', COMPACT_IDLE: '0', CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK: '1',   // the three rows the list ate until 2026-09-10
   ATELIER_BOOTSTRAP: 'boot-secret', ATELIER_GRACE_S: '40', CLAUDE_CODE_OAUTH_TOKEN: 'oauth-secret', KUBERNETES_SERVICE_HOST: '10.0.0.1',
   // a wrapper that forgot the unset: the leaf PEMs are dropped under every key list (NEVER_BELOW), never below the launcher
   ATELIER_HOST_TLS_CERT: '-----BEGIN CERTIFICATE-----', ATELIER_HOST_TLS_KEY: '-----BEGIN PRIVATE KEY-----', ATELIER_HOST_TLS_CA: '-----BEGIN CERTIFICATE-----',
@@ -245,8 +246,9 @@ test('env rows: H has no secret and no CHANNEL_*; S keeps the supervisor contrac
     PATH: POD_ENV.PATH, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'xterm-256color', CHAT_ID: 'c1', PERSONA: 'bayard', PERSONA_TEXT: 'You are…', STORY_TEXT: 'story',
     CHANNEL_URL: 'http://spine:7331', CHANNEL_TOKEN: 'chan-secret', CHANNEL_CHAT: 'c1', CHANNEL_CHAT_KIND: 'direct', ANTHROPIC_MODEL: 'claude-x', ANTHROPIC_API_KEY: 'sk-ant-secret', CLAUDE_MODEL: 'claude-y',
     DISABLE_AUTOUPDATER: '1', OPENAI_VOICE_TOKEN: 'voice-secret', HORSE_BROWSER_BIN: '/usr/local/bin/chrome-egress', HORSE_BROWSER_UNATTENDED: '1', FLEET_EGRESS: 'http://exit', FLEET_EGRESS_TZ: 'Europe/Berlin',
-    PIP_USER: '1', NPM_CONFIG_PREFIX: '/work/.npm-global', HOME: '/work',
+    PIP_USER: '1', NPM_CONFIG_PREFIX: '/work/.npm-global', PORTAL_HOST: 'staging.pa1nd.de', COMPACT_IDLE: '0', CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK: '1', HOME: '/work',
   })
+  assert.equal('CLAUDE_CODE_OAUTH_TOKEN' in S, false) // exact names above, never a CLAUDE_CODE_* prefix
   assert.deepEqual(helperEnv(POD_ENV), { PATH: POD_ENV.PATH })
   // the leaf PEMs reach no row: not H (despite ATELIER_* in HOST_KEEP), not S, not X
   for (const k of ['ATELIER_HOST_TLS_CERT', 'ATELIER_HOST_TLS_KEY', 'ATELIER_HOST_TLS_CA']) {

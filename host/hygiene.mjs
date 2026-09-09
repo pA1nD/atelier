@@ -47,10 +47,19 @@ export function hostEnv(podEnv, cfg) {
 // secret (envFrom) that speak/draw need. The CHANNEL_ family is kept by PREFIX: the spine adds members
 // (CHANNEL_CHAT_KIND=group|direct, 2026-09-02 — the door plugin's send-path guard fails closed in every 1:1
 // without it), and a name list here silently dropped each new one before it reached claude and the plugin.
+// THREE ROWS THE SPINE SETS AND THIS LIST SILENTLY ATE (measured in a running pod 2026-09-10 — the
+// pod spec had them, the supervisor's /proc/<pid>/environ did not): PORTAL_HOST (the plane's portal —
+// without it every staging pod believes it is production's and hands out production's door),
+// COMPACT_IDLE (the compactor's kill switch), CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK (the operator's
+// ruling that claude's own refusal retry is off — without it a refusal was answered by another model
+// and the chat's model silently swapped). Exact names: CLAUDE_CODE_* as a prefix would admit the
+// OAuth token that SECRETS keeps out. A row the spine adds tomorrow is dropped the same way until it
+// is named here — the image's cold-boot probe reads claude's own environ against the pod spec.
 export const SESSION_KEEP = Object.freeze([
   'PATH', 'LANG', 'LC_ALL', 'TERM', 'TZ', 'CHAT_ID', 'PERSONA*', 'STORY_TEXT',
   'CHANNEL_*', 'ANTHROPIC_*', 'CLAUDE_MODEL', 'DISABLE_AUTOUPDATER',
   'OPENAI_VOICE_TOKEN', 'HORSE_BROWSER_*', 'FLEET_EGRESS*', 'PIP_USER', 'NPM_CONFIG_PREFIX',
+  'PORTAL_HOST', 'COMPACT_IDLE', 'CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK',
 ])
 export function sessionEnv(podEnv) { return { ...scrub(podEnv, SESSION_KEEP), HOME: '/work' } }
 
