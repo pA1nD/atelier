@@ -577,9 +577,20 @@ function App() {
   const defaultWs = (wsList.find((w) => (w.modules || []).length > 0) || wsList[0])?.id || null;
 
   // Canonicalize URL: with no workspace in the path (`/`), land on the default
-  // workspace — its `meta.primary` module if any, else its home.
+  // workspace — its `meta.primary` module if any, else its home. A WORKSPACE ROOT
+  // (`/<ws>/`) with a primary module lands on that module the same way (F20,
+  // 2026-09-16): the portal's `/portal/` opens Home, not the module list —
+  // a workspace without a primary keeps its home page.
   useEffect(() => {
-    if (urlState.ws || !defaultWs) return;
+    if (urlState.id) return;
+    if (urlState.ws) {
+      const own = allModules.find((m) => m.workspace === urlState.ws && m.meta?.primary);
+      if (!own || requiredChromeForQid(own.qid) !== chromeQid) return;
+      window.history.replaceState(null, '', buildUrl(own.workspace, own.id));
+      setUrlState(parseUrl());
+      return;
+    }
+    if (!defaultWs) return;
     const primary = allModules.find((m) => m.workspace === defaultWs && m.meta?.primary)
                  || allModules.find((m) => m.meta?.primary);
     const target = primary
@@ -593,7 +604,7 @@ function App() {
     }
     window.history.replaceState(null, '', target);
     setUrlState(parseUrl());
-  }, [urlState.ws]);
+  }, [urlState.ws, urlState.id]);
   const effectiveWorkspace = urlState.ws || defaultWs;
 
   // Load the chrome bundle.
