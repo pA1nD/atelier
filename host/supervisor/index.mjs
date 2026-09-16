@@ -547,7 +547,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
   // on the first scan; a refusal leaves no row (the registrar wrote CLAIM-REFUSED.txt as uid 1000).
   async function claimFolder(app, existing = null) {
     let res
-    try { res = await registrar.claim({ slug: app.slug, meta: app.meta ?? {}, dir: app.dir }) } catch (e) { emit(`[${app.slug}] claim: ${e.message}`); return existing }
+    try { res = await registrar.claim({ slug: app.slug, meta: { ...(app.meta ?? {}), ...(app.requested ?? {}) }, dir: app.dir }) } catch (e) { emit(`[${app.slug}] claim: ${e.message}`); return existing }
     if (!res || res.refused) { emit(`[${app.slug}] claim refused: ${res?.refused?.code ?? '?'} ${res?.refused?.error ?? ''}`); return null }
     if (existing && res.instance !== existing.instance) emit(`[${app.slug}] re-claim returned ${res.instance}, snapshot row is ${existing.instance} — following the registrar`)
     const row = rows.get(res.instance) ?? mkRow({ instance: res.instance, slug: app.slug, uid: res.uid, company: company(), dir: app.dir })
