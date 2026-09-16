@@ -343,8 +343,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     row.attempted = fp
     const mj = withGroupSync(row.uid, () => checkModuleJson(row.dir, fs))
     if (!mj.ok) return fail([mj.error])
-    if (JSON.stringify(mj.meta) !== JSON.stringify(row.meta)) {
-      row.meta = mj.meta
+    if (JSON.stringify([mj.meta, mj.requested]) !== JSON.stringify([row.meta, row.requested ?? {}])) {   // the request (primary) counts too
+      row.meta = mj.meta; row.requested = mj.requested
       try { await registrar?.claim?.({ slug: row.slug, meta: mj.json, dir: row.dir }) } catch (e) { emit(`[${row.slug}] meta update: ${e.message}`) }
     }
     let built
@@ -552,7 +552,7 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
     if (existing && res.instance !== existing.instance) emit(`[${app.slug}] re-claim returned ${res.instance}, snapshot row is ${existing.instance} — following the registrar`)
     const row = rows.get(res.instance) ?? mkRow({ instance: res.instance, slug: app.slug, uid: res.uid, company: company(), dir: app.dir })
     row.claimed = true; row.linked = true
-    row.slug = app.slug; row.uid = res.uid; row.dir = app.dir; row.dev.appDir = app.dir; row.meta = app.meta ?? {}
+    row.slug = app.slug; row.uid = res.uid; row.dir = app.dir; row.dev.appDir = app.dir; row.meta = app.meta ?? {}; row.requested = app.requested ?? {}
     // discovery's SEEDED_MARKER names the folder as a release (deployer.seeded: no watcher, no dev slot, no git) ONLY on a host
     // configured for it (cfg.seededApps ← ATELIER_SEEDED_APPS=1, the portal-host image alone): the marker sits in a folder the
     // agent owns, so on any other host it is inert and the folder takes the new-folder road (review 2026-09-02 B2)
