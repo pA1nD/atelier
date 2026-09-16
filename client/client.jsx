@@ -322,14 +322,22 @@ function App() {
   const [backendErrors, setBackendErrors] = useState([]);   // [{qid, message}] from topic snapshots
   const [waking, setWaking] = useState(false);
 
-  // Canonicalise `/`: land on the company's primary app, else its home.
+  // Canonicalise `/`: land on the company's primary app, else its home. The company's ROOT (`/<company>/`, no
+  // app) lands on the primary the same way (F20, 2026-09-16): the portal's `/portal/` opens Home, never the
+  // app list; a company without a primary keeps its home page.
   useEffect(() => {
-    if (urlState.ws || !COMPANY) return;
+    if (urlState.id || !COMPANY) return;
     const primary = modules.find((m) => m.meta?.primary);
+    if (urlState.ws) {
+      if (urlState.ws !== COMPANY || !primary) return;
+      window.history.replaceState(null, '', buildUrl(COMPANY, primary.id));
+      setUrlState(parseHere());
+      return;
+    }
     const target = primary ? buildUrl(COMPANY, primary.id) : buildUrl(COMPANY, null);
     window.history.replaceState(null, '', target);
     setUrlState(parseHere());
-  }, [urlState.ws]);
+  }, [urlState.ws, urlState.id, modules.length]);
   const effectiveWorkspace = urlState.ws || COMPANY;
 
   // The chrome bundle at the chrome's revision — by digest the immutable `/_chrome/<digest>/frontend.js` (client/chrome.js).
