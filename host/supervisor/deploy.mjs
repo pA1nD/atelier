@@ -832,8 +832,8 @@ export function createDeployer(i) {
       row.counter = rev
       const mj = i.withGroupSync(row.uid, () => i.checkModuleJson(row.dir))
       if (!mj.ok) return fail('build', mj.error.message, formatHint(mj.error), { file: mj.error.file, line: mj.error.line, col: mj.error.col })
-      if (JSON.stringify(mj.meta) !== JSON.stringify(row.meta)) {   // a re-seed that renamed the app or changed its icon: the registry's meta follows (as build() does)
-        row.meta = mj.meta
+      if (JSON.stringify([mj.meta, mj.requested]) !== JSON.stringify([row.meta, row.requested ?? {}])) {   // a re-seed that renamed the app, changed its icon or its primary request: the registry follows (as build() does)
+        row.meta = mj.meta; row.requested = mj.requested
         try { await registrar?.claim?.({ slug, meta: mj.json, dir: row.dir }) } catch (e) { emit(`[${slug}] meta update: ${e.message}`) }
       }
       let built
