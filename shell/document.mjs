@@ -103,7 +103,7 @@ export function bootstrapFor({ cfg = {}, company, slug = null, person, modules =
     mode: 'host', label: cfg.label ?? null, observe: false,
     chromeApi: CHROME_API,
     // `logout`: the identity provider's sign-out door (fleet: the portal's /logout) — the chrome's account menu offers Sign out
-    user: { id: person.id, name: person.name, epoch: person.epoch ?? null, ...(person.logout ? { logout: person.logout } : {}), workspaces: userWorkspaces },
+    user: { id: person.id, name: person.name, epoch: person.epoch ?? null, ...(person.logout ? { logout: person.logout } : {}), ...(person.plan ? { plan: person.plan } : {}), workspaces: userWorkspaces },
     workspace: company, workspaces: list.map(wsOf),
     companies, portal,
     activeQid: active,

@@ -300,7 +300,7 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce, log
     } catch (e) { ctx.log?.(`places: ${e?.message ?? e}`); places = null }
   }
   const versions = (await ctx.assets.versions?.()) ?? {}   // the shell's own assets under their content hashes
-  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce, places, assetVersion: (u) => versions[u] ?? null, waking, notice })
+  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout, ...(person.plan ? { plan: person.plan } : {}) }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce, places, assetVersion: (u) => versions[u] ?? null, waking, notice })
 }
 async function entryImportsFor(ctx, { company, app, person }) {
   const key = `${app.instance}:${app.rev}`
@@ -420,7 +420,7 @@ export async function laneProxy(ctx) {
   }
   // whoami carries the identity provider's sign-out door when it has one (fleet: the portal's /logout) — the chrome's
   // account menu shows Sign out only then
-  if (name === 'whoami' && ctx.method === 'GET') return jsonR('proxy', 200, { id: ctx.person.id, name: ctx.person.name, anonymous: false, ...(ctx.identity?.logout ? { logout: ctx.identity.logout } : {}) })
+  if (name === 'whoami' && ctx.method === 'GET') return jsonR('proxy', 200, { id: ctx.person.id, name: ctx.person.name, anonymous: false, ...(ctx.identity?.logout ? { logout: ctx.identity.logout } : {}), ...(ctx.person.plan ? { plan: ctx.person.plan } : {}) })
   if (name === 'topics' && ctx.method === 'GET') {
     const topic = ctx.route.rest
     if (!topic) return jsonR('proxy', 404, {})

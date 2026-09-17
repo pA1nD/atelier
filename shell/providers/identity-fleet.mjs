@@ -40,7 +40,8 @@ export function createIdentityFleet({ sessions, epochOf, company, logout = null 
       if (!c || s.aud !== c) return { ok: false, reason: 'no-session' }     // a session for another company is no session here
       const chk = checkSession({ personId: s.person.id, epoch: s.epoch }, epochOf)
       if (!chk.ok) return { ok: false, reason: 'revoked' }
-      return { ok: true, person: { id: s.person.id, name: s.person.name, claims: s.person.claims ?? {} }, credential: 'cookie', epoch: s.epoch, logout }   // a session is a person, never the operator (fleet v73)
+      // `plan` (2026-09-18): the owner's one line naming what the person is on (the portal reads it off the spine's session row) — rides to the document's user for the chrome's footer
+      return { ok: true, person: { id: s.person.id, name: s.person.name, claims: s.person.claims ?? {}, ...(typeof s.person.plan === 'string' && s.person.plan ? { plan: s.person.plan } : {}) }, credential: 'cookie', epoch: s.epoch, logout }   // a session is a person, never the operator (fleet v73)
     },
   }
 }

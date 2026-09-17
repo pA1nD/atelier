@@ -196,6 +196,9 @@ test('places: the bootstrap lists every place of the person with its rows and or
   assert.deepEqual(b.workspaces, [{ id: 'portal', name: 'Portal', origin: 'https://portal.test' }, { id: 'acme', name: 'Acme', origin: 'https://acme.portal.test' }])
   assert.deepEqual(b.user.workspaces.map((w) => [w.id, w.modules.map((m) => m.id)]), [['portal', ['home']], ['acme', ['todo']]])
   assert.equal(b.activeQid, 'acme/todo')
+  // the plan (2026-09-18): the owner's one line about what the person is on rides on the user when the identity carries it
+  assert.equal(b.user.plan, undefined)
+  assert.equal(bootstrapFor({ company: 'acme', slug: 'todo', person: { id: 'p', name: 'P', plan: 'Acme plan' }, modules, chrome: null, places }).user.plan, 'Acme plan')
   const single = bootstrapFor({ company: 'acme', person: { id: 'p', name: 'P' }, modules, chrome: null })
   assert.deepEqual(single.workspaces, [{ id: 'acme', name: 'acme' }])
 })
