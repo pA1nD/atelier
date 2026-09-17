@@ -214,20 +214,44 @@ function ChromeMissingFallback({ qid, err }) {
 
 // The company's computer is asleep or restarting: poll /_atelier/wake (2 s → 10 s; the shell wakes it on the first
 // miss) and reload on ok. `app` = the active app's slug, so a multi-pod company's poll names the computer that is
-// asleep. Bounded like the shell's page (60 s locally, 180 s in the fleet — a cold pod birth; `boot.portal` says which):
-// past it the copy says the wake is taking unusually long; a tab coming back to the front probes again (waking.js).
-function WakingFallback({ company, app }) {
+// asleep. Bounded like the shell's document (60 s locally, 180 s in the fleet — a cold pod birth; `boot.portal` says
+// which): past it the copy says the wake is taking unusually long; a tab coming back to the front probes again
+// (waking.js). ONE poll per document, at App level (useWakePoll): the panel — inside the chrome when the chrome is up
+// (active.kind 'waking', 2026-09-17), the plain pre when it is not — only reads its state.
+const ASLEEP_COPY = 'This computer is taking unusually long to wake, and this page has stopped checking. Wait a minute, then reload this page.';   // = shell/waking.mjs ASLEEP_COPY, kept equal by hand
+function useWakePoll(active, company, app) {
   const [tries, setTries] = useState(0);
   const [gaveUp, setGaveUp] = useState(false);
-  useEffect(() => startWakePoll({
-    fetch: (u, o) => window.fetch(withDevToken(u), o),
-    setTimeout: (f, ms) => window.setTimeout(f, ms), clearTimeout: (t) => window.clearTimeout(t),
-    company, app, reload: () => window.location.reload(), onTick: () => { setTries((n) => n + 1); setGaveUp(false); }, onGiveUp: () => setGaveUp(true),
-    giveUpMs: boot.portal ? WAKE_GIVE_UP_FLEET_MS : WAKE_GIVE_UP_MS, document,
-  }), [company, app]);
-  return React.createElement('pre', { style: PRE_STYLE }, gaveUp
-    ? `atelier — the computer for '${company}' is taking unusually long to wake.\n\nThis page has stopped checking. Wait a minute, then reload it.`
-    : `atelier — the computer for '${company}' is waking up.\n\nThis page reloads itself when it answers${tries ? ` (checked ${tries}×)` : ''}.`);
+  useEffect(() => {
+    if (!active) return undefined;
+    return startWakePoll({
+      fetch: (u, o) => window.fetch(withDevToken(u), o),
+      setTimeout: (f, ms) => window.setTimeout(f, ms), clearTimeout: (t) => window.clearTimeout(t),
+      company, app, reload: () => window.location.reload(), onTick: () => { setTries((n) => n + 1); setGaveUp(false); }, onGiveUp: () => setGaveUp(true),
+      giveUpMs: boot.portal ? WAKE_GIVE_UP_FLEET_MS : WAKE_GIVE_UP_MS, document,
+    });
+  }, [active, company, app]);
+  return { tries, gaveUp };
+}
+// The waking copy the panel says — the chrome's own panel (a chrome that knows active.kind 'waking') and the plain
+// fallbacks below word it the same way
+export function wakingCopy({ company, app, tries, gaveUp }) {
+  const what = app ? `the computer behind '${app}'` : `the computer for '${company}'`;
+  return gaveUp
+    ? { title: 'Still waking…', body: ASLEEP_COPY }
+    : { title: 'Waking up…', body: `${what[0].toUpperCase()}${what.slice(1)} is starting. This page reloads itself when it answers${tries ? ` (checked ${tries}×)` : ''}.` };
+}
+// The plain element handed to the chrome as `active.element` (rendered by a chrome that does not know the kind), and the
+// bare fallback when no chrome renders at all
+function WakingPanel({ company, app, tries, gaveUp }) {
+  const c = wakingCopy({ company, app, tries, gaveUp });
+  return React.createElement('div', { role: 'status', 'aria-live': 'polite', style: { minHeight: '24rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: 24, font: '15px/1.5 system-ui, sans-serif', colorScheme: 'light dark' } },
+    React.createElement('div', { style: { fontWeight: 600, fontSize: 18 } }, c.title),
+    React.createElement('div', { style: { opacity: 0.7, maxWidth: '32rem', marginTop: 8 } }, c.body));
+}
+function WakingFallback({ company, app, tries, gaveUp }) {
+  const c = wakingCopy({ company, app, tries, gaveUp });
+  return React.createElement('pre', { style: PRE_STYLE }, `atelier — ${c.title}\n\n${c.body}`);
 }
 
 // Dev overlay for a backend that failed to (re)load, scoped to the ACTIVE app. Fed by the app's
@@ -320,7 +344,11 @@ function App() {
   const [loaded, setLoaded] = useState({});             // qid → load entry
   const [chromeEntry, setChromeEntry] = useState(null);
   const [backendErrors, setBackendErrors] = useState([]);   // [{qid, message}] from topic snapshots
-  const [waking, setWaking] = useState(false);
+  // THE WAKING DOCUMENT (2026-09-17): the shell composed this page for a computer that is not serving — `boot.waking`
+  // ({reason, app}) — so the poll starts at once and the app's bundle is not imported (its host is what is asleep); the
+  // same state is entered at runtime when a shell fetch answers 503 {waking:true}
+  const bootWaking = boot.waking && typeof boot.waking === 'object' ? boot.waking : null;
+  const [waking, setWaking] = useState(!!bootWaking);
 
   // Canonicalise `/`: land on the company's primary app, else its home. The company's ROOT (`/<company>/`, no
   // app) lands on the primary the same way (F20, 2026-09-16): the portal's `/portal/` opens Home, never the
@@ -401,7 +429,7 @@ function App() {
   activeRef.qid = activeQid;
   activeRef.rev = activeQid ? (runningRef.current.get(activeQid) ?? null) : null;   // never the importing rev; the reporter falls back to the row's rev before the first import commits
 
-  useEffect(() => { if (activeMod?.hasFrontend) loadOne(activeMod.qid); }, [activeQid]);
+  useEffect(() => { if (activeMod?.hasFrontend && !bootWaking) loadOne(activeMod.qid); }, [activeQid]);   // waking: nothing of the app is imported until the reload
 
   // The per-app sheet: on every navigation the link moves to the route's sheet (the initial
   // document already carries it — an equal href is a no-op).
@@ -544,7 +572,11 @@ function App() {
     performPick(document, pickTarget(boot, ws));
   }
 
-  if (waking) return React.createElement(WakingFallback, { company: COMPANY || '', app: activeQid ? activeQid.split('/')[1] : null });
+  // the waking poll runs once per document while waking; the panel renders INSIDE the chrome when the chrome is up
+  const wakingApp = waking ? (bootWaking?.app ?? (activeQid ? activeQid.split('/')[1] : null)) : null;
+  const wake = useWakePoll(waking, COMPANY || '', wakingApp);
+  const chromeUp = !!chromeQid && !!chromeEntry && chromeEntry.status === 'ok' && typeof chromeEntry.chrome === 'function';
+  if (waking && !chromeUp) return React.createElement(WakingFallback, { company: COMPANY || '', app: wakingApp, tries: wake.tries, gaveUp: wake.gaveUp });
   if (!chromeQid) return React.createElement(ChromeMissingFallback, { qid: null });
   if (!chromeEntry) return null;                          // still loading — empty body, no flash
   if (chromeEntry.status !== 'ok' || typeof chromeEntry.chrome !== 'function') {
@@ -555,7 +587,12 @@ function App() {
   const entry = activeMod ? loaded[activeMod.qid] : null;
   const missingChromeName = activeMod ? pinnedChromeMissing(activeMod.qid) : null;
   let active;
-  if (!activeMod) {
+  if (waking) {
+    // the chrome contract's 'waking' kind (docs/MODULES.md): the chrome draws its own panel from `waking`, or renders
+    // `element` (the plain panel) when it only knows the four kinds
+    const w = { company: COMPANY || '', app: wakingApp, reason: bootWaking?.reason ?? null, tries: wake.tries, gaveUp: wake.gaveUp, copy: wakingCopy({ company: COMPANY || '', app: wakingApp, tries: wake.tries, gaveUp: wake.gaveUp }) };
+    active = { kind: 'waking', qid: activeQid, waking: w, element: React.createElement(WakingPanel, w) };
+  } else if (!activeMod) {
     active = { kind: 'none' };
   } else if (missingChromeName) {
     active = {

@@ -30,7 +30,7 @@ import nodeFs from 'node:fs'
 import path from 'node:path'
 import { discover, checkModuleJson } from './discovery.mjs'
 import { createWatcher, fingerprint } from './watcher.mjs'
-import { bundleBackend, transformFrontend, classifyWorkerFailure, formatHint, sourceMapLookup } from './bundle.mjs'
+import { bundleBackend, transformFrontend, classifyWorkerFailure, formatHint, sourceMapLookup, reversionRelativeImports } from './bundle.mjs'
 import { buildSheet } from './tailwind.mjs'
 import { createStore, gitInit } from './lastgood.mjs'
 import { createServe } from './serve.mjs'
@@ -655,7 +655,8 @@ export function createSupervisor({ os, dirfd, cfg = {}, log = () => {}, report =
       let rev
       try { rev = store.nextRev(row.instance) } catch (e) { emit(`[${row.slug}] chrome ${label}: ${e.code ?? e.message}`); return { skipped: `write: ${e.code ?? e.message}` } }
       row.counter = rev
-      try { store.clone(row.instance, cur.rev, rev, row.uid, { css: sheet.css }) } catch (e) { emit(`[${row.slug}] chrome ${label}: snapshot write failed (${e.code ?? e.message})`); try { store.remove(row.instance, rev) } catch {} return { skipped: `write: ${e.code ?? e.message}` } }
+      // the clone names itself: every `?rev=<old>` in its frontend files becomes `?rev=<rev>` (a sibling import must resolve on a host life that never kept the old rev)
+      try { store.clone(row.instance, cur.rev, rev, row.uid, { css: sheet.css, rewrite: (rel, b) => (rel.endsWith('.js') ? reversionRelativeImports(b.toString('utf8'), rev) : b) }) } catch (e) { emit(`[${row.slug}] chrome ${label}: snapshot write failed (${e.code ?? e.message})`); try { store.remove(row.instance, rev) } catch {} return { skipped: `write: ${e.code ?? e.message}` } }
       const prev = slot.rev
       store.commitProd(row.instance, rev, { commit: slot.commit, message: `chrome ${label}`, legacy: !!slot.legacy, chrome: held })
       slot.rev = rev

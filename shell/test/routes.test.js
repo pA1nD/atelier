@@ -2,6 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import { readFileSync } from 'node:fs'
 import { WebSocket } from 'ws'
 import { createShell } from '../index.mjs'
 import { createConfig } from '../config.mjs'
@@ -17,6 +18,26 @@ import { ASLEEP_COPY, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from '../waking.m
 import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP, NOTES, listen } from './fixtures.mjs'
 
 const chromeRow = (company) => ({ instance: CHROME_APP, slug: 'catalyst-chrome', company, rev: 2, state: 'live', meta: {}, isChrome: true })
+// the bootstrap of a document (`window.__ATELIER__ = {…};`) — the waking document is a document (2026-09-17)
+// the tag itself — the template's comment quotes the same line
+const bootOf = (text) => { const m = /<script nonce="[A-Za-z0-9_-]+">window\.__ATELIER__ = (\{.*?\});<\/script>/s.exec(text); try { return JSON.parse(m[1]) } catch (e) { throw new Error(`bootstrap unreadable: ${e.message} — ${JSON.stringify(m?.[1]?.slice(0, 160) ?? text.slice(0, 160))}`) } }
+// THE WAKING DOCUMENT (2026-09-17): 503 with the waking flag and the document's headers, the chrome and the rail in the
+// page (the bootstrap's rows, the chrome's sheet — never the app's, which the sleeping host serves), `waking` in the
+// bootstrap naming the reason and the app, no preload of the app's entry, the client module (which runs the poll)
+function assertWakingDocument(doc, { company, app = null, reason = null, chromeQid }) {
+  assert.equal(doc.status, 503)
+  assert.equal(doc.headers.get('retry-after'), '3'); assert.equal(doc.headers.get('cache-control'), 'no-store'); assert.equal(doc.headers.get('x-atelier-waking'), '1')
+  assert.match(doc.headers.get('content-type'), /text\/html/); assert.match(doc.headers.get('content-security-policy'), /script-src 'self' 'nonce-/)
+  const boot = bootOf(doc.text)
+  assert.equal(boot.workspace, company); assert.deepEqual(boot.waking, { reason, app }, JSON.stringify(boot.waking))
+  assert.equal(boot.activeQid, app && boot.user.workspaces.some((w) => w.id === company && w.modules.some((m) => m.id === app)) ? `${company}/${app}` : null)
+  const sheet = /<link id="atelier-chrome-styles" rel="stylesheet" href="([^"]+)">/.exec(doc.text)?.[1] ?? null
+  assert.ok(sheet && (sheet.startsWith(`/modules/${chromeQid}/styles.css`) || /^\/_chrome\/[0-9a-f]{64}\/chrome\.css$/.test(sheet)), `the chrome's sheet, not the app's: ${sheet}`)
+  assert.ok(!doc.text.includes(`/modules/${company}/${app}/`), 'nothing of the app is preloaded or linked')
+  assert.ok(/<script type="module" src="\/assets\/client\.js/.test(doc.text), 'the client runs the poll')
+  assert.ok(!/http-equiv="refresh"/.test(doc.text), 'no meta refresh')
+  return boot
+}
 const apps = (company) => [
   { instance: TODO, slug: 'todo', company, rev: 3, state: 'live', meta: { name: 'Todo', icon: '✅' }, primary: true },
   { instance: WIKI, slug: 'wiki', company, rev: 1, state: 'stopped', meta: { name: 'Wiki' } },
@@ -185,19 +206,17 @@ test('local: the host is down → the waking page on documents (503, ≤ 1.2 s),
   const r = await rig(t, { hostUp: false })
   const t0 = Date.now()
   const doc = await r.go('/global/todo')
-  assert.equal(doc.status, 503); assert.ok(Date.now() - t0 < 1200)
-  assert.equal(doc.headers.get('retry-after'), '3'); assert.equal(doc.headers.get('cache-control'), 'no-store')
-  assert.match(doc.text, /Waking up global/); assert.match(doc.text, /\/_atelier\/wake\?company=global/)
-  // BOUNDED (C13): no <meta refresh> re-arming the poll forever; after WAKE_GIVE_UP_MS the script stops polling and says the computer is asleep
-  assert.ok(!/http-equiv="refresh"/.test(doc.text), 'no meta refresh')
-  assert.ok(doc.text.includes(`G=${WAKE_GIVE_UP_MS},`), 'the local deadline (60 s) is in the page'); assert.equal(WAKE_GIVE_UP_MS, 60_000)
-  assert.ok(doc.text.includes('if(left<=0){asleep();return}'), 'past the deadline the poll stops')
-  assert.ok(doc.text.includes('setTimeout(function(){ac.abort()},left)'), 'each probe is aborted at the remaining deadline')
-  assert.ok(doc.text.includes("addEventListener('visibilitychange'") && doc.text.includes('until=Date.now()+G;'), 'a tab coming back re-arms the deadline and probes')
-  assert.ok(doc.text.includes(JSON.stringify(ASLEEP_COPY)), 'the honest copy')
+  assert.ok(Date.now() - t0 < 1200)
+  // THE WAKING DOCUMENT (2026-09-17): the chrome document itself, 503 + the waking flag, `waking` in the bootstrap — the
+  // client (client/client.jsx) renders the chrome with the waking panel in the content area and runs the poll
+  // (client/waking.js, tested there: 2 s → 10 s, the give-up at WAKE_GIVE_UP_MS locally / WAKE_GIVE_UP_FLEET_MS in the
+  // fleet, every probe aborted at the deadline, a tab coming back re-arms it)
+  assertWakingDocument(doc, { company: 'global', app: 'todo', reason: 'DIAL', chromeQid: 'global/catalyst-chrome' })
+  assert.equal(WAKE_GIVE_UP_MS, 60_000); assert.equal(WAKE_GIVE_UP_FLEET_MS, 180_000)
   // the copy is true once the poll stopped: the wake went out on the first miss (step 7), the page no longer checks, nothing reloads it — the person reloads by hand
   assert.match(ASLEEP_COPY, /unusually long/); assert.match(ASLEEP_COPY, /stopped checking/); assert.match(ASLEEP_COPY, /reload this page/)
   assert.ok(!/Bayard|asleep|comes back/.test(ASLEEP_COPY), 'no message-to-wake instruction, no promise the page keeps for the person')
+  assert.equal(readFileSync(new URL('../../client/client.jsx', import.meta.url), 'utf8').includes(`const ASLEEP_COPY = ${JSON.stringify(ASLEEP_COPY).replace(/"/g, "'")};`), true, 'the client says the same words (kept equal by hand)')
   const api = await r.go('/api/global/todo/x')
   assert.equal(api.status, 503); assert.deepEqual(api.json(), { waking: true }); assert.equal(api.headers.get('x-atelier-waking'), '1')
   assert.deepEqual((await r.go('/_atelier/wake?company=global')).json(), { ok: false, reason: 'DIAL' })
@@ -381,15 +400,17 @@ test('fleet: a stale heartbeat or a draining host is the waking page without a d
   const reg = r.registry
   const origOf = reg.hostOf.bind(reg), orig = reg.host.bind(reg)
   reg.hostOf = async (row) => ({ ...(await origOf(row)), heartbeatAt: Date.now() - 31_000 })
-  const stale = await r.go('/acme/todo'); assert.equal(stale.status, 503); assert.match(stale.text, /Waking up acme/); assert.match(stale.text, /\/_atelier\/wake\?company=acme&app=todo/)
-  assert.ok(stale.text.includes(`G=${WAKE_GIVE_UP_FLEET_MS},`), 'the fleet deadline (180 s: a cold pod birth) is in the page'); assert.equal(WAKE_GIVE_UP_FLEET_MS, 180_000)
+  const stale = await r.go('/acme/todo')
+  const boot = assertWakingDocument(stale, { company: 'acme', app: 'todo', reason: 'heartbeat-stale', chromeQid: FLEET_CHROME.qid })
+  assert.ok(boot.portal, 'the fleet document names the portal — the client takes the fleet deadline (180 s: a cold pod birth) from it')
+  assert.deepEqual(boot.user.workspaces.find((w) => w.id === 'acme').modules.map((m) => m.id), ['todo', 'wiki'], 'the rail is in the page: the rows come from the registry, not the sleeping host')
   reg.hostOf = async (row) => ({ ...(await origOf(row)), drainingAt: Date.now() })
-  assert.equal((await r.go('/acme/todo')).status, 503)
+  assertWakingDocument(await r.go('/acme/todo'), { company: 'acme', app: 'todo', reason: 'draining', chromeQid: FLEET_CHROME.qid })
   assert.equal((await r.go('/acme/')).status, 200, 'the app-less document asks the company\'s freshest host, which is fine')
   reg.hostOf = origOf
   reg.host = async (c) => ({ ...(await orig(c)), drainingAt: Date.now() })
   assert.equal((await r.go('/acme/todo')).status, 200, 'the app document never asks host(company)')
-  const bare = await r.go('/acme/'); assert.equal(bare.status, 503); assert.match(bare.text, /wake\?company=acme"/)
+  const bare = await r.go('/acme/'); assertWakingDocument(bare, { company: 'acme', app: null, reason: 'draining', chromeQid: FLEET_CHROME.qid })
   assert.equal(r.host.seen.filter((s) => s.url === '/_host/healthz').length, r.host.seen.slice(0, before).filter((s) => s.url === '/_host/healthz').length + 2, 'a probe only for the two documents that rendered')
   reg.host = orig
   assert.equal((await r.go('/acme/')).status, 200)
@@ -411,7 +432,7 @@ test('fleet: one company, two hosts — every app is proxied to ITS computer; a 
   assert.deepEqual([rep.status, rep.lane, rep.json()], [200, 'proxy', { ok: true, app: NOTES }]); assert.equal(r.host2.seen.at(-1).identity.path, '/_atelier/report')
   // host B stops: notes is waking, todo is not — the document, the fetch, the wake poll and the mark all name the HOST, not the company
   await r.host2.stop()
-  const w = await r.go('/acme/notes'); assert.equal(w.status, 503); assert.match(w.text, /Waking up acme/); assert.match(w.text, /\/_atelier\/wake\?company=acme&app=notes/)
+  const w = await r.go('/acme/notes'); assertWakingDocument(w, { company: 'acme', app: 'notes', reason: 'DIAL', chromeQid: FLEET_CHROME.qid })
   assert.equal((await r.go('/acme/todo')).status, 200)
   assert.equal((await r.go('/acme/')).status, 200, 'the app-less document: the company has a live host')
   const t0 = Date.now()
@@ -553,7 +574,7 @@ test('fleet: the app-less poll of a company whose freshest host is down wakes TH
 test('fleet: a row whose computer the spine does not know (host: null) on a company that HAS a live host → that app is waking no-host (document 503, wake {ok:false, reason:no-host}, one loud log); the app-less document and the other apps are fine — no fallback to the company\'s host (C14)', async (t) => {
   const r = await rig(t, { mode: 'fleet' })
   r.registry.data.acme.apps.push({ instance: 'i-3333333333333333', slug: 'ghost', rev: 1, state: 'live', meta: { name: 'Ghost' }, host: null })
-  const doc = await r.go('/acme/ghost'); assert.equal(doc.status, 503); assert.match(doc.text, /Waking up acme/); assert.match(doc.text, /\/_atelier\/wake\?company=acme&app=ghost/)
+  const doc = await r.go('/acme/ghost'); assertWakingDocument(doc, { company: 'acme', app: 'ghost', reason: 'no-host', chromeQid: FLEET_CHROME.qid })
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=ghost')).json(), { ok: false, reason: 'no-host' })
   assert.ok(r.logs.some((l) => /acme\/ghost waking \(no-host\)/.test(l)), r.logs.join('\n'))
   assert.equal((await r.go('/acme/')).status, 200)

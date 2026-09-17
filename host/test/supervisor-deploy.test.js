@@ -60,7 +60,7 @@ test('green: commit → rehearsal → gate → record: prod serves the released 
     // the pointers and the prod block (D4)
     assert.equal(readlink(dot(w, inst, 'current')), `../last-good/${inst}/rev-2`); assert.equal(readlink(dot(w, inst, 'current-dev')), `../last-good/${inst}/rev-1`)
     const rj = revJson(w, inst)
-    assert.equal(rj.rev, 2); assert.equal(rj.live, 1); assert.deepEqual(Object.keys(rj.prod).sort(), ['commit', 'deployedAt', 'message', 'rev']); assert.equal(rj.prod.commit, v.commit); assert.equal(rj.prod.message, 'first release')
+    assert.equal(rj.rev, 2); assert.equal(rj.live, 1); assert.deepEqual(Object.keys(rj.prod).sort(), ['commit', 'deployedAt', 'layout', 'message', 'rev']); assert.equal(rj.prod.commit, v.commit); assert.equal(rj.prod.message, 'first release')
     // the export (D1/D2): the committed tree, no .git, no data; the prod worker's cwd
     const exp = dot(w, 'prod', inst, v.commit.slice(0, 12))
     assert.deepEqual(fs.readdirSync(exp).sort(), ['.gitignore', 'backend.js', 'card.jsx', 'frontend.jsx', 'logo.svg', 'module.json'], 'the committed tree (the host\'s .gitignore included), no .git, no data')
@@ -676,7 +676,7 @@ test('S1/S2/S10: DOWN is on disk — a host restart boots a failed app DOWN (the
     const ok = await deploy(sup, row, { message: 'fixed' })
     assert.equal(ok.outcome, 'green', JSON.stringify(ok))
     pb = revJson(w, inst).prod
-    assert.deepEqual(Object.keys(pb).sort(), ['commit', 'deployedAt', 'message', 'rev']); assert.equal(pb.rev, ok.rev); assert.equal(pb.commit, ok.commit)
+    assert.deepEqual(Object.keys(pb).sort(), ['commit', 'deployedAt', 'layout', 'message', 'rev']); assert.equal(pb.rev, ok.rev); assert.equal(pb.commit, ok.commit)
     assert.equal((await api(sup, row, '/rev', prod)).status, 200); assert.equal(JSON.parse((await api(sup, row, '/data', prod)).body).v, 'v1')
     // S10: revision.json names the release but `current` still points at the previous rev (the host died between the two
     // writes): boot follows the recorded release — never the agent's working tree through an adopt

@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { bundleBackend, transformFrontend, classifyWorkerFailure, formatHint, sourceMapLookup, versionRelativeImports, walkFiles, locateImport } from '../supervisor/bundle.mjs'
+import { bundleBackend, transformFrontend, classifyWorkerFailure, formatHint, sourceMapLookup, versionRelativeImports, reversionRelativeImports, walkFiles, locateImport } from '../supervisor/bundle.mjs'
 
 const mkApp = (files) => {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sup-bundle-')))
@@ -83,6 +83,10 @@ test('frontend per-file transform: classic JSX, .jsx → .js, ?rev= on relative 
   assert.ok(files.get('components/card.js').includes('React.Fragment'))
   assert.ok(files.get('helper.js').includes(`import("./components/card.js?rev=7")`))
   assert.equal(versionRelativeImports(`import a from "../x.js"; import "./y.js"; import "z";`, 3), `import a from "../x.js?rev=3"; import "./y.js?rev=3"; import "z";`)
+  // reversionRelativeImports: a stored bundle re-tagged to a new rev (the chrome-sheet clone) — versioned and bare relative
+  // imports alike, dynamic ones too; bare specifiers and their own queries untouched
+  assert.equal(reversionRelativeImports(`import a from "./game.js?rev=7"; import { c } from './styles.js?rev=7'; import "./bare.js"; const l = () => import("./lazy.js?rev=7"); import z from "z?rev=7";`, 34),
+    `import a from "./game.js?rev=34"; import { c } from './styles.js?rev=34'; import "./bare.js?rev=34"; const l = () => import("./lazy.js?rev=34"); import z from "z?rev=7";`)
   fs.rmSync(dir, { recursive: true, force: true })
 })
 

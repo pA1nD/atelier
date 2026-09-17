@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { unprivileged, memory } from '../adapters/os.mjs'
-import { createStore, gitInit, commitAll, resolveCommit, gitSpec, gitignoreSpec, archiveSpec, GITIGNORE, INSTANCE_RE } from '../supervisor/lastgood.mjs'
+import { createStore, gitInit, commitAll, resolveCommit, gitSpec, gitignoreSpec, archiveSpec, GITIGNORE, INSTANCE_RE, LAYOUT_VERSION } from '../supervisor/lastgood.mjs'
 
 const INST = 'i-0123456789abcdef'
 function setup() {
@@ -55,7 +55,8 @@ test('write → commit: rev dir renamed into place, files in place, checksum, re
   assert.equal(s.store.currentDev(INST).rev, 1)
   // the PROD release: revision.json.prod + `current`; the dev pointer untouched; the counter bumped to the release's rev
   s.store.commitProd(INST, 2, { commit: 'a'.repeat(40), message: 'first release' })
-  assert.deepEqual(s.store.revision(INST).prod, { rev: 2, commit: 'a'.repeat(40), deployedAt: '2023-11-14T22:13:20.000Z', message: 'first release' })
+  assert.deepEqual(s.store.revision(INST).prod, { rev: 2, commit: 'a'.repeat(40), deployedAt: '2023-11-14T22:13:20.000Z', message: 'first release', layout: LAYOUT_VERSION })
+  assert.equal(s.store.revision(INST).layout, LAYOUT_VERSION, 'the dev build is stamped with the layout version too'); assert.equal(LAYOUT_VERSION, 1)
   assert.equal(s.store.revision(INST).live, 1); assert.equal(s.store.revision(INST).rev, 2)
   assert.equal(fs.readlinkSync(path.join(s.dot, INST, 'current')), `../last-good/${INST}/rev-2`)
   assert.equal(s.store.current(INST), null, 'a pointer to a rev dir that does not exist answers null')

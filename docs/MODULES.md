@@ -363,7 +363,7 @@ The shell calls `chrome(props)` with:
 | `workspaces` | `[{ id, name?, modules: [{ id, meta }] }]` |
 | `workspace` | the currently-routed workspace id |
 | `activeQid` | the active module's qualifiedId, or `null` |
-| `active` | `{ kind: 'none' \| 'loading' \| 'error' \| 'ready', element?, err?, qid? }` — what to put in the content area |
+| `active` | `{ kind: 'none' \| 'loading' \| 'error' \| 'ready' \| 'waking', element?, err?, qid?, waking? }` — what to put in the content area. `'waking'` (2026-09-17): the computer behind the page is starting — `waking` = `{company, app, reason, tries, gaveUp, copy: {title, body}}` for a chrome that draws its own panel; `element` is the shell's plain panel for one that does not |
 | `loadedModules` | `{ [qid]: { hasDefault, TopBarCenter, meta, status, err } }` — **lazily populated**: the active module plus any module with `meta.eager` (see below); other modules appear here on their first visit |
 | `navigate(qid)` | SPA-navigate to a module |
 | `pickWorkspace(wsId)` | switch workspace |

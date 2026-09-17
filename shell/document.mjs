@@ -84,7 +84,10 @@ const moduleRow = (r) => ({
 // places (2026-09-05, "one rail everywhere"): the PERSON's places — the portal, their personal space, the companies they
 // are in — each with its rows ({id, name, origin, rows}); the current company's rows are `modules`. Without places the
 // document is single-place, as before.
-export function bootstrapFor({ cfg = {}, company, slug = null, person, modules = [], chrome, companies = [], portal = null, places = null }) {
+// waking (2026-09-17): `{reason, app}` when the document's computer is not serving — the page renders the chrome with a
+// waking panel in the content area and polls `/_atelier/wake` (client/client.jsx); the app's bundle is not imported until
+// the reload that follows the host's first answer
+export function bootstrapFor({ cfg = {}, company, slug = null, person, modules = [], chrome, companies = [], portal = null, places = null, waking = null }) {
   const rows = modules.filter((r) => r.instance).map(moduleRow)
   const list = Array.isArray(places) && places.length ? places : [{ id: company, name: company, rows: modules }]
   const wsOf = (p) => ({ id: p.id, name: p.name ?? p.id, ...(p.origin ? { origin: p.origin } : {}) })
@@ -103,6 +106,7 @@ export function bootstrapFor({ cfg = {}, company, slug = null, person, modules =
     chromeQid, defaultChromeQid: chromeQid, chromes: chromeQid ? [chromeQid] : [],
     chromeRev: chrome?.rev ?? null,
     ...(chrome?.base ? { chromeBase: chrome.base } : {}),
+    ...(waking ? { waking: { reason: waking.reason ?? null, app: waking.app ?? null } } : {}),
     backendErrors: [],
   }
 }
@@ -128,8 +132,9 @@ export const chromeAsset = (chrome, file) => (chrome.base ? `${chrome.base}/${fi
 
 // sheetFor(): the ONE render-blocking sheet — the app's on /<c>/<s>, the chrome's on an app-less document (by digest the
 // bundle's compiled chrome-only sheet `chrome.css`; the row's `styles.css` otherwise)
-export function sheetFor({ company, slug, modules, chrome }) {
-  const app = slug ? modules.find((r) => r.slug === slug && r.instance) : null
+// a WAKING document (2026-09-17) takes the chrome's sheet: the app's is compiled and served by the host that is not answering
+export function sheetFor({ company, slug, modules, chrome, waking = null }) {
+  const app = slug && !waking ? modules.find((r) => r.slug === slug && r.instance) : null
   if (app) return appAsset(company, slug, 'styles.css', sheetRev(app, chrome))
   if (chrome?.qid && chrome.base) return chromeAsset(chrome, 'chrome.css')
   if (chrome?.qid && chrome.hasStyles !== false) return chromeAsset(chrome, 'styles.css')
@@ -137,10 +142,10 @@ export function sheetFor({ company, slug, modules, chrome }) {
 }
 
 // preloadsFor(): client, chrome-resolve, the chrome bundle, kit, the app entry and its relative imports
-export function preloadsFor({ company, slug, modules, chrome, entryImports = [], assetVersion = null }) {
+export function preloadsFor({ company, slug, modules, chrome, entryImports = [], assetVersion = null, waking = null }) {
   const out = [versioned(CLIENT_JS, assetVersion), versioned(CHROME_RESOLVE_JS, assetVersion)]
   if (chrome?.qid) { out.push(chromeAsset(chrome, 'frontend.js')); if (chrome.hasKit) out.push(chromeAsset(chrome, 'kit.js')) }
-  const app = slug ? modules.find((r) => r.slug === slug && r.instance) : null
+  const app = slug && !waking ? modules.find((r) => r.slug === slug && r.instance) : null   // waking: nothing of the app is preloaded — its host is not answering
   if (app) {
     out.push(appAsset(company, slug, 'frontend.js', assetRev(app)))
     for (const rel of entryImports) if (rel.startsWith('./')) out.push(appAsset(company, slug, rel.slice(2), app.rev ?? null))   // the bundle's own `?rev=<counter>` (host bundle.mjs versionRelativeImports)
@@ -172,15 +177,20 @@ export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap
 
 // renderDocument(): the whole thing for one route — what routes.mjs calls. `bootstrapBytes` is
 // PLAN §4.5's bootstrap-bytes row (shell/metrics.mjs): what the shell composed into the page.
-export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce(), assetVersion = null, places = null }) {
-  const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal, places })
+// `waking` ({reason, app} | null): the document of a computer that is not serving — the chrome and the rail as ever, the
+// bootstrap says `waking`, the chrome's sheet, no app preload; its headers add the waking flag (`x-atelier-waking: 1`,
+// `retry-after: 3`) so a client fetch reads it like a fetch route's 503 — the status (503) is the route's
+export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce(), assetVersion = null, places = null, waking = null }) {
+  const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal, places, waking })
   const bootstrapJson = escapeBootstrap(bootstrap)
-  const sheet = sheetFor({ company, slug, modules, chrome })
+  const sheet = sheetFor({ company, slug, modules, chrome, waking })
   const importMap = chrome?.qid && chrome.hasKit ? { imports: { '@atelier/kit': chromeAsset(chrome, 'kit.js') } } : null
-  const preloads = preloadsFor({ company, slug, modules, chrome, entryImports, assetVersion })
+  const preloads = preloadsFor({ company, slug, modules, chrome, entryImports, assetVersion, waking })
   const html = composeDocument({ template, nonce, bootstrap, bootstrapJson, sheet, importMap, preloads, assetVersion })
-  return { html, nonce, bootstrap, bootstrapBytes: Buffer.byteLength(bootstrapJson), sheet, preloads, headers: documentHeaders({ cfg, nonce, portal }) }
+  const headers = { ...documentHeaders({ cfg, nonce, portal }), ...(waking ? WAKING_DOCUMENT_HEADERS : {}) }
+  return { html, nonce, bootstrap, bootstrapBytes: Buffer.byteLength(bootstrapJson), sheet, preloads, headers }
 }
+export const WAKING_DOCUMENT_HEADERS = Object.freeze({ 'retry-after': '3', 'x-atelier-waking': '1' })
 
 // csp({nonce, fontHosts, portalOrigin}) — §2.3
 export function csp({ nonce, fontHosts = [], portalOrigin = null }) {

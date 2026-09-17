@@ -31,6 +31,17 @@ import { PROTOCOL } from '../../protocol/index.js'
 
 export const INSTANCE_RE = /^i-[0-9a-f]{16}$/   // hygiene.mjs INSTANCE_RE (launcher lane) — same shape
 export const DIR_MODE = 0o750, FILE_MODE = 0o640
+// THE LAYOUT VERSION (operator ruling 2026-09-17): every release the store writes is stamped with it (`revision.json`
+// `layout`, `prod.layout`). Bumped ONLY when the shape of a stored release changes — the rev dir's files above, or what
+// the served bytes depend on (the `?rev=` tags a bundle carries, what `serve.mjs asset()` reads) — never on the host's
+// build, the atelier pin or the image digest: an agent-image ship that leaves it alone marks nothing stale and nudges
+// nobody. A release stamped below the current layout (a missing stamp = older than everything) is the app agent's to
+// review and deploy again — the fleet never rebuilds a release on its own; the nudge for it is one per
+// `<instance>|<layout>`, and a release stamped with the current layout is never touched again. Today every release on
+// every volume is layout 1: the store's shape has not changed since it was written (2026-08), and the 2026-09-17
+// prod incident (a recycled pod answered 404 for an app's sibling imports) was a clone naming the wrong rev, not a
+// layout change — `clone()` re-tags now (bundle.mjs reversionRelativeImports).
+export const LAYOUT_VERSION = 1
 
 const ignoreEexist = (fn) => { try { fn() } catch (e) { if (e.code !== 'EEXIST') throw e } }
 
@@ -109,7 +120,7 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
       const cur = store.revision(inst) ?? {}
       writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), {
         ...cur, rev: Math.max(cur.rev ?? 0, rev), live: rev, sha256, bytes, builtAt: new Date(os.now()).toISOString(),
-        host: hostVersion, chrome, protocol: PROTOCOL, fingerprint, slug,
+        host: hostVersion, layout: LAYOUT_VERSION, chrome, protocol: PROTOCOL, fingerprint, slug,
       }, 0o600)
       link(inst, 'current-dev', rev)
     },
@@ -120,7 +131,7 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
     // rollback names none, and a prod sheet of unknown chrome is rebuilt at the next beat (supervisor rebuildAll).
     commitProd(inst, rev, { commit, deployedAt = new Date(os.now()).toISOString(), message = null, legacy = false, chrome }) {
       const cur = store.revision(inst) ?? {}
-      const prod = { rev, commit, deployedAt, message }
+      const prod = { rev, commit, deployedAt, message, layout: LAYOUT_VERSION }
       if (legacy) prod.legacy = true
       if (chrome !== undefined) prod.chrome = chrome
       writeJsonAtomic(path.join(markerDir(inst), 'revision.json'), { ...cur, rev: Math.max(cur.rev ?? 0, rev), prod }, 0o600)
@@ -137,11 +148,14 @@ export function createStore({ os, dirfd, fs = nodeFs, log = () => {}, hostVersio
     // clone(inst, fromRev, toRev, uid, {css}) → {dir, sha256, bytes}: a NEW rev = rev-<from>'s artefacts (backend, map,
     // frontend/*) with `styles.css` replaced — the chrome swap's prod sheet rebuild (step 7 ship C): the same code the
     // worker runs, one new sheet, one new rev (the ETag is `rev-N`, so a sheet change is a rev change)
-    clone(inst, fromRev, toRev, uid, { css }) {
+    // `rewrite(rel, bytes) → bytes|string` (2026-09-17): the new rev's frontend files pass through it — the supervisor
+    // re-tags their `?rev=` to the new rev (bundle.mjs reversionRelativeImports), so a clone names itself and a host life
+    // that never kept the source rev still serves every sibling
+    clone(inst, fromRev, toRev, uid, { css, rewrite = null }) {
       const from = revDir(inst, fromRev)
       const frontend = new Map()
       const fe = path.join(from, 'frontend')
-      const walk = (d, rel) => { for (const ent of fs.readdirSync(d, { withFileTypes: true })) { const r = rel ? `${rel}/${ent.name}` : ent.name; if (ent.isDirectory()) walk(path.join(d, ent.name), r); else if (ent.isFile()) frontend.set(r, fs.readFileSync(path.join(d, ent.name))) } }
+      const walk = (d, rel) => { for (const ent of fs.readdirSync(d, { withFileTypes: true })) { const r = rel ? `${rel}/${ent.name}` : ent.name; if (ent.isDirectory()) walk(path.join(d, ent.name), r); else if (ent.isFile()) { const b = fs.readFileSync(path.join(d, ent.name)); frontend.set(r, rewrite ? rewrite(r, b) : b) } } }
       try { walk(fe, '') } catch (e) { if (e.code !== 'ENOENT') throw e }
       const readOr = (rel) => { try { return fs.readFileSync(path.join(from, rel)) } catch (e) { if (e.code === 'ENOENT') return null; throw e } }
       return store.write(inst, toRev, uid, { backend: readOr('backend.js'), map: readOr('backend.js.map'), frontend, css })

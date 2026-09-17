@@ -42,7 +42,7 @@ import { CHROME_CACHE_CONTROL } from './chrome-store.mjs'
 import { renderDocument, relativeImports, appAsset } from './document.mjs'
 import { proxyRequest, json as sendJson } from './proxy.mjs'
 import { CONTENT_TYPE as METRICS_CONTENT_TYPE } from './metrics.mjs'
-import { wakingHtml, wakingHeaders, hostState, hostKey, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from './waking.mjs'
+import { hostState, hostKey } from './waking.mjs'
 import { newNonce } from './document.mjs'
 import { visibleRows } from './presence.mjs'
 
@@ -206,14 +206,17 @@ export async function laneDocument(ctx) {
   const app = row && (await ctx.providers.registry.present(id.person.id, row.instance)) ? row : null
   const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, app, marks: ctx.marks, now: ctx.now })
   const nonce = newNonce()
-  if (state.waking) {
-    ctx.log(`document: ${company}${app ? '/' + app.slug : ''} waking (${state.reason})`)
-    return r('document', 503, { body: wakingHtml({ company, slug: app ? app.slug : null, nonce, giveUpMs: ctx.cfg.mode === 'fleet' ? WAKE_GIVE_UP_FLEET_MS : WAKE_GIVE_UP_MS }), headers: wakingHeaders({ nonce }) })
-  }
-  const doc = await composeFor(ctx, { company, slug: ctx.route.slug, person: id.person, epoch: id.epoch, nonce, logout: id.logout ?? null })
+  // THE WAKING DOCUMENT (2026-09-17): a computer that is not serving still gets the document — the chrome, the rail, the
+  // account menu — with `waking` in the bootstrap; the client renders the waking panel in the content area, polls
+  // `/_atelier/wake?company=<c>[&app=<slug>]` (which wakes the computer, below) and reloads when the host answers. 503 with
+  // the waking flag, as the bare page was: a fetch of the document reads it as waking. Nothing of the app is dialled —
+  // no entry imports, no app sheet (composeFor)
+  const waking = state.waking ? { reason: state.reason, app: app ? app.slug : null } : null
+  if (waking) ctx.log(`document: ${company}${app ? '/' + app.slug : ''} waking (${state.reason})`)
+  const doc = await composeFor(ctx, { company, slug: ctx.route.slug, person: id.person, epoch: id.epoch, nonce, logout: id.logout ?? null, waking })
   ctx.metrics?.bootstrap(company, doc.bootstrapBytes)
   ctx.ensureWatch?.(company)
-  return r('document', 200, { body: doc.html, headers: doc.headers })
+  return r('document', waking ? 503 : 200, { body: doc.html, headers: doc.headers })
 }
 
 // chromeShape(registry, company, app) → the document's chrome (step 7 ship C, decision 5): an APP document renders
@@ -237,13 +240,13 @@ export const chromeShape = (registry, company, app = null) => {
 
 // composeFor(): the PERSON's rows (presence — a member outside an app's chat sees no trace of it, PLAN §4.1) + chrome
 // + the entry's relative imports (fetched once per (instance, rev)) → the document
-export async function composeFor(ctx, { company, slug, person, epoch, nonce, logout = null }) {
+export async function composeFor(ctx, { company, slug, person, epoch, nonce, logout = null, waking = null }) {
   const registry = ctx.providers.registry
   const rows = await visibleRows(registry, person.id, (await registry.apps(company)).filter((x) => !x.isChrome))
   const app = slug ? rows.find((x) => x.slug === slug && x.instance) : null
   const chrome = chromeShape(registry, company, app)
   let entryImports = []
-  if (app && app.hasFrontend !== false) entryImports = await entryImportsFor(ctx, { company, app, person })
+  if (app && app.hasFrontend !== false && !waking) entryImports = await entryImportsFor(ctx, { company, app, person })   // waking: the host is not dialled
   const companies = registry.companies?.() ?? []
   // the PERSON's places (registry.placesFor — the portal names them; absent = single-place): each with its visible rows
   let places = null
@@ -264,7 +267,7 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce, log
     } catch (e) { ctx.log?.(`places: ${e?.message ?? e}`); places = null }
   }
   const versions = (await ctx.assets.versions?.()) ?? {}   // the shell's own assets under their content hashes
-  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce, places, assetVersion: (u) => versions[u] ?? null })
+  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce, places, assetVersion: (u) => versions[u] ?? null, waking })
 }
 async function entryImportsFor(ctx, { company, app, person }) {
   const key = `${app.instance}:${app.rev}`

@@ -70,7 +70,12 @@ test('rebuildAll: the prod sheet rebuilt against the new chrome as a new rev of 
     assert.ok(sheet.body.toString().includes('#445566') && sheet.body.toString().includes(`/_chrome/${B.digest}/fonts/Inter.woff2`), 'the new sheet carries chrome B and its font url')
     assert.ok(!sheet.body.toString().includes('#112233'))
     assert.equal((await sup.asset(row, 'styles.css', { rev: 2 })).body.toString(), before, 'the previous rev stays addressable inside the window')
-    assert.equal((await sup.asset(row, 'frontend.js')).body.toString(), (await sup.asset(row, 'frontend.js', { rev: 2 })).body.toString(), 'the same frontend bytes at the new rev')
+    // THE CLONE NAMES ITSELF (2026-09-17): the same frontend code at the new rev, its sibling imports re-tagged `?rev=3` — a
+    // host life that never kept rev 2 (a recycled pod) still serves `./card.js?rev=3`; the old bytes said `?rev=2`
+    const fe2 = (await sup.asset(row, 'frontend.js', { rev: 2 })).body.toString(), fe3 = (await sup.asset(row, 'frontend.js')).body.toString()
+    assert.ok(fe2.includes('./card.js?rev=2"') && fe3.includes('./card.js?rev=3"'), `${fe2.slice(0, 200)}\n---\n${fe3.slice(0, 200)}`)
+    assert.equal(fe3, fe2.replace(/\?rev=2"/g, '?rev=3"'), 'the same frontend code at the new rev, only the tags moved')
+    assert.equal((await sup.asset(row, 'card.js', { rev: 3 })).rev, 3, 'the sibling the re-tagged import names is served at the new rev')
     assert.equal(fs.readFileSync(dot(w, 'last-good', inst, 'rev-3', 'backend.js'), 'utf8'), fs.readFileSync(dot(w, 'last-good', inst, 'rev-2', 'backend.js'), 'utf8'), 'the same backend bytes')
     assert.deepEqual(w.modules.slice(modulesBefore), [[inst, 3]]); assert.deepEqual(w.swaps.slice(swapsBefore), [[inst, 3]])
     assert.equal(sup.workers().find((x) => x.slot === 'prod').pid, pid0, 'the prod worker keeps running — no gate, no restart')

@@ -1,8 +1,10 @@
-// shell/waking.mjs — the waking page, `/_atelier/wake` and the wake call (DESIGN §3.5; PLAN §4.3 Network).
+// shell/waking.mjs — the waking state, `/_atelier/wake` and the wake call (DESIGN §3.5; PLAN §4.3 Network).
 // A document route whose host is waking (fleet: heartbeat older than 30 s or draining; both modes:
-// the 1 s probe failed) serves this page: no chrome, plain, status 503, `Retry-After: 3`,
-// `Cache-Control: no-store`, a 2 s JS poll of `/_atelier/wake?company=<c>[&app=<slug>]` that
-// reloads on `{ok:true}`. The poll PROBES and, when the host is not serving, WAKES it (step 7):
+// the 1 s probe failed) serves THE DOCUMENT with `waking` in its bootstrap (2026-09-17; before: a bare
+// page without the chrome): status 503, `Retry-After: 3`, `x-atelier-waking: 1`, `Cache-Control:
+// no-store` (document.mjs renderDocument). The client renders the chrome with a waking panel in the
+// content area and runs the poll (client/waking.js startWakePoll: 2 s → 10 s, the bounds below) of
+// `/_atelier/wake?company=<c>[&app=<slug>]`, reloading on `{ok:true}`. The poll PROBES and, when the host is not serving, WAKES it (step 7):
 // the route calls `registry.wake(chat, {by})` — the fleet provider's verb, the spine's
 // `POST /v1/computers/<chat>/wake {by:"session:<id>"}` door — at most once per chat per WAKE_CALL_MS
 // per replica and never while a call is in flight (`createWaker`; the spine's own bound is the real
@@ -16,9 +18,9 @@
 // remaining deadline (a hung shell cannot hold the poll past it); a tab that comes back to the front
 // (`visibilitychange`) probes at once and starts its deadline over, so the give-up is only ever reached
 // in front of someone. No `<meta refresh>`: a reload would re-arm the poll forever. Fetch routes answer
-// `503 {waking:true}` (proxy.mjs) and the client shows its own fallback (client/waking.js — the same
-// poll, the same bounds).
-export const WAKE_POLL_MS = 2000
+// `503 {waking:true}` (proxy.mjs) and the client shows the same panel (client/waking.js — the same
+// poll, the same bounds). The constants below are the contract the client keeps by hand
+// (client/waking.js WAKE_GIVE_UP_*, client/client.jsx ASLEEP_COPY) — the bundle cannot import shell/.
 export const WAKE_GIVE_UP_MS = 60_000
 export const WAKE_GIVE_UP_FLEET_MS = 180_000
 export const WAKE_CALL_MS = 30_000
@@ -126,40 +128,6 @@ export function createWaker({ registry, ms = WAKE_CALL_MS, now = Date.now, log =
         return out.verdict
       } catch (e) { try { log(`wake: ${company ?? '?'} ${chat ?? '?'} threw: ${e?.message ?? e}`) } catch {} return 'failed' }
     },
-  }
-}
-
-const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
-
-export function wakingHtml({ company, slug = null, nonce, giveUpMs = WAKE_GIVE_UP_MS }) {
-  const url = `/_atelier/wake?company=${encodeURIComponent(company ?? '')}${slug ? `&app=${encodeURIComponent(slug)}` : ''}`
-  // the poll: wall-clock deadline from mount; each fetch aborted at the remaining deadline; a tab coming back to the
-  // front (`visibilitychange` → visible) drops the in-flight probe (its answer is ignored by generation), re-arms the
-  // deadline, restores the copy and probes at once
-  const script = `(function(){var t=${WAKE_POLL_MS},G=${giveUpMs},U=${JSON.stringify(url)},h=document.getElementById('h'),p=document.getElementById('p'),H0=h.textContent,P0=p.textContent,until=Date.now()+G,timer=null,gen=0,ctrl=null;`
-    + `function asleep(){document.title='Still waking…';h.textContent='Still waking…';p.textContent=${JSON.stringify(ASLEEP_COPY)}}`
-    + `function awake(){document.title='Waking up…';h.textContent=H0;p.textContent=P0}`
-    + `function poll(){timer=null;var left=until-Date.now();if(left<=0){asleep();return}var g=gen,ac=typeof AbortController==='function'?new AbortController():null,ab=ac?setTimeout(function(){ac.abort()},left):null;ctrl=ac;`
-    + `fetch(U,{cache:'no-store',signal:ac?ac.signal:undefined}).then(function(r){return r.json()}).then(function(j){return !!(j&&j.ok)},function(){return false}).then(function(ok){if(ab!==null)clearTimeout(ab);if(g!==gen)return;ctrl=null;if(ok)location.reload();else timer=setTimeout(poll,t)})}`
-    + `document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='visible')return;gen++;until=Date.now()+G;if(timer){clearTimeout(timer);timer=null}if(ctrl){ctrl.abort();ctrl=null}awake();poll()});`
-    + `timer=setTimeout(poll,t)})();`
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Waking up…</title>
-<style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif}main{max-width:32rem;padding:1rem}p{opacity:.7}</style>
-</head><body><main><h1 id="h">Waking up ${esc(company ?? '')}…</h1><p id="p">The computer behind this app is starting. This page reloads by itself.</p></main>
-<script nonce="${esc(nonce)}">${script}</script>
-</body></html>
-`
-}
-
-export function wakingHeaders({ nonce }) {
-  return {
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': 'no-store',
-    'retry-after': '3',
-    'x-atelier-waking': '1',
-    'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`,
   }
 }
 

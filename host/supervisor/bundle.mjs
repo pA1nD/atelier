@@ -242,6 +242,17 @@ export function versionRelativeImports(code, rev) {
   for (const re of IMPORT_RES) out = out.replace(re, (_, a, q, p) => `${a}${q}${p}?rev=${rev}${q}`)
   return out
 }
+// reversionRelativeImports(code, rev) — a stored bundle's relative imports re-tagged to `rev` (`?rev=<old>` → `?rev=<rev>`;
+// a bare one tagged). A REV NAMES ITSELF: a clone of rev N into rev M (the chrome-sheet rebuild, lastgood.mjs `clone`)
+// copies frontend.js verbatim, and verbatim it says `./game.js?rev=N` — served only while N is kept (10 min) and by a host
+// that kept it; a fresh host life (a recycled pod) knows no N and answered 404 for every sibling of an app whose prod rev
+// was a clone (prod 2026-09-17: rev 34 = a clone of rev 7, `./game.js?rev=7`, rev-7 long pruned). The clone re-tags.
+const VERSIONED_RES = IMPORT_RES.map((re) => new RegExp(re.source.replace('(\\.{1,2}\\/[^"\'?]*)(\\2)', '(\\.{1,2}\\/[^"\'?]*)\\?rev=\\d+(\\2)'), 'g'))
+export function reversionRelativeImports(code, rev) {
+  let out = String(code)
+  for (const re of VERSIONED_RES) out = out.replace(re, (_, a, q, p) => `${a}${q}${p}?rev=${rev}${q}`)
+  return versionRelativeImports(out, rev)
+}
 function relativeSpecifiers(code) {
   const out = []
   for (const re of IMPORT_RES) for (const m of String(code).matchAll(re)) out.push(m[3])
