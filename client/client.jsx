@@ -325,8 +325,14 @@ function App() {
   // Canonicalise `/`: land on the company's primary app, else its home. The company's ROOT (`/<company>/`, no
   // app) lands on the primary the same way (F20, 2026-09-16): the portal's `/portal/` opens Home, never the
   // app list; a company without a primary keeps its home page.
+  // …and only on ARRIVAL: a fresh load or a link from outside. A step to the root from inside the app — the rail's
+  // "Add module" goes to `/<company>/` — shows the root page (the module list), or Add module could never open.
+  const landed = useRef(false);
   useEffect(() => {
-    if (urlState.id || !COMPANY) return;
+    if (landed.current || !COMPANY) return;
+    if (urlState.id) { landed.current = true; return; }   // arrived inside an app: nothing to canonicalise, now or later
+    if (!modules.length) return;                          // the boot rows first — the primary is one of them
+    landed.current = true;
     const primary = modules.find((m) => m.meta?.primary);
     if (urlState.ws) {
       if (urlState.ws !== COMPANY || !primary) return;
