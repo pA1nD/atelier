@@ -249,6 +249,16 @@ function WakingPanel({ company, app, tries, gaveUp }) {
     React.createElement('div', { style: { fontWeight: 600, fontSize: 18 } }, c.title),
     React.createElement('div', { style: { opacity: 0.7, maxWidth: '32rem', marginTop: 8 } }, c.body));
 }
+// THE NOTICE PANEL (2026-09-17): the plain element handed to the chrome as `active.element` for `active.kind: 'notice'` (a
+// chrome that does not know the kind renders it) — the heading, one line, the way home: the person's home place (the portal's
+// origin, the same target the chrome's account menu uses; `/` without one)
+function homeHref() { const portal = (boot.workspaces || []).find((w) => w.id === 'portal'); return portal ? `${portal.origin || ''}/portal/home` : '/'; }
+function NoticePanel({ heading, text }) {
+  return React.createElement('div', { role: 'status', style: { minHeight: '24rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: 24, font: '15px/1.5 system-ui, sans-serif', colorScheme: 'light dark' } },
+    React.createElement('div', { style: { fontWeight: 600, fontSize: 18 } }, heading),
+    React.createElement('div', { style: { opacity: 0.7, maxWidth: '32rem', marginTop: 8 } }, text),
+    React.createElement('a', { href: homeHref(), style: { marginTop: 16 } }, 'Home'));
+}
 function WakingFallback({ company, app, tries, gaveUp }) {
   const c = wakingCopy({ company, app, tries, gaveUp });
   return React.createElement('pre', { style: PRE_STYLE }, `atelier — ${c.title}\n\n${c.body}`);
@@ -349,6 +359,10 @@ function App() {
   // same state is entered at runtime when a shell fetch answers 503 {waking:true}
   const bootWaking = boot.waking && typeof boot.waking === 'object' ? boot.waking : null;
   const [waking, setWaking] = useState(!!bootWaking);
+  // THE NOTICE DOCUMENT (2026-09-17): the shell composed this page for a navigation that has nowhere to go — `boot.notice`
+  // ({status, heading, text}) — so the address stays as it is (no landing, no tidy: the person sees the Not here panel where
+  // they arrived) and the chrome renders `active.kind: 'notice'`
+  const bootNotice = boot.notice && typeof boot.notice === 'object' ? boot.notice : null;
 
   // Canonicalise `/`: land on the company's primary app, else its home. The company's ROOT (`/<company>/`, no
   // app) lands on the primary the same way (F20, 2026-09-16): the portal's `/portal/` opens Home, never the
@@ -357,7 +371,7 @@ function App() {
   // "Add module" goes to `/<company>/` — shows the root page (the module list), or Add module could never open.
   const landed = useRef(false);
   useEffect(() => {
-    if (landed.current || !COMPANY) return;
+    if (landed.current || !COMPANY || bootNotice) return;
     if (urlState.id) { landed.current = true; return; }   // arrived inside an app: nothing to canonicalise, now or later
     if (!modules.length) return;                          // the boot rows first — the primary is one of them
     landed.current = true;
@@ -440,8 +454,9 @@ function App() {
     if (href) swapSheet(document, href);
   }, [activeQid]);
 
-  // A URL that points nowhere → tidy back to a real place (1.x behaviour).
+  // A URL that points nowhere → tidy back to a real place (1.x behaviour); the notice document keeps its address.
   useEffect(() => {
+    if (bootNotice) return;
     const wsExists = wsList.some((w) => w.id === urlState.ws);
     if (urlState.id === null) {
       if (!urlState.ws || wsExists) return;
@@ -592,6 +607,10 @@ function App() {
     // `element` (the plain panel) when it only knows the four kinds
     const w = { company: COMPANY || '', app: wakingApp, reason: bootWaking?.reason ?? null, tries: wake.tries, gaveUp: wake.gaveUp, copy: wakingCopy({ company: COMPANY || '', app: wakingApp, tries: wake.tries, gaveUp: wake.gaveUp }) };
     active = { kind: 'waking', qid: activeQid, waking: w, element: React.createElement(WakingPanel, w) };
+  } else if (bootNotice) {
+    // the chrome contract's 'notice' kind (docs/MODULES.md): the chrome draws its own panel from `notice`, or renders `element`
+    const n = { status: bootNotice.status ?? 404, heading: String(bootNotice.heading ?? 'Not here'), text: String(bootNotice.text ?? '') };
+    active = { kind: 'notice', qid: null, notice: n, element: React.createElement(NoticePanel, n) };
   } else if (!activeMod) {
     active = { kind: 'none' };
   } else if (missingChromeName) {

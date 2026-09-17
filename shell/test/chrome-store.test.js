@@ -209,9 +209,10 @@ test('the document by digest (decision 5): the registry names D and the row repo
   const r = await rig(t, { chrome: { qid: CHROME_QID, digest: D }, rows })
   writeBundle(r.root, BUNDLE); writeBundle(r.root, PREV_BUNDLE)
   const ROW_ASSET = /\/modules\/portal\/catalyst-chrome\/(frontend\.js|kit\.js|styles\.css)/
+  // an unknown slug is the notice document (2026-09-17): 404 to a navigation, wearing the company's default chrome by digest
   for (const [p, want] of [['/acme/', D], ['/acme/todo', D], ['/acme/wiki', PREV], ['/acme/notes', D], ['/acme/odd', D], ['/acme/unknown-slug', D]]) {
-    const x = await r.go(p)
-    assert.equal(x.status, 200, p)
+    const x = await r.go(p, p === '/acme/unknown-slug' ? { headers: { accept: 'text/html', 'sec-fetch-mode': 'navigate' } } : {})
+    assert.equal(x.status, p === '/acme/unknown-slug' ? 404 : 200, p)
     assert.match(x.text, new RegExp(`"chromeRev":"${want}"`), p)
     assert.match(x.text, new RegExp(`"chromeBase":"/_chrome/${want}"`), p)
     assert.ok(x.text.includes(`<link rel="modulepreload" href="/_chrome/${want}/frontend.js">`), `${p}: the chrome bundle by digest`)

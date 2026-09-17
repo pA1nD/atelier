@@ -18,6 +18,8 @@ import { ASLEEP_COPY, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from '../waking.m
 import { fakeHost, fakeRegistry, fakeBus, fleetStores, TODO, WIKI, CHROME_APP, NOTES, listen } from './fixtures.mjs'
 
 const chromeRow = (company) => ({ instance: CHROME_APP, slug: 'catalyst-chrome', company, rev: 2, state: 'live', meta: {}, isChrome: true })
+// a PERSON's navigation (routes.mjs isNavigation): what a browser sends for an address bar or a link
+const NAV = { accept: 'text/html,application/xhtml+xml,*/*;q=0.8', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }
 // the bootstrap of a document (`window.__ATELIER__ = {…};`) — the waking document is a document (2026-09-17)
 // the tag itself — the template's comment quotes the same line
 const bootOf = (text) => { const m = /<script nonce="[A-Za-z0-9_-]+">window\.__ATELIER__ = (\{.*?\});<\/script>/s.exec(text); try { return JSON.parse(m[1]) } catch (e) { throw new Error(`bootstrap unreadable: ${e.message} — ${JSON.stringify(m?.[1]?.slice(0, 160) ?? text.slice(0, 160))}`) } }
@@ -35,6 +37,21 @@ function assertWakingDocument(doc, { company, app = null, reason = null, chromeQ
   assert.ok(sheet && (sheet.startsWith(`/modules/${chromeQid}/styles.css`) || /^\/_chrome\/[0-9a-f]{64}\/chrome\.css$/.test(sheet)), `the chrome's sheet, not the app's: ${sheet}`)
   assert.ok(!doc.text.includes(`/modules/${company}/${app}/`), 'nothing of the app is preloaded or linked')
   assert.ok(/<script type="module" src="\/assets\/client\.js/.test(doc.text), 'the client runs the poll')
+  assert.ok(!/http-equiv="refresh"/.test(doc.text), 'no meta refresh')
+  return boot
+}
+// THE NOTICE DOCUMENT (2026-09-17): 404 + x-atelier-notice, the document's headers, the chrome and the rail in the page (the
+// bootstrap's rows, the chrome's sheet), `notice` in the bootstrap — the one sentence for every cause — no app, no waking flag
+function assertNoticeDocument(doc, { company, chromeQid }) {
+  assert.equal(doc.status, 404)
+  assert.equal(doc.headers.get('x-atelier-notice'), '1'); assert.equal(doc.headers.get('x-atelier-waking'), null); assert.equal(doc.headers.get('retry-after'), null)
+  assert.equal(doc.headers.get('cache-control'), 'no-store'); assert.match(doc.headers.get('content-type'), /text\/html/); assert.match(doc.headers.get('content-security-policy'), /script-src 'self' 'nonce-/)
+  const boot = bootOf(doc.text)
+  assert.equal(boot.workspace, company); assert.deepEqual(boot.notice, { status: 404, heading: 'Not here', text: 'Nothing lives at this address.' }, JSON.stringify(boot.notice))
+  assert.equal(boot.activeQid, null); assert.equal(boot.waking, undefined)
+  const sheet = /<link id="atelier-chrome-styles" rel="stylesheet" href="([^"]+)">/.exec(doc.text)?.[1] ?? null
+  assert.ok(sheet && (sheet.startsWith(`/modules/${chromeQid}/styles.css`) || /^\/_chrome\/[0-9a-f]{64}\/chrome\.css$/.test(sheet)), `the chrome's sheet: ${sheet}`)
+  assert.ok(/<script type="module" src="\/assets\/client\.js/.test(doc.text), 'the client renders the panel')
   assert.ok(!/http-equiv="refresh"/.test(doc.text), 'no meta refresh')
   return boot
 }
@@ -84,7 +101,7 @@ async function rig(t, { mode = 'local', present, presentOnChat, wakeAnswer, host
     req.on('error', reject)
     req.end(body)
   })
-  return { shell, host, host2, registry, bus, stores, traces, logs, port, go, sid, minter, hostPort: hp, hostPort2: hp2 }
+  return { shell, host, host2, registry, bus, stores, traces, logs, port, go, sid, minter, hostPort: hp, hostPort2: hp2, cfg }
 }
 
 test('lane 0: normalisation rows (B6) and the route parser', () => {
@@ -128,8 +145,12 @@ test('local: the document — /, /<c>/, /<c>/<s>; no https redirect, no HSTS; /_
   assert.match(bare.text, /href="\/modules\/global\/catalyst-chrome\/styles\.css\?rev=1700"/); assert.match(bare.text, /"activeQid":null/)
   const root = await r.go('/')
   assert.equal(root.status, 200); assert.match(root.text, /"workspace":"global"/)
+  // A SLUG THAT IS NOT THE PERSON'S (2026-09-17): a fetch gets 404 {}, a navigation the notice document — before, the app-less
+  // document rendered 200 and the client tidied the URL (1.x)
   const unknown = await r.go('/global/nope')
-  assert.equal(unknown.status, 200); assert.match(unknown.text, /"activeQid":null/)   // the client tidies the URL (1.x)
+  assert.equal(unknown.status, 404); assert.deepEqual(unknown.json(), {})
+  assertNoticeDocument(await r.go('/global/nope', { headers: NAV }), { company: 'global', chromeQid: 'global/catalyst-chrome' })
+  assertNoticeDocument(await r.go('/nope/', { headers: NAV }), { company: 'global', chromeQid: 'global/catalyst-chrome' })   // an unknown workspace wears the first one's chrome
   assert.equal((await r.go('/nope/')).status, 404)
   assert.equal((await r.go('/_t/abcdefghijklmnopqrstuvwxyz')).status, 404)
   const post = await r.go('/global/todo', { method: 'POST' }); assert.equal(post.status, 405)
@@ -317,7 +338,10 @@ test('fleet: presence 404 identical to a stranger; Origin 403 on cookie writes a
   assert.match(doc.text, /"modules":\[\{"id":"todo"[^\]]*\]/); assert.ok(!doc.text.includes('"id":"wiki"'), 'wiki is not in the bootstrap'); assert.ok(!doc.text.includes(WIKI))
   assert.deepEqual((await r.go('/_atelier/rail')).json().modules.map((m) => m.id), ['todo'])
   assert.deepEqual((await r.go('/_atelier/topics/company:acme')).json().modules.map((m) => m.id), ['todo'])
-  const wikiDoc = await r.go('/acme/wiki'); assert.equal(wikiDoc.status, 200); assert.match(wikiDoc.text, /"activeQid":null/)   // the document renders app-less; the fetches are the 404s above
+  // the document is the notice document (2026-09-17: 404 {} to a fetch, the chrome with `notice` to a navigation) — nothing of wiki in it
+  const wikiDoc = await r.go('/acme/wiki'); assert.equal(wikiDoc.status, 404); assert.deepEqual(wikiDoc.json(), {})
+  const wikiNav = await r.go('/acme/wiki', { headers: NAV }); const wb = assertNoticeDocument(wikiNav, { company: 'acme', chromeQid: FLEET_CHROME.qid })
+  assert.ok(!JSON.stringify(wb).includes('wiki') && !wikiNav.text.includes(WIKI), 'wiki is not in the notice document')
   const ok = await r.go('/api/acme/todo/items', { method: 'POST', body: '{}', headers: { origin: 'https://acme.portal.pa1nd.de', 'content-type': 'application/json' } })
   assert.equal(ok.status, 200); assert.deepEqual(ok.json().person, { id: 'p1', name: 'Bayard', claims: {} })
   assert.equal(r.host.seen.at(-1).headers.authorization, 'Bearer e1.tok')
@@ -583,18 +607,47 @@ test('fleet: a row whose computer the spine does not know (host: null) on a comp
   const api = await r.go('/api/acme/ghost/x'); assert.equal(api.status, 503); assert.deepEqual(api.json(), { waking: true })
 })
 
+test('fleet: THE NOTICE DOCUMENT (2026-09-17) — a signed-in person\'s navigation to nowhere (a label not this origin\'s, a slug not theirs, a path with no route) gets the chrome with `notice` in the bootstrap, 404 + x-atelier-notice, the rail; a fetch gets 404 {}; a stranger gets the owner\'s bare page (cfg.pageFor) — and the sign-in redirect before any slug is read', async (t) => {
+  const r = await rig(t, { mode: 'fleet' })
+  r.registry.companies = undefined   // the fleet: the Host gate decided
+  for (const p of ['/beta/todo', '/acme/nonexistent', '/acme/nonexistent/deep/link?x=1', '/!!!']) {
+    const nav = await r.go(p, { headers: NAV })
+    const boot = assertNoticeDocument(nav, { company: 'acme', chromeQid: FLEET_CHROME.qid })
+    assert.deepEqual(boot.user.workspaces.find((w) => w.id === 'acme').modules.map((m) => m.id), ['todo', 'wiki'], `${p}: the rail is in the page`)
+    assert.ok(!JSON.stringify(boot).includes('nonexistent') && !JSON.stringify(boot).includes('beta'), `${p}: nothing of the address in the page`)
+    assert.ok(!nav.text.includes(`/modules/acme/`), `${p}: nothing of an app preloaded`)
+    const f = await r.go(p); assert.equal(f.status, 404, p); assert.deepEqual(f.json(), {}, p)
+    assert.equal((await r.go(p, { method: 'HEAD', headers: NAV })).status, 404, p)
+  }
+  // the person's own pages are untouched
+  assert.equal((await r.go('/acme/todo', { headers: NAV })).status, 200); assert.equal((await r.go('/acme/', { headers: NAV })).status, 200)
+  // a stranger: no chrome to draw — the owner's bare page when the shell has one, 404 {} without; an unknown slug is the sign-in redirect first (no oracle)
+  r.cfg.pageFor = ({ status, heading, text }) => ({ body: `<h1>${heading}</h1><p>${text}</p><i>${status}</i>` })
+  for (const p of ['/beta/todo', '/!!!']) {
+    const s = await r.go(p, { cookie: false, headers: NAV })
+    assert.equal(s.status, 404, p); assert.match(s.headers.get('content-type'), /text\/html/); assert.match(s.text, /<h1>Not here<\/h1><p>Nothing lives at this address\.<\/p><i>404<\/i>/); assert.ok(!s.text.includes('__ATELIER__'), `${p}: no chrome for a stranger`)
+    assert.equal(s.headers.get('x-atelier-notice'), null)
+  }
+  assert.equal((await r.go('/acme/nonexistent', { cookie: false, headers: NAV })).status, 302)
+  delete r.cfg.pageFor
+  assert.deepEqual((await r.go('/beta/todo', { cookie: false, headers: NAV })).json(), {})
+})
+
 test('fleet: presence before liveness (C06) — a stopped pod of an app the person is NOT present on is invisible: the document and wake?app= answer exactly as for a nonexistent slug, and the pod is never probed', async (t) => {
   const r = await rig(t, { mode: 'fleet', secondHost: true, present: async (_p, i) => i === TODO })
   // host B up: the document and the wake poll for notes never dial it (the app-less rule asks host A, the company's freshest)
   const b0 = r.host2.seen.length
-  const up = await r.go('/acme/notes'); assert.equal(up.status, 200); assert.match(up.text, /"activeQid":null/); assert.ok(!up.text.includes(NOTES))
+  const up = await r.go('/acme/notes', { headers: NAV }); const ub = assertNoticeDocument(up, { company: 'acme', chromeQid: FLEET_CHROME.qid }); assert.ok(!up.text.includes(NOTES) && !JSON.stringify(ub).includes('notes'))
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: true })
   assert.equal(r.host2.seen.length, b0, 'the other room\'s pod is not probed')
-  // host B stopped: the answers are byte-for-byte the nonexistent slug's — no waking page naming it, no 503, no mark
+  // host B stopped: the answers are byte-for-byte the nonexistent slug's — no waking page naming it, no 503, no mark; since
+  // 2026-09-17 both are the notice document (404 {} to a fetch, the chrome with `notice` to a navigation, the same bootstrap)
   await r.host2.stop()
   const notes = await r.go('/acme/notes'), none = await r.go('/acme/nonexistent')
-  assert.equal(notes.status, 200); assert.equal(none.status, notes.status)
-  assert.ok(!/app=notes/.test(notes.text), 'no waking page naming the slug'); assert.ok(!notes.text.includes(NOTES))
+  assert.equal(notes.status, 404); assert.equal(none.status, notes.status); assert.equal(notes.text, none.text)
+  const notesNav = await r.go('/acme/notes', { headers: NAV }), noneNav = await r.go('/acme/nonexistent', { headers: NAV })
+  const nb = assertNoticeDocument(notesNav, { company: 'acme', chromeQid: FLEET_CHROME.qid }); assert.deepEqual(nb, bootOf(noneNav.text), 'the same bootstrap as the nonexistent slug\'s')
+  assert.ok(!/app=notes/.test(notesNav.text) && !JSON.stringify(nb).includes('notes') && !notesNav.text.includes(NOTES), 'no page naming the slug')
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), (await r.go('/_atelier/wake?company=acme&app=nonexistent')).json())
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: true })
   // the person's own app is untouched

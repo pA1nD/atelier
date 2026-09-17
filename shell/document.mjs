@@ -87,7 +87,11 @@ const moduleRow = (r) => ({
 // waking (2026-09-17): `{reason, app}` when the document's computer is not serving — the page renders the chrome with a
 // waking panel in the content area and polls `/_atelier/wake` (client/client.jsx); the app's bundle is not imported until
 // the reload that follows the host's first answer
-export function bootstrapFor({ cfg = {}, company, slug = null, person, modules = [], chrome, companies = [], portal = null, places = null, waking = null }) {
+// notice (2026-09-17): `{status, heading, text}` when a signed-in person's navigation has nowhere to go (a company label that is
+// not this origin's, a slug that is not among their rows, a path the shell does not route) — the page renders the chrome with
+// the notice panel in the content area (the chrome contract's `active.kind: 'notice'`); the words never say why (CLAUDE.md §7:
+// "does not exist" and "not yours" are one sentence)
+export function bootstrapFor({ cfg = {}, company, slug = null, person, modules = [], chrome, companies = [], portal = null, places = null, waking = null, notice = null }) {
   const rows = modules.filter((r) => r.instance).map(moduleRow)
   const list = Array.isArray(places) && places.length ? places : [{ id: company, name: company, rows: modules }]
   const wsOf = (p) => ({ id: p.id, name: p.name ?? p.id, ...(p.origin ? { origin: p.origin } : {}) })
@@ -107,6 +111,7 @@ export function bootstrapFor({ cfg = {}, company, slug = null, person, modules =
     chromeRev: chrome?.rev ?? null,
     ...(chrome?.base ? { chromeBase: chrome.base } : {}),
     ...(waking ? { waking: { reason: waking.reason ?? null, app: waking.app ?? null } } : {}),
+    ...(notice ? { notice: { status: notice.status ?? 404, heading: String(notice.heading ?? ''), text: String(notice.text ?? '') } } : {}),
     backendErrors: [],
   }
 }
@@ -180,17 +185,20 @@ export function composeDocument({ template = FALLBACK_TEMPLATE, nonce, bootstrap
 // `waking` ({reason, app} | null): the document of a computer that is not serving — the chrome and the rail as ever, the
 // bootstrap says `waking`, the chrome's sheet, no app preload; its headers add the waking flag (`x-atelier-waking: 1`,
 // `retry-after: 3`) so a client fetch reads it like a fetch route's 503 — the status (503) is the route's
-export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce(), assetVersion = null, places = null, waking = null }) {
-  const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal, places, waking })
+// `notice` ({status, heading, text} | null): the document of a navigation that has nowhere to go — the chrome and the rail as
+// ever, `notice` in the bootstrap, the chrome's sheet (the route passes no slug), `x-atelier-notice: 1`; the status (404) is the route's
+export function renderDocument({ cfg = {}, template, company, slug = null, person, modules = [], chrome = null, companies = [], portal = null, entryImports = [], nonce = newNonce(), assetVersion = null, places = null, waking = null, notice = null }) {
+  const bootstrap = bootstrapFor({ cfg, company, slug, person, modules, chrome, companies, portal, places, waking, notice })
   const bootstrapJson = escapeBootstrap(bootstrap)
   const sheet = sheetFor({ company, slug, modules, chrome, waking })
   const importMap = chrome?.qid && chrome.hasKit ? { imports: { '@atelier/kit': chromeAsset(chrome, 'kit.js') } } : null
   const preloads = preloadsFor({ company, slug, modules, chrome, entryImports, assetVersion, waking })
   const html = composeDocument({ template, nonce, bootstrap, bootstrapJson, sheet, importMap, preloads, assetVersion })
-  const headers = { ...documentHeaders({ cfg, nonce, portal }), ...(waking ? WAKING_DOCUMENT_HEADERS : {}) }
+  const headers = { ...documentHeaders({ cfg, nonce, portal }), ...(waking ? WAKING_DOCUMENT_HEADERS : {}), ...(notice ? NOTICE_DOCUMENT_HEADERS : {}) }
   return { html, nonce, bootstrap, bootstrapBytes: Buffer.byteLength(bootstrapJson), sheet, preloads, headers }
 }
 export const WAKING_DOCUMENT_HEADERS = Object.freeze({ 'retry-after': '3', 'x-atelier-waking': '1' })
+export const NOTICE_DOCUMENT_HEADERS = Object.freeze({ 'x-atelier-notice': '1' })
 
 // csp({nonce, fontHosts, portalOrigin}) — §2.3
 export function csp({ nonce, fontHosts = [], portalOrigin = null }) {

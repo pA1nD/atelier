@@ -56,6 +56,16 @@ test('one <link>: the app sheet on /c/s, the chrome sheet on /c/ and on an unkno
   assert.ok(!none.html.includes('importmap'))
 })
 
+test('the notice document (2026-09-17): `notice` in the bootstrap, x-atelier-notice: 1, the chrome sheet, no waking flag; absent otherwise', () => {
+  const d = renderDocument({ company: 'global', person, modules, chrome, notice: { status: 404, heading: 'Not here', text: 'Nothing lives at this address.' } })
+  assert.deepEqual(d.bootstrap.notice, { status: 404, heading: 'Not here', text: 'Nothing lives at this address.' })
+  assert.equal(d.bootstrap.activeQid, null); assert.equal(d.bootstrap.waking, undefined)
+  assert.equal(d.sheet, '/modules/global/catalyst-chrome/styles.css?rev=1700')
+  assert.equal(d.headers['x-atelier-notice'], '1'); assert.equal(d.headers['x-atelier-waking'], undefined); assert.equal(d.headers['retry-after'], undefined); assert.equal(d.headers['cache-control'], 'no-store')
+  const plain = renderDocument({ company: 'global', person, modules, chrome })
+  assert.ok(!('notice' in plain.bootstrap)); assert.equal(plain.headers['x-atelier-notice'], undefined)
+})
+
 test('the bootstrap: chromeApi 2, chromes = exactly the document chrome, module rows with instance + rev, primary from the row, pending rows dropped', () => {
   const { bootstrap: b } = renderDocument({ cfg: { label: 'Lab' }, company: 'global', slug: 'weather', person, modules, chrome, companies: [{ id: 'global', name: 'global', href: '/global/' }] })
   assert.equal(b.chromeApi, 2)

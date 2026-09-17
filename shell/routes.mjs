@@ -15,7 +15,9 @@
 //                   a store, for an unknown digest or a path its manifest does not name)               both
 //   4b documents    Host-first: Host = path company (fleet) → identity → 302-to-/go (fleet) →
 //                   the APP's host waking (its row's computer; the company's freshest for an
-//                   app-less document) → compose — the module list is the person's (presence)   both
+//                   app-less document) → compose — the module list is the person's (presence);
+//                   nowhere to go (a label not this origin's, a slug not theirs, no route) → the
+//                   NOTICE document for a signed-in person (the chrome, 404), a stranger's bare page  both
 //   4c fetches      session-first: identity fails → 401 {} without Location → Host = path
 //                   company (fleet) → reserved company heads → 404                            both
 //   5  presence     registry.resolve → 404; registry.present → 404 (same as a stranger); the
@@ -115,6 +117,26 @@ const notice = (ctx, status, heading, text, fallback = null) => {
   return fallback ?? jsonR('document', status, {})
 }
 const jsonR = (lane, status, body, headers = {}) => r(lane, status, { body: JSON.stringify(body), headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers } })
+// THE NOTICE DOCUMENT (2026-09-17): a signed-in PERSON's GET navigation to nowhere gets the chrome — the rail, the account
+// menu — with `notice: {status, heading, text}` in the bootstrap and the route's status (404: nothing caches it as a page),
+// `x-atelier-notice: 1`; the client renders the Not here panel in the content area (client/client.jsx, the chrome contract's
+// `active.kind: 'notice'`, docs/MODULES.md). A stranger keeps the owner's bare page (`notice` above): there is no chrome to
+// draw for them. The page is the ORIGIN's company document (locally the first workspace) with no slug — nothing of the
+// address is read into it — and the words are one sentence for "does not exist" and "not yours" (CLAUDE.md §7)
+async function noticeDocument(ctx, company, status, heading, text) {
+  if (company && ctx.method === 'GET' && isNavigation(ctx)) {
+    const id = await resolvePerson(ctx)
+    if (id.ok) {
+      const doc = await composeFor(ctx, { company, slug: null, person: id.person, epoch: id.epoch, nonce: newNonce(), logout: id.logout ?? null, notice: { status, heading, text } })
+      ctx.metrics?.bootstrap(company, doc.bootstrapBytes)
+      ctx.ensureWatch?.(company)
+      return r('document', status, { body: doc.html, headers: doc.headers })
+    }
+  }
+  return notice(ctx, status, heading, text)
+}
+// the company whose chrome a notice document wears: the Host's (fleet); locally the first workspace, as documentCompany
+const noticeCompany = (ctx) => { if (ctx.hostCompany) return ctx.hostCompany; const list = ctx.providers.registry.companies?.() ?? []; return list.find((c) => c.id === 'global')?.id ?? list[0]?.id ?? null }
 
 // ---- the lanes
 export async function laneNormalise(ctx) {
@@ -184,9 +206,9 @@ export async function laneDocument(ctx) {
   if (ctx.route.kind !== 'document') return null
   if (ctx.upgrade) return jsonR('document', 426, {})
   const company = documentCompany(ctx)
-  if (!company) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')
+  if (!company) return noticeDocument(ctx, noticeCompany(ctx), 404, 'Not here', 'Nothing lives at this address.')
   const known = ctx.providers.registry.companies?.() ?? []          // local: the workspaces; fleet: [] (the Host gate decided)
-  if (known.length && !known.some((c) => c.id === company)) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')
+  if (known.length && !known.some((c) => c.id === company)) return noticeDocument(ctx, noticeCompany(ctx), 404, 'Not here', 'Nothing lives at this address.')
   const isRead = ctx.method === 'GET' || ctx.method === 'HEAD'
   const id = await resolvePerson(ctx)
   if (!id.ok) {
@@ -204,6 +226,10 @@ export async function laneDocument(ctx) {
   // never a probe of a pod that is none of their business (presence.mjs: the rail and the module list keep the same law)
   const row = ctx.route.slug ? await ctx.providers.registry.resolve(company, ctx.route.slug) : null
   const app = row && (await ctx.providers.registry.present(id.person.id, row.instance)) ? row : null
+  // A SLUG THAT IS NOT THE PERSON'S (2026-09-17): one the registry does not know and one they are not present on are ONE
+  // answer (C06: no existence or liveness oracle) — the notice document, 404, nothing of the slug in it. Before, the app-less
+  // document rendered 200 and the client tidied the URL away
+  if (ctx.route.slug && !app) return noticeDocument(ctx, company, 404, 'Not here', 'Nothing lives at this address.')
   const state = await hostState({ registry: ctx.providers.registry, hostLink: ctx.providers.hostLink, bus: ctx.providers.bus, company, app, marks: ctx.marks, now: ctx.now })
   const nonce = newNonce()
   // THE WAKING DOCUMENT (2026-09-17): a computer that is not serving still gets the document — the chrome, the rail, the
@@ -240,7 +266,7 @@ export const chromeShape = (registry, company, app = null) => {
 
 // composeFor(): the PERSON's rows (presence — a member outside an app's chat sees no trace of it, PLAN §4.1) + chrome
 // + the entry's relative imports (fetched once per (instance, rev)) → the document
-export async function composeFor(ctx, { company, slug, person, epoch, nonce, logout = null, waking = null }) {
+export async function composeFor(ctx, { company, slug, person, epoch, nonce, logout = null, waking = null, notice = null }) {
   const registry = ctx.providers.registry
   const rows = await visibleRows(registry, person.id, (await registry.apps(company)).filter((x) => !x.isChrome))
   const app = slug ? rows.find((x) => x.slug === slug && x.instance) : null
@@ -267,7 +293,7 @@ export async function composeFor(ctx, { company, slug, person, epoch, nonce, log
     } catch (e) { ctx.log?.(`places: ${e?.message ?? e}`); places = null }
   }
   const versions = (await ctx.assets.versions?.()) ?? {}   // the shell's own assets under their content hashes
-  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce, places, assetVersion: (u) => versions[u] ?? null, waking })
+  return renderDocument({ cfg: ctx.cfg, template: ctx.assets.template(), company, slug, person: { id: person.id, name: person.name, epoch: epoch ?? null, logout }, modules: rows, chrome, companies, portal: ctx.cfg.portalOrigin ?? null, entryImports, nonce, places, assetVersion: (u) => versions[u] ?? null, waking, notice })
 }
 async function entryImportsFor(ctx, { company, app, person }) {
   const key = `${app.instance}:${app.rev}`
@@ -479,6 +505,6 @@ export async function dispatch(ctx) {
     const out = await lane(ctx)
     if (out) return out
   }
-  if (!ctx.upgrade && ctx.method === 'GET' && isNavigation(ctx)) return notice(ctx, 404, 'Not here', 'Nothing lives at this address.')   // a person's navigation (review 2026-09-05)
+  if (!ctx.upgrade && ctx.method === 'GET' && isNavigation(ctx)) return noticeDocument(ctx, noticeCompany(ctx), 404, 'Not here', 'Nothing lives at this address.')   // a person's navigation (review 2026-09-05; the chrome document for a signed-in person, 2026-09-17)
   return ctx.upgrade ? jsonR('none', 426, {}) : jsonR('none', 404, {})
 }
