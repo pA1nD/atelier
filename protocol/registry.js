@@ -29,21 +29,29 @@ export const SLUG_RE = /^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$/
 // agent-contract-6; `modules`/`api`: B6 surprise 7) plus the `p-*` prefix for personal spaces.
 export const RESERVED_COMPANY_IDS = ['api', 'assets', 'modules', 'global', 'atelier', 'portal', 'apps', 'www', 'go']
 export const RESERVED_COMPANY_PREFIX = 'p-'      // personal spaces (OR4) are minted by the spine, never claimed
-export const META_ALLOW = ['name', 'icon', 'group', 'primary', 'color']   // module.json keys read at all (OR12 minus visibility, OR20)
-export const META_KEEP = ['name', 'icon', 'group', 'color']              // registrar-writable meta (§4.4)
+export const META_ALLOW = ['name', 'icon', 'group', 'primary', 'color', 'entries']   // module.json keys read at all (OR12 minus visibility, OR20; entries F20 2026-09-17)
+export const META_KEEP = ['name', 'icon', 'group', 'color', 'entries']   // registrar-writable meta (§4.4); entries = the app's pages in the rail
 export const META_REQUEST = ['primary']                                  // recorded as a request, never applied
 export const BODY_KEYS = ['slug', 'company', 'meta', 'computer']         // the PUT body; anything else is 400 unknown-field
 export const TOMBSTONE_MS = 24 * 3600 * 1000
-export const LIMITS = { name: 64, group: 32, iconCodepoints: 8, iconToken: 64 }
+export const LIMITS = { name: 64, group: 32, iconCodepoints: 8, iconToken: 64, entries: 12, entryName: 40 }
 
 const COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 const ICON_TOKEN_RE = /^[a-z0-9][a-z0-9:_./-]{0,63}$/
+const ENTRY_PATH_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/   // one path segment under the app (F20: `/<company>/<slug>/<path>`)
 const validators = {
   name: (v) => typeof v === 'string' && v.trim().length > 0 && v.length <= LIMITS.name,
   group: (v) => typeof v === 'string' && v.trim().length > 0 && v.length <= LIMITS.group,
   icon: (v) => typeof v === 'string' && v.length > 0 && ([...v].length <= LIMITS.iconCodepoints || ICON_TOKEN_RE.test(v)),
   color: (v) => typeof v === 'string' && COLOR_RE.test(v),
   primary: (v) => typeof v === 'boolean',
+  // ENTRIES (F20, 2026-09-17): the app's pages the rail lists under it — `[{name, path, icon?}]`, at most LIMITS.entries,
+  // nothing else on an entry; one bad entry invalidates the key (the rail then shows the app alone, never a half list)
+  entries: (v) => Array.isArray(v) && v.length <= LIMITS.entries && v.every((e) => e && typeof e === 'object' && !Array.isArray(e)
+    && Object.keys(e).every((k) => k === 'name' || k === 'path' || k === 'icon')
+    && typeof e.name === 'string' && e.name.trim().length > 0 && e.name.length <= LIMITS.entryName
+    && typeof e.path === 'string' && ENTRY_PATH_RE.test(e.path)
+    && (e.icon === undefined || validators.icon(e.icon))),
 }
 
 // ---- chrome releases (step 7 ship C, R-CHROME; LANES-CHROME decision 3): the digest rule the verb

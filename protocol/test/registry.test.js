@@ -10,7 +10,7 @@ for (const c of vectors.cases) {
 
 test('the split: META_KEEP ∪ META_REQUEST = META_ALLOW = OR12\'s module.json keys minus visibility (OR20)', () => {
   assert.deepEqual([...META_KEEP, ...META_REQUEST].sort(), [...META_ALLOW].sort())
-  assert.deepEqual([...META_ALLOW].sort(), ['color', 'group', 'icon', 'name', 'primary'])
+  assert.deepEqual([...META_ALLOW].sort(), ['color', 'entries', 'group', 'icon', 'name', 'primary'])
   assert.ok(!META_ALLOW.includes('visibility') && !BODY_KEYS.includes('visibility'), 'OR20: no visibility anywhere in the v1 contract')
   assert.equal(TOMBSTONE_MS, 24 * 3600 * 1000)
 })
