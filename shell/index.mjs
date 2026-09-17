@@ -57,7 +57,7 @@ export function createShell({ cfg, providers, log = () => {}, trace = null, asse
   server.on('upgrade', (req, socket, head) => upgrade(req, socket, head))
   server.keepAliveTimeout = 65_000
 
-  const base = (req) => ({ req, cfg, providers, gate, assets, chromeStore, events, metrics, log, now, entryCache, marks, waker, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, op: false, upgrade: false })
+  const base = (req) => ({ req, cfg, providers, gate, assets, chromeStore, events, metrics, log, now, entryCache, marks, waker, ensureWatch, method: req.method, rawUrl: req.url, hostCompany: null, identity: null, person: null, credential: 'none', company: null, upgrade: false })
 
   function finish(ctx, out, t0) {
     const res = ctx.res
