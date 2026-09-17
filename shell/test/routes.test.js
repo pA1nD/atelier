@@ -621,16 +621,20 @@ test('fleet: THE NOTICE DOCUMENT (2026-09-17) — a signed-in person\'s navigati
   }
   // the person's own pages are untouched
   assert.equal((await r.go('/acme/todo', { headers: NAV })).status, 200); assert.equal((await r.go('/acme/', { headers: NAV })).status, 200)
-  // a stranger: no chrome to draw — the owner's bare page when the shell has one, 404 {} without; an unknown slug is the sign-in redirect first (no oracle)
+  // A STRANGER (2026-09-18): every navigation to nowhere is the sign-in door — the same 302 to /go a right address gets, the
+  // path carried — never the bare Not here (a wrong address answering differently from a right one was a tell about the
+  // address grammar); a fetch keeps 404 {}. The owner's bare page (cfg.pageFor) is for a shell with no door (the loop breaker)
   r.cfg.pageFor = ({ status, heading, text }) => ({ body: `<h1>${heading}</h1><p>${text}</p><i>${status}</i>` })
-  for (const p of ['/beta/todo', '/!!!']) {
+  for (const [p, loc] of [['/beta/todo', 'https://portal.pa1nd.de/go/acme/beta/todo'], ['/acme/nonexistent', 'https://portal.pa1nd.de/go/acme/nonexistent'], ['/!!!', 'https://portal.pa1nd.de/go/acme/!!!']]) {
     const s = await r.go(p, { cookie: false, headers: NAV })
-    assert.equal(s.status, 404, p); assert.match(s.headers.get('content-type'), /text\/html/); assert.match(s.text, /<h1>Not here<\/h1><p>Nothing lives at this address\.<\/p><i>404<\/i>/); assert.ok(!s.text.includes('__ATELIER__'), `${p}: no chrome for a stranger`)
-    assert.equal(s.headers.get('x-atelier-notice'), null)
+    assert.equal(s.status, 302, p); assert.equal(s.headers.get('location'), loc, p); assert.equal(s.headers.get('x-atelier-notice'), null)
+    assert.equal((await r.go(p, { cookie: false })).status, p === '/acme/nonexistent' ? 302 : 404, `${p}: a fetch`)   // a fetch of a well-formed address gets the door as it always did
   }
-  assert.equal((await r.go('/acme/nonexistent', { cookie: false, headers: NAV })).status, 302)
+  // the loop breaker (the tried cookie): a stranger who bounced already gets the bare page, not another door
+  const tried = await r.go('/beta/todo', { cookie: false, headers: { ...NAV, cookie: '__Host-tried=1' } })
+  assert.equal(tried.status, 404); assert.match(tried.text, /<h1>Not here<\/h1><p>Nothing lives at this address\.<\/p><i>404<\/i>/); assert.ok(!tried.text.includes('__ATELIER__'), 'no chrome for a stranger')
   delete r.cfg.pageFor
-  assert.deepEqual((await r.go('/beta/todo', { cookie: false, headers: NAV })).json(), {})
+  assert.deepEqual((await r.go('/beta/todo', { cookie: false, headers: { ...NAV, cookie: '__Host-tried=1' } })).json(), {})
 })
 
 test('fleet: presence before liveness (C06) — a stopped pod of an app the person is NOT present on is invisible: the document and wake?app= answer exactly as for a nonexistent slug, and the pod is never probed', async (t) => {

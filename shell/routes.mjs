@@ -17,7 +17,7 @@
 //                   the APP's host waking (its row's computer; the company's freshest for an
 //                   app-less document) → compose — the module list is the person's (presence);
 //                   nowhere to go (a label not this origin's, a slug not theirs, no route) → the
-//                   NOTICE document for a signed-in person (the chrome, 404), a stranger's bare page  both
+//                   NOTICE document for a signed-in person (the chrome, 404), the sign-in door for a stranger  both
 //   4c fetches      session-first: identity fails → 401 {} without Location → Host = path
 //                   company (fleet) → reserved company heads → 404                            both
 //   5  presence     registry.resolve → 404; registry.present → 404 (same as a stranger); the
@@ -120,7 +120,8 @@ const jsonR = (lane, status, body, headers = {}) => r(lane, status, { body: JSON
 // THE NOTICE DOCUMENT (2026-09-17): a signed-in PERSON's GET navigation to nowhere gets the chrome — the rail, the account
 // menu — with `notice: {status, heading, text}` in the bootstrap and the route's status (404: nothing caches it as a page),
 // `x-atelier-notice: 1`; the client renders the Not here panel in the content area (client/client.jsx, the chrome contract's
-// `active.kind: 'notice'`, docs/MODULES.md). A stranger keeps the owner's bare page (`notice` above): there is no chrome to
+// `active.kind: 'notice'`, docs/MODULES.md). A stranger gets the sign-in door (below; the owner's bare page only when the door
+// refuses — the loop breaker): there is no chrome to
 // draw for them. The page is the ORIGIN's company document (locally the first workspace) with no slug — nothing of the
 // address is read into it — and the words are one sentence for "does not exist" and "not yours" (CLAUDE.md §7)
 async function noticeDocument(ctx, company, status, heading, text) {
@@ -132,6 +133,12 @@ async function noticeDocument(ctx, company, status, heading, text) {
       ctx.ensureWatch?.(company)
       return r('document', status, { body: doc.html, headers: doc.headers })
     }
+    // A STRANGER'S NAVIGATION TO NOWHERE IS THE SIGN-IN DOOR (2026-09-18): the same 302 to /go a right address gets, the path
+    // carried along — before, a wrong address (the label not the origin's, a path with no route) answered the bare Not here
+    // while a right one answered the door: a tell about the address grammar for someone who has not signed in (the operator's
+    // find on sidebar-nav). The notice waits behind the door: once signed in, the same address renders it in the chrome
+    const u = ctx.gate.unauthDocument?.(ctx.req, { company, path: ctx.path })
+    if (u?.status === 302) return r('document', 302, { headers: { location: u.location, 'cache-control': 'no-store', ...(u.cookie ? { 'set-cookie': u.cookie } : {}) } })
   }
   return notice(ctx, status, heading, text)
 }

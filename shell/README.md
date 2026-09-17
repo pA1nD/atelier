@@ -107,7 +107,7 @@ becomes a new revision, SIGTERM exits 0 and leaves neither host process behind.
 ```
 shell/
   index.mjs          createShell({cfg, providers, log, trace}) → {listen, close, handle, upgrade, start, stop}
-  routes.mjs         the lane list (normalise → https → Host → ticket → assets → documents → fetches → presence → Origin → authorize → proxy); the notice document (a signed-in person's navigation to nowhere: the chrome, `notice` in the bootstrap, 404 + x-atelier-notice; a stranger's bare page)
+  routes.mjs         the lane list (normalise → https → Host → ticket → assets → documents → fetches → presence → Origin → authorize → proxy); the notice document (a signed-in person's navigation to nowhere: the chrome, `notice` in the bootstrap, 404 + x-atelier-notice; a stranger gets the sign-in door)
   document.mjs       bootstrap (chromeApi 2), head order (sheet < UMDs < bootstrap < import map < preloads < client), CSP, escaping
   assets.mjs         /assets/{react,react-dom,client,chrome-resolve}.js — prod UMDs, bundled client.js, ETag/304, gzip; the document template
   proxy.mjs          protocol/headers both ways, counted bodies (413 past the cap), DIAL/TIMEOUT → 503 {waking:true}
