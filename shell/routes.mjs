@@ -28,8 +28,8 @@
 //   8  proxy        /api, /modules through hostLink to the APP's host (`registry.hostOf(row)` — a
 //                   company owns one host per chat it owns; waking marks are per host);
 //                   /_atelier/{ws,whoami,report,topics,rail,wake} (rail/topics: the person's rows);
-//                   /_atelier/metrics — the operator's exposition (shell/metrics.mjs), admitted to
-//                   an operator session or in local mode, 404 to anyone else                    both
+//                   /_atelier/metrics — the operator's exposition (shell/metrics.mjs), admitted in
+//                   local mode only (the operator's console), 404 to anyone in the fleet          both
 //   anything else → 404 {}; a non-GET/HEAD on a document route → 401 unauthenticated (no Location,
 //   no ticket mint), 405 with a session; an Upgrade anywhere but
 //   /_atelier/ws → 426. The 1.x-only surfaces (/_atelier/inflight, client-errors, takeover, observe)
@@ -372,9 +372,9 @@ export async function laneProxy(ctx) {
     return { lane: 'ws', handled: true }
   }
   if (ctx.upgrade) return jsonR('proxy', 426, {})
-  // the operator's exposition (shell/metrics.mjs, PLAN §4.5). Admitted to an operator session
-  // (`op: true` on the spine's session row, carried by the identity provider) and to local mode —
-  // where the shell IS the operator's process. To anyone else it is 404, not 403: the shell's law
+  // the operator's exposition (shell/metrics.mjs, PLAN §4.5). Admitted in local mode only — where
+  // the shell IS the operator's process; a fleet session is a person, never the operator (fleet v73).
+  // To anyone else it is 404, not 403: the shell's law
   // for a surface that is none of your business is the same 404 a stranger gets (lane 5), and an
   // unknown `/_atelier/<name>` is 404 already, so the route is not even an existence oracle.
   if (name === 'metrics' && ctx.method === 'GET') {

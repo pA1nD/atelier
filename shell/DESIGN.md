@@ -44,7 +44,7 @@ createShell({ cfg, providers: { identity, registry, gate, bus, hostLink }, log }
 ```js
 identity.kind                                   // 'fleet' | 'local'
 identity.resolve(req) → Promise<
-    { ok: true,  person: {id, name, claims}, credential: 'cookie' | 'none', epoch: number|null, op: boolean }
+    { ok: true,  person: {id, name, claims}, credential: 'cookie' | 'none', epoch: number|null }
   | { ok: false, reason: 'no-session' | 'revoked' }>
 identity.session(req) → the raw session id or null      // fleet: the `__Host-session` cookie value; local: null
 ```
@@ -53,7 +53,6 @@ identity.session(req) → the raw session id or null      // fleet: the `__Host-
 |---|---|---|
 | source | `__Host-session` cookie → spine store `{person, epoch, aud}`; `aud` must equal the request's company; `membership.checkSession(session, currentEpochOf)` — a bumped person epoch is `revoked` (§4.1 Cookie, §4.5) | constant: `{ok:true, person:{id:'local', name:'local', claims:{}}, credential:'none', epoch:null}` — the host's dev-shell principal (`registrar.principal` in local mode is the same `{id:'local', name:'local'}`) |
 | `credential` | `'cookie'` — this is what turns the Origin lane on (§1.3) | `'none'` — the Origin lane evaluates to a no-op by the **same rule** ("Origin iff the credential is a cookie", OR12); nothing is skipped here |
-| `op` | `true` on an operator session — the spine marks the row its operator door mints (`op` on the row, and `op: true` in the person's claims through the portal); it admits `GET /_atelier/metrics` (§3.6) and nothing else: rows, presence and the proxy are unchanged by it | `false` — local mode admits the metrics route by mode instead: the shell IS the operator's process |
 | what the shell stamps into the assertion | `person` from the session | `person` = the constant |
 | SKIPPED locally | the session store, the person epoch, the `aud` check — there is no session at all (identity is the process's) | |
 
