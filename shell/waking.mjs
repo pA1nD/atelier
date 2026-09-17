@@ -3,7 +3,7 @@
 // the 1 s probe failed) serves THE DOCUMENT with `waking` in its bootstrap (2026-09-17; before: a bare
 // page without the chrome): status 503, `Retry-After: 3`, `x-atelier-waking: 1`, `Cache-Control:
 // no-store` (document.mjs renderDocument). The client renders the chrome with a waking panel in the
-// content area and runs the poll (client/waking.js startWakePoll: 2 s → 10 s, the bounds below) of
+// content area and runs the poll (client/waking.js startWakePoll: 2 s → 5 s, the bounds below) of
 // `/_atelier/wake?company=<c>[&app=<slug>]`, reloading on `{ok:true}`. The poll PROBES and, when the host is not serving, WAKES it (step 7):
 // the route calls `registry.wake(chat, {by})` — the fleet provider's verb, the spine's
 // `POST /v1/computers/<chat>/wake {by:"session:<id>"}` door — at most once per chat per WAKE_CALL_MS

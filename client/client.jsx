@@ -212,7 +212,7 @@ function ChromeMissingFallback({ qid, err }) {
   return React.createElement('pre', { style: PRE_STYLE }, body);
 }
 
-// The company's computer is asleep or restarting: poll /_atelier/wake (2 s → 10 s; the shell wakes it on the first
+// The company's computer is asleep or restarting: poll /_atelier/wake (2 s → 5 s; the shell wakes it on the first
 // miss) and reload on ok. `app` = the active app's slug, so a multi-pod company's poll names the computer that is
 // asleep. Bounded like the shell's document (60 s locally, 180 s in the fleet — a cold pod birth; `boot.portal` says
 // which): past it the copy says the wake is taking unusually long; a tab coming back to the front probes again

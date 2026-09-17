@@ -3,12 +3,12 @@ import assert from 'node:assert/strict'
 import { nextWakeDelay, isWakingResponse, wakeUrl, startWakePoll, WAKE_MIN_MS, WAKE_MAX_MS, WAKE_GIVE_UP_MS, WAKE_GIVE_UP_FLEET_MS } from '../waking.js'
 import { fakeClock, fakeFetch } from './fakes.js'
 
-test('backoff 2 s → 10 s', () => {
+test('backoff 2 s → 5 s (the cap was 10 s until 2026-09-17: the tail after the host registered)', () => {
   const seq = []
   let d = null
   for (let i = 0; i < 6; i++) { d = nextWakeDelay(d); seq.push(d) }
-  assert.deepEqual(seq, [2000, 4000, 8000, 10000, 10000, 10000])
-  assert.equal(WAKE_MIN_MS, 2000); assert.equal(WAKE_MAX_MS, 10000)
+  assert.deepEqual(seq, [2000, 4000, 5000, 5000, 5000, 5000])
+  assert.equal(WAKE_MIN_MS, 2000); assert.equal(WAKE_MAX_MS, 5000)
 })
 
 test('isWakingResponse: 503 (+ x-atelier-waking) only', () => {
@@ -51,13 +51,13 @@ test('the poll gives up after WAKE_GIVE_UP_MS (the shell page\'s 60 s; 180 s in 
   startWakePoll({ fetch, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, company: 'acme', app: 'todo', reload: () => reloaded++, onTick: (t) => ticks.push(t.delay), onGiveUp: () => gaveUp++ })
   assert.equal(fetch.calls.length, 0)
   await clock.advance(59_999)
-  assert.equal(gaveUp, 0); assert.equal(fetch.calls.length, 7)                 // 2, 6, 14, 24, 34, 44, 54 s
+  assert.equal(gaveUp, 0); assert.equal(fetch.calls.length, 12)                // 2, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56 s
   await clock.advance(1)
-  assert.equal(fetch.calls.length, 7); assert.equal(gaveUp, 1)                 // the 60 s tick is the give-up: no probe with no budget left
-  assert.deepEqual(ticks, [2000, 4000, 8000, 10000, 10000, 10000, 10000])
+  assert.equal(fetch.calls.length, 12); assert.equal(gaveUp, 1)                // the 60 s tick is the give-up: no probe with no budget left
+  assert.deepEqual(ticks, [2000, 4000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000])   // the 12th probe at 56 s; the 4 s left schedule the give-up tick
   assert.equal(fetch.calls[0].url, '/_atelier/wake?company=acme&app=todo')
   await clock.advance(120_000)
-  assert.equal(fetch.calls.length, 7); assert.equal(gaveUp, 1); assert.equal(reloaded, 0); assert.equal(clock.pending(), 0)
+  assert.equal(fetch.calls.length, 12); assert.equal(gaveUp, 1); assert.equal(reloaded, 0); assert.equal(clock.pending(), 0)
   // a shorter deadline; stop() before it → no give-up callback either
   const f2 = fakeFetch([{ match: () => true, respond: () => ({ status: 200, body: { ok: false } }) }])
   let g2 = 0

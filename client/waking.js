@@ -1,7 +1,7 @@
 // waking.js — the client half of the waking page (shell/DESIGN.md §3.5, §4): a shell fetch that
 // answers `503 {waking:true}` (+ `x-atelier-waking: 1`) means the company's computer is asleep
 // or restarting. The client shows a plain fallback and polls `/_atelier/wake?company=<c>[&app=<slug>]`
-// with a 2 s → 10 s backoff; `{ok:true}` → full reload. The poll is BOUNDED like the shell's own
+// with a 2 s → 5 s backoff; `{ok:true}` → full reload. The poll is BOUNDED like the shell's own
 // waking page and on the same clocks: WAKE_GIVE_UP_MS locally, WAKE_GIVE_UP_FLEET_MS in the fleet
 // (the shell's constants of the same names, kept equal by hand; the bundle cannot import shell/) of
 // WALL-CLOCK time from the first miss, a slow probe counted; every probe fetch is aborted at the
@@ -13,7 +13,10 @@
 // are the app's own; this covers the shell's (`/_atelier/*` snapshots, the bundle imports).
 
 export const WAKE_MIN_MS = 2000
-export const WAKE_MAX_MS = 10000
+// 5 s (2026-09-17, measured on the sidebar-nav review app): the host registers ~30 ms after its container starts, and the
+// page only learns it at the next probe — a 10 s cap put 8 s of a cold open's tail there; a probe is one cached registry
+// read and a 1 s-bounded healthz
+export const WAKE_MAX_MS = 5000
 export const WAKE_GIVE_UP_MS = 60000
 export const WAKE_GIVE_UP_FLEET_MS = 180000
 
