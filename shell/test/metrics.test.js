@@ -136,9 +136,6 @@ async function rig(t, { mode = 'local' } = {}) {
   const { port } = await shell.listen({ port: 0, host: '127.0.0.1' })
   t.after(async () => { await shell.close(100); await host.stop().catch(() => {}) })
   const plain = mode === 'fleet' ? await stores.sessions.create({ person: { id: 'p1', name: 'Bayard' }, company: 'acme' }) : null
-  // the operator's session: what the spine's operator door mints (`op: true` on the row; the portal
-  // copies it into the person's claims too — both are read)
-  if (mode === 'fleet') stores.sessions.map.set('op-session', { person: { id: 'p9', name: 'Operator', claims: { op: true } }, epoch: 1, aud: 'acme', op: true })
   const go = (path, { method = 'GET', cookie = plain, headers = {} } = {}) => new Promise((resolve, reject) => {
     const h = { ...(mode === 'fleet' ? { host: 'acme.portal.pa1nd.de' } : {}), ...headers }
     if (cookie) h.cookie = `__Host-session=${cookie}`
@@ -151,7 +148,7 @@ async function rig(t, { mode = 'local' } = {}) {
   return { shell, host, registry, bus, port, go, company, hostPort: hp }
 }
 
-test('the gate: local mode is the operator; in the fleet only an op session, and a refusal is the same 404 as any unknown name', async (t) => {
+test('the gate: local mode is the operator\'s console; in the fleet every session is refused (v73: the portal carries no operator), and a refusal is the same 404 as any unknown name', async (t) => {
   const local = await rig(t)
   const open = await local.go('/_atelier/metrics')
   assert.equal(open.status, 200)
@@ -160,13 +157,10 @@ test('the gate: local mode is the operator; in the fleet only an op session, and
   const fleet = await rig(t, { mode: 'fleet' })
   assert.equal((await fleet.go('/_atelier/metrics')).status, 404)                              // a signed-in member
   assert.equal((await fleet.go('/_atelier/metrics', { cookie: null })).status, 401)            // no session at all
-  assert.equal((await fleet.go('/_atelier/nope', { cookie: 'op-session' })).status, 404)       // the shape a refusal borrows
-  assert.equal((await fleet.go('/_atelier/metrics', { method: 'HEAD', cookie: 'op-session' })).status, 404)   // GET only
-  assert.equal((await fleet.go('/_atelier/metrics', { method: 'POST', cookie: 'op-session' })).status, 403)   // the Origin lane refuses the write first
-  const op = await fleet.go('/_atelier/metrics', { cookie: 'op-session' })
-  assert.equal(op.status, 200)
-  assert.equal(op.type, CONTENT_TYPE)
-  for (const l of lines(op.text)) assert.match(l, EXPO_LINE, l)
+  assert.equal((await fleet.go('/_atelier/nope')).status, 404)                                  // the shape a refusal borrows
+  assert.equal((await fleet.go('/_atelier/metrics', { method: 'HEAD' })).status, 404)              // GET only
+  assert.equal((await fleet.go('/_atelier/metrics', { method: 'POST' })).status, 403)              // the Origin lane refuses the write first
+  for (const l of lines(open.text)) assert.match(l, EXPO_LINE, l)
 })
 
 test('the live rows: a proxied request per host, a waking host, the bootstrap bytes, socket frames, a gap and a resume', async (t) => {

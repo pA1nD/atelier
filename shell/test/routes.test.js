@@ -475,10 +475,9 @@ test('fleet: the wake call is FIRED, not awaited — /_atelier/wake answers with
   clock += 31_000
   assert.deepEqual((await r.go('/_atelier/wake?company=acme&app=notes')).json(), { ok: false, reason: 'DIAL' })
   assert.equal(calls, 1, 'past the window but still in flight: held — no second socket on a hung door')
-  r.stores.sessions.map.set('op-session', { person: { id: 'p9', name: 'Operator', claims: { op: true } }, epoch: 1, aud: 'acme', op: true })
-  const m = (await r.go('/_atelier/metrics', { cookie: false, headers: { cookie: '__Host-session=op-session' } })).text
-  assert.match(m, /atelier_shell_wake_calls_total\{outcome="held"\} 2\n/); assert.match(m, /atelier_shell_wake_in_flight 1\n/)
-  assert.match(m, /atelier_shell_wake_calls_total\{outcome="sent"\} 0\n/)
+  // (the counters — held 2, in flight 1, sent 0 — were read over /_atelier/metrics with an operator session; the fleet
+  // carries no operator since v73 and the route is the local console's only, so the wake behaviour above is the proof)
+  assert.equal((await r.go('/_atelier/metrics')).status, 404)
 })
 
 test('fleet: NEVER a wake for a DRAINING computer (a rollout, the 24 h sleep: the drain is a decision) — probe only, {ok:false, reason:draining}; nor for the app-less poll of a room the caller is not in (C5) — the freshest host is woken only for a caller present on its chat', async (t) => {

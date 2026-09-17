@@ -23,7 +23,7 @@ export function cookieValue(req, name) {
  * createIdentityFleet({ sessions, epochOf, company, logout })
  *   logout — the portal's sign-out door (e.g. '/logout', a POST); rides on the resolved identity so the shell's
  *   /_atelier/whoami can advertise it and the chrome's account menu offers Sign out. Optional.
- *   sessions.get(id) → Promise<{person:{id,name,claims?}, epoch, aud, op?} | null>
+ *   sessions.get(id) → Promise<{person:{id,name,claims?}, epoch, aud} | null>
  *   epochOf(personId) → integer | undefined         (the spine's person epoch)
  *   company(req) → the request's company (the registry's Host parse)
  */
@@ -40,7 +40,7 @@ export function createIdentityFleet({ sessions, epochOf, company, logout = null 
       if (!c || s.aud !== c) return { ok: false, reason: 'no-session' }     // a session for another company is no session here
       const chk = checkSession({ personId: s.person.id, epoch: s.epoch }, epochOf)
       if (!chk.ok) return { ok: false, reason: 'revoked' }
-      return { ok: true, person: { id: s.person.id, name: s.person.name, claims: s.person.claims ?? {} }, credential: 'cookie', epoch: s.epoch, op: s.op === true || s.person.claims?.op === true, logout }
+      return { ok: true, person: { id: s.person.id, name: s.person.name, claims: s.person.claims ?? {} }, credential: 'cookie', epoch: s.epoch, logout }   // a session is a person, never the operator (fleet v73)
     },
   }
 }

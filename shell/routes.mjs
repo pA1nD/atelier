@@ -287,7 +287,7 @@ export async function laneFetch(ctx) {
   if (k !== 'api' && k !== 'modules' && k !== 'atelier') return null
   const id = await resolvePerson(ctx)
   if (!id.ok) return jsonR('fetch', 401, {})
-  ctx.person = id.person; ctx.credential = id.credential; ctx.op = id.op === true
+  ctx.person = id.person; ctx.credential = id.credential
   if (k === 'atelier') {
     ctx.company = ctx.hostCompany ?? null
     if (!ctx.company) {
@@ -378,7 +378,7 @@ export async function laneProxy(ctx) {
   // for a surface that is none of your business is the same 404 a stranger gets (lane 5), and an
   // unknown `/_atelier/<name>` is 404 already, so the route is not even an existence oracle.
   if (name === 'metrics' && ctx.method === 'GET') {
-    if (!ctx.metrics || !(ctx.cfg.mode === 'local' || ctx.op)) return jsonR('proxy', 404, {})
+    if (!ctx.metrics || ctx.cfg.mode !== 'local') return jsonR('proxy', 404, {})   // the operator's console only — the fleet's portal carries no operator (v73)
     const body = ctx.metrics.render({ events: ctx.events, bus, registry, waker: ctx.waker })
     return r('proxy', 200, { body, headers: { 'content-type': METRICS_CONTENT_TYPE, 'cache-control': 'no-store' } })
   }
