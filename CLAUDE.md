@@ -8,11 +8,10 @@ a chat, depend on it. Full rules: fleet-infra `CLAUDE.md` §10.
    layout (`host/supervisor/lastgood.mjs`, `serve.mjs`, `bundle.mjs`), the shell contract (`ctx`, the WebSocket, the
    routes an app relies on), the kit, the module shape — is changed only as a named PLATFORM CHANGE: in the commit,
    the PR, the ship note, the board card. Never slipped into another track. Prefer a compatible design first.
-2. **The fleet never rebuilds an app.** A release carries the LAYOUT VERSION that built it; a host that finds an older
-   release serves one honest page and the spine nudges the app's agent to review and deploy again — once per app per
-   layout version. Bump the layout version only when the stored shape changes; a ship that leaves it alone nudges
-   nobody.
-3. **A platform change ships with its migration story**: the version bumped, the nudge in place, a test that a
-   release from the previous layout is detected and answered honestly, and the count of apps it touches.
+2. **The fleet never rebuilds an app silently.** A release carries the LAYOUT VERSION that built it (today 1,
+   everywhere). Bump it only when the stored shape changes, and then the change says out loud how the apps' agents
+   are told to review and deploy again; the machine does not rewrite apps on its own.
+3. **A platform change ships with its migration story**: the version bumped when the stored shape moves, a test that
+   a release from the previous layout still serves (or is detected), and the count of apps it touches.
 4. The fleet client is `client/client.jsx`; the top-level `client.jsx` is the local shell's. Work in a worktree
    (`.claude/worktrees/<branch>`); the operator's local atelier runs from the repo root.
