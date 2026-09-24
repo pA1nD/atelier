@@ -4,9 +4,11 @@
 // One `<link id="atelier-chrome-styles">` is baked into the document by the shell (the active
 // app's sheet, or the chrome's on an app-less route). On every navigation the client asks for
 // the sheet of the new route; the new link is inserted right after the old one, the id moves to
-// it at once, and the old link is dropped only when the new one has loaded (or errored — a
-// build that 500s must not strand two links). An equal href is a no-op. Pure over an injected
-// document so it runs under node with a fake DOM.
+// it at once, and the old link is dropped only when the new one has LOADED. A new sheet that
+// errors (a host down, a build that 500s) is dropped instead and the old link keeps the id — a page
+// with its previous sheet beats a page with none (2026-09-24, a cold computer's first visitor saw the
+// bare document). An equal href is a no-op. Pure over an injected document so it runs under node
+// with a fake DOM.
 
 export const SHEET_ID = 'atelier-chrome-styles'
 
@@ -39,9 +41,8 @@ export function swapSheet(doc, href, { id = SHEET_ID, now = () => Date.now() } =
   const next = cur.cloneNode(false)
   next.setAttribute('href', href)
   const done = new Promise((resolve) => {
-    const finish = (ok) => { try { cur.remove() } catch {} resolve({ ok, ms: now() - t0 }) }
-    next.addEventListener('load', () => finish(true))
-    next.addEventListener('error', () => finish(false))
+    next.addEventListener('load', () => { try { cur.remove() } catch {} resolve({ ok: true, ms: now() - t0 }) })
+    next.addEventListener('error', () => { try { next.remove() } catch {} cur.setAttribute('id', id); resolve({ ok: false, ms: now() - t0 }) })   // the old sheet stays, and owns the id again
   })
   cur.removeAttribute('id')                                   // the replacement owns the id from here
   cur.parentNode.insertBefore(next, cur.nextSibling)

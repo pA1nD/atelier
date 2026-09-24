@@ -72,3 +72,21 @@ test('swap: two swaps in flight chain to exactly one link at rest', async () => 
   assert.equal(doc.links()[0].getAttribute('href'), '/c.css?rev=3')
   assert.equal(doc.links()[0].id, SHEET_ID)
 })
+
+test('a new sheet that ERRORS is dropped and the old one keeps the id — never a page with no sheet (2026-09-24)', async () => {
+  const doc = docWithSheet('/_chrome/d/chrome.css')
+  const r = swapSheet(doc, '/modules/acme/todo/styles.css?rev=3')
+  assert.equal(r.swapped, true)
+  const links = () => doc.links().map((e) => [e.getAttribute('href'), e.getAttribute('id')])
+  assert.deepEqual(links(), [['/_chrome/d/chrome.css', null], ['/modules/acme/todo/styles.css?rev=3', SHEET_ID]])
+  doc.links().find((e) => e.getAttribute('href') === '/modules/acme/todo/styles.css?rev=3').fire('error')
+  const out = await r.done
+  assert.equal(out.ok, false)
+  assert.deepEqual(links(), [['/_chrome/d/chrome.css', SHEET_ID]], 'the failed link is gone, the old sheet owns the id again')
+  // and a later swap to a sheet that loads still works off the restored id
+  const r2 = swapSheet(doc, '/modules/acme/todo/styles.css?rev=4')
+  assert.equal(r2.swapped, true)
+  doc.links().find((e) => e.getAttribute('href') === '/modules/acme/todo/styles.css?rev=4').fire('load')
+  assert.equal((await r2.done).ok, true)
+  assert.deepEqual(links(), [['/modules/acme/todo/styles.css?rev=4', SHEET_ID]])
+})

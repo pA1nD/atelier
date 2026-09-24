@@ -446,13 +446,17 @@ function App() {
   useEffect(() => { if (activeMod?.hasFrontend && !bootWaking) loadOne(activeMod.qid); }, [activeQid]);   // waking: nothing of the app is imported until the reload
 
   // The per-app sheet: on every navigation the link moves to the route's sheet (the initial
-  // document already carries it — an equal href is a no-op).
+  // document already carries it — an equal href is a no-op). NOT WHILE WAKING (2026-09-24, Bella Italia): the shell
+  // composed the waking document with the chrome's sheet on purpose — the app's host is not serving, so its sheet can
+  // only fail, and a first-time browser (nothing cached) was left with no sheet at all until the reload. The page
+  // reloads itself when the host answers; the app's sheet comes with that document.
   useEffect(() => {
+    if (waking) return;
     const href = activeMod
       ? sheetHref({ company: activeMod.workspace, slug: activeMod.id, rev: revRef.current.get(activeMod.qid) ?? activeMod.rev }, { qid: chromeQid, rev: chromeRev, base: chromeBase })
       : sheetHref(null, { qid: chromeQid, rev: chromeRev, base: chromeBase });
     if (href) swapSheet(document, href);
-  }, [activeQid]);
+  }, [activeQid, waking]);
 
   // A URL that points nowhere → tidy back to a real place (1.x behaviour); the notice document keeps its address.
   useEffect(() => {
